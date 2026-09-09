@@ -537,7 +537,11 @@ def register_deck_browser_button() -> None:
                             if pkg is None:
                                 _debug_log("injectors.bridge: package module not found in sys.modules")
                             else:
-                                open_cb = getattr(pkg, "_on_main_menu", None)
+                                # Route through the active adapter's menu opener when
+                                # present (3.0 routing); fall back to Classic.
+                                open_cb = getattr(pkg, "runtime_menu_opener", None)
+                                if not callable(open_cb):
+                                    open_cb = getattr(pkg, "_on_main_menu", None)
                                 if callable(open_cb):
                                     def _do_open():
                                         try:

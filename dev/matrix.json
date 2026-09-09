@@ -1,0 +1,70 @@
+{
+  "required_targets": [
+    {
+      "os": "macos",
+      "anki": "23.10",
+      "qt": "6"
+    },
+    {
+      "os": "macos",
+      "anki": "26.08.1",
+      "qt": "6"
+    },
+    {
+      "os": "linux",
+      "anki": "23.10",
+      "qt": "5"
+    },
+    {
+      "os": "linux",
+      "anki": "23.10",
+      "qt": "6"
+    },
+    {
+      "os": "linux",
+      "anki": "26.08.1",
+      "qt": "6"
+    },
+    {
+      "os": "windows",
+      "anki": "23.10",
+      "qt": "6"
+    },
+    {
+      "os": "windows",
+      "anki": "26.08.1",
+      "qt": "6"
+    }
+  ],
+  "records": [
+    {
+      "os": "macos",
+      "arch": "arm64",
+      "anki": "26.08.1",
+      "qt": "6",
+      "python": "3.13 (Anki bundled)",
+      "artifact_sha256": "4260f92a4565c5618481ca9b53df082f5942fe53a82b2c49eee52e14ccdd93a7",
+      "command": "python3 dev.py test --suite e2e --anki 26.08.1 --qt 6 --journey fresh (+ upgrade/undo/catchup green)",
+      "date": "2026-09-09",
+      "passed": true,
+      "assertions": "fresh 10/10 (chooser radio verified, evolved persist, seed 5, all introduced answered via real reviewer, 5 journal awards, menu opener); 2 screenshots. Sibling journeys on same artifact: upgrade 4-phase, undo, catchup all PASS.",
+      "evidence_path": "artifacts/verification/e2e-macos-26.08.1-qt6/",
+      "note": ""
+    },
+    {
+      "os": "macos",
+      "arch": "arm64",
+      "anki": "23.10",
+      "qt": "6",
+      "python": "3.9 (Anki bundled)",
+      "artifact_sha256": "4260f92a4565c5618481ca9b53df082f5942fe53a82b2c49eee52e14ccdd93a7",
+      "command": "python3 dev.py test --suite e2e --anki 23.10 --qt 6 --journey fresh (+ upgrade/undo/catchup green)",
+      "date": "2026-09-09",
+      "passed": true,
+      "assertions": "fresh 10/10 (chooser radio verified, evolved persist, seed 5, all introduced answered via real reviewer, 5 journal awards, menu opener); 2 screenshots. Sibling journeys on same artifact: upgrade 4-phase, undo, catchup all PASS.",
+      "evidence_path": "artifacts/verification/e2e-macos-23.10-qt6/",
+      "note": ""
+    }
+  ],
+  "note": "Every record needs OS/arch, Python/Anki/Qt, archive SHA-256, command or exact manual steps, date, assertions, evidence paths. verify-evidence rejects missing targets, hash mismatches, and claimed passes with no record. Fleuron VM results do not count."
+}

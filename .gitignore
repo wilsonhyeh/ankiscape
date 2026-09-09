@@ -28,3 +28,14 @@ meta.json
 *.ankiaddon
 dist/
 build/
+
+# 3.0 isolated dev runtime (synthetic only; never personal data)
+.dev/
+artifacts/
+.supabase/
+.env
+.env.local
+
+# Supabase CLI local state (may embed local dev keys)
+server/supabase/.branches/
+server/supabase/.temp/

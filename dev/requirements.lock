@@ -1,0 +1,5 @@
+# Pinned dev dependencies (heavy dev/test only; never end-user deps).
+# Client HTTP remains stdlib urllib. Install: pip3 install -r dev/requirements.lock
+# Versions recorded 2026-09-09; update with reason if a demonstrated
+# incompatibility requires a replacement.
+supabase==2.115.0  # CLI installed separately; this row records the pin

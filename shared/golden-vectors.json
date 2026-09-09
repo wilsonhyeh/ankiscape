@@ -1,0 +1,38 @@
+{
+  "rules_version": 1,
+  "note": "Byte-for-byte hash vectors + XP vectors shared by Python and SQL tests. XP values are decimal micro-XP strings (1 XP = 1,000,000).",
+  "draw_vectors": [
+    {"label": "draw_input_format", "input": [1, "game-1", "abc123", "action"],
+     "sha256_prefix12": "computed-by-test", "comment": "compact JSON [1,\"game-1\",\"abc123\",\"action\"], no spaces"}
+  ],
+  "xp_vectors": [
+    {"case": "redwood_success_no_gem", "skill": "woodcutting", "resource": "Redwood",
+     "comment": "380 base x tier9 mult 1.40 = 532 XP before any other effects",
+     "base_xp": 380, "tier": 9, "expected_xp_micro": "532000000"},
+    {"case": "redwood_fail", "skill": "woodcutting", "resource": "Redwood",
+     "comment": "failed gather = 25% of 532 = 133 XP",
+     "base_xp": 380, "tier": 9, "failed": true, "expected_xp_micro": "133000000"},
+    {"case": "rune_essence_success", "skill": "mining", "resource": "Rune essence",
+     "base_xp": 5.0, "tier": 1, "expected_xp_micro": "5000000"},
+    {"case": "shrimp_fish_success", "skill": "fishing", "resource": "Shrimp",
+     "base_xp": 10, "tier": 1, "expected_xp_micro": "10000000"},
+    {"case": "shrimp_cook_success", "skill": "cooking", "resource": "Shrimp",
+     "base_xp": 13, "tier": 1, "expected_xp_micro": "13000000"},
+    {"case": "shrimp_cook_burn", "skill": "cooking", "resource": "Shrimp", "burned": true,
+     "comment": "burn = 25% of 13 = 3.25 XP",
+     "base_xp": 13, "tier": 1, "expected_xp_micro": "3250000"},
+    {"case": "soft_clay_craft", "skill": "crafting", "resource": "Soft clay",
+     "comment": "legacy zero fixed to base 1, tier1 mult 1.00 = 1 XP",
+     "base_xp": 1, "tier": 1, "expected_xp_micro": "1000000"},
+    {"case": "bronze_bar_smelt", "skill": "smithing", "resource": "Bronze bar",
+     "comment": "6.2 base x tier1 mult 1.00 = 6.2 XP",
+     "base_xp": 6.2, "tier": 1, "expected_xp_micro": "6200000"},
+    {"case": "practice_no_materials", "skill": "smithing", "comment": "1 XP practice, nothing consumed",
+     "expected_xp_micro": "1000000"},
+    {"case": "level_thresholds", "comment": "83 XP is level 2; 0/82 stay level 1",
+     "checks": [
+       {"xp": "0", "level": 1}, {"xp": "82000000", "level": 1},
+       {"xp": "83000000", "level": 2}, {"xp": "13034431000000", "level": 99}
+     ]}
+  ]
+}

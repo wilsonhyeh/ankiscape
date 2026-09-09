@@ -1,0 +1,775 @@
+#!/usr/bin/env python3
+"""dev.py - One-command synthetic Anki playground + verification orchestrator.
+
+All generated state goes under gitignored .dev/; reports under artifacts/.
+Never touches personal Anki data or production services. No hosted project
+link, real SMTP credentials, or AnkiWeb login in dev mode.
+
+Commands:
+  python3 dev.py setup
+  python3 dev.py launch --scenario fresh
+  python3 dev.py reset --scenario midgame
+  python3 dev.py test --suite python
+  python3 dev.py test --suite backend
+  python3 dev.py test --suite e2e --anki 26.8.1 --qt 6
+  python3 dev.py verify --release
+  python3 dev.py verify-evidence --matrix dev/matrix.json
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+DEV_DIR = os.path.join(ROOT, ".dev")
+ANKI_BASE = os.path.join(DEV_DIR, "anki")
+MARKER = ".ankiscape-dev-marker"
+ARTIFACTS = os.path.join(ROOT, "artifacts", "verification")
+
+SCENARIOS = ("fresh", "midgame", "endgame", "classic-upgrade")
+
+
+def _fail(msg: str, hint: str = "") -> int:
+    print(f"dev: ERROR: {msg}", file=sys.stderr)
+    if hint:
+        print(f"dev: hint: {hint}", file=sys.stderr)
+    return 1
+
+
+def _run(cmd, **kwargs):
+    print(f"dev: $ {' '.join(cmd)}")
+    return subprocess.run(cmd, **kwargs)
+
+
+def cmd_setup(_args) -> int:
+    os.makedirs(DEV_DIR, exist_ok=True)
+    os.makedirs(ARTIFACTS, exist_ok=True)
+    print(f"dev: python {sys.version.split()[0]} at {sys.executable}")
+    # Dev-only lockfile install (never end-user deps).
+    lock = os.path.join(ROOT, "dev", "requirements.lock")
+    if os.path.exists(lock):
+        print("dev: dev lockfile present; install with: pip3 install -r dev/requirements.lock")
+    else:
+        print("dev: no dev/requirements.lock yet (backend task pins it)")
+    for tool, probe in (("supabase", ["supabase", "--version"]),
+                        ("docker", ["docker", "info"])):
+        try:
+            proc = subprocess.run(probe, capture_output=True, text=True, timeout=30)
+            ok = proc.returncode == 0
+            print(f"dev: {tool}: {'ok' if ok else 'UNAVAILABLE'}")
+            if not ok:
+                print((proc.stderr or proc.stdout or "")[:500])
+        except Exception as exc:
+            print(f"dev: {tool}: UNAVAILABLE ({exc!r})")
+    anki_app = "/Applications/Anki.app"
+    print(f"dev: Anki.app: {'present' if os.path.exists(anki_app) else 'MISSING'}")
+    print("dev: setup complete. Missing native deps are reported above, not hidden.")
+    return 0
+
+
+def _scenario_dir(scenario: str) -> str:
+    return os.path.join(ANKI_BASE, scenario)
+
+
+def _write_marker(scenario_dir: str, scenario: str) -> None:
+    with open(os.path.join(scenario_dir, MARKER), "w", encoding="utf-8") as fh:
+        fh.write(f"ankiscape-dev scenario={scenario} created={time.time()}\n")
+
+
+def _check_marker(scenario_dir: str) -> bool:
+    return os.path.isfile(os.path.join(scenario_dir, MARKER))
+
+
+def _reject_personal_paths(path: str) -> bool:
+    """True if path looks like a real Anki base (never delete those)."""
+    realpath = os.path.realpath(path)
+    home = os.path.expanduser("~")
+    try:
+        common = os.path.commonpath([realpath, os.path.realpath(DEV_DIR)])
+        inside_dev = common == os.path.realpath(DEV_DIR)
+    except ValueError:
+        inside_dev = False
+    if not inside_dev:
+        return True
+    for personal in (os.path.join(home, "Library", "Application Support", "Anki2"),
+                     os.path.join(home, ".local", "share", "Anki2")):
+        try:
+            if os.path.commonpath([realpath, personal]) == personal:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _norm_version(version: str):
+    try:
+        return tuple(int(part) for part in str(version).split("."))
+    except ValueError:
+        return (str(version),)
+
+
+def _matches_version(requested: str, have: str) -> bool:
+    want, got = _norm_version(requested), _norm_version(have)
+    return len(got) >= len(want) and got[:len(want)] == want
+
+
+def _pick_app(anki: str):
+    """Pick a local Anki.app matching the requested version prefix.
+
+    Returns (app_path, binary_path, installed_version) or ("", "", "?").
+    """
+    import plistlib
+
+    candidates = ["/Applications/Anki.app", "/Applications/Anki 23.10.app"]
+    first = ("", "", "?")
+    for cand in candidates:
+        exe = os.path.join(cand, "Contents", "MacOS", "Anki")
+        if not os.path.exists(exe):
+            continue
+        try:
+            with open(os.path.join(cand, "Contents", "Info.plist"), "rb") as fh:
+                ver = plistlib.load(fh).get("CFBundleShortVersionString", "?")
+        except OSError:
+            ver = "?"
+        if first[1] == "":
+            first = (cand, exe, ver)
+        if anki and _matches_version(anki, ver):
+            return cand, exe, ver
+    return ("", "", "?") if anki else first
+
+
+def _refuse_running_anki(context: str) -> bool:
+    """True when launch must not proceed. A running Anki would swallow -b/-p
+    via single-instance forwarding and open the PERSONAL profile instead."""
+    try:
+        ps = subprocess.run(["pgrep", "-x", "Anki"], capture_output=True,
+                            text=True, timeout=10)
+        if (ps.stdout or "").strip():
+            print(f"dev: ERROR: an Anki process is already running ({context})",
+                  file=sys.stderr)
+            print("dev: hint: close your personal Anki first; dev never drives it",
+                  file=sys.stderr)
+            return True
+    except FileNotFoundError:
+        pass
+    return False
+
+
+def _install_addon(addons_dir: str, *, symlink: bool) -> str:
+    """Install the packaged add-on (zip, like a user) or a source symlink
+    (manual dev loop only). Returns 'zip' or 'symlink'."""
+    import zipfile
+
+    dest = os.path.join(addons_dir, "ankiscape")
+    if os.path.islink(dest) or os.path.exists(dest):
+        if os.path.islink(dest):
+            os.unlink(dest)
+        else:
+            shutil.rmtree(dest)
+    if symlink:
+        os.symlink(ROOT, dest)
+        return "symlink"
+    proc = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "build_addon.py")],
+                          capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError(f"package build failed: {(proc.stderr or proc.stdout)[:400]}")
+    import json as _json
+    with open(os.path.join(ROOT, "dist", "manifest.json"), encoding="utf-8") as fh:
+        record = _json.load(fh)
+    with zipfile.ZipFile(os.path.join(ROOT, "dist", record["archive"])) as archive:
+        archive.extractall(dest)
+    return f"zip {record['archive']} ({record['artifact_sha256'][:12]}...)"
+
+
+def cmd_launch(args) -> int:
+    scenario = args.scenario
+    if scenario not in SCENARIOS:
+        return _fail(f"unknown scenario {scenario!r}", f"choose from {SCENARIOS}")
+    if _refuse_running_anki(f"launch --scenario {scenario}"):
+        return 1
+    _app, anki_bin, installed = _pick_app(getattr(args, "anki", ""))
+    if not anki_bin:
+        return _fail(f"no installed Anki.app matches {getattr(args, 'anki', '')!r}",
+                     "install the target first")
+    sdir = _scenario_dir(scenario)
+    if _reject_personal_paths(sdir):
+        return _fail(f"refusing to use path outside .dev: {sdir}")
+    if getattr(args, "fresh", False):
+        shutil.rmtree(sdir, ignore_errors=True)
+        if os.path.exists(sdir):
+            return _fail(f"could not wipe {sdir}; a process still holds it")
+    os.makedirs(sdir, exist_ok=True)
+    _write_marker(sdir, scenario)
+    profile = f"dev-{scenario}"
+    _ensure_e2e_profile(sdir, profile)
+    addons = os.path.join(sdir, "addons21")
+    os.makedirs(addons, exist_ok=True)
+    try:
+        installed_kind = _install_addon(
+            addons, symlink=bool(getattr(args, "symlink", False)))
+    except RuntimeError as exc:
+        return _fail(str(exc))
+    # Dev-only seeder (never shipped).
+    seed_dest = os.path.join(addons, "seed_addon")
+    if os.path.exists(seed_dest):
+        shutil.rmtree(seed_dest)
+    shutil.copytree(os.path.join(ROOT, "dev", "seed_addon"), seed_dest)
+    seed_payload = _scenario_seed(scenario, profile)
+    with open(os.path.join(sdir, "seed.json"), "w", encoding="utf-8") as fh:
+        json.dump(seed_payload, fh)
+    if os.path.exists(os.path.join(sdir, "seed-done.json")):
+        os.unlink(os.path.join(sdir, "seed-done.json"))
+    if getattr(args, "no_anki", False):
+        print(f"dev: scenario '{scenario}' prepared at {sdir} (Anki launch skipped)")
+        _print_scenario_summary(seed_payload)
+        return 0
+    env = dict(os.environ, ANKISCAPE_DEV=scenario,
+               ANKISCAPE_DEV_BACKEND=os.environ.get("ANKISCAPE_DEV_BACKEND", "local"))
+    print(f"dev: [DEV {scenario}] Anki {installed} ({installed_kind}) -b {sdir} -p {profile}")
+    _print_scenario_summary(seed_payload)
+    print("dev: synthetic data only; personal Anki untouched. Close Anki before reset.")
+    try:
+        proc = subprocess.Popen([anki_bin, "-b", sdir, "-p", profile], env=env)
+    except Exception as exc:
+        return _fail(f"could not launch Anki: {exc!r}")
+    print(f"dev: Anki pid={proc.pid}")
+    return 0
+
+
+def _print_scenario_summary(seed_payload: dict) -> None:
+    for line in seed_payload.get("summary", []):
+        print(f"dev:   {line}")
+
+
+def _load_fixtures():
+    """Load dev/fixtures.py by path (dev.py shadows the dev/ directory)."""
+    import importlib.util
+
+    path = os.path.join(ROOT, "dev", "fixtures.py")
+    spec = importlib.util.spec_from_file_location("ankiscape_dev_fixtures", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _scenario_seed(scenario: str, profile: str) -> dict:
+    """Build the seed.json payload (and pre-built journal files) per scenario."""
+    import uuid as _uuid
+
+    base = {"scenario": scenario, "profile": profile, "synthetic": True,
+            "seeded_at": time.time(), "summary": []}
+    if scenario == "fresh":
+        base["cards"] = 20
+        base["summary"] = ["empty profile; first load shows the Classic/Evolved chooser",
+                           "20 Dev Deck cards ready to review"]
+        return base
+    if scenario == "classic-upgrade":
+        fixtures = _load_fixtures()
+        base["cards"] = 100
+        base["classic"] = {"player_data": fixtures.classic_player_data(),
+                           "current_skill": "Mining"}
+        base["summary"] = ["Classic 2.0.2-shape data: Mining 23, Woodcutting 17, "
+                           "320 Rune essence banked; chooser on load; Evolved starts fresh"]
+        return base
+    # Evolved scenarios: deterministic game identity (identical after reset).
+    game_uuid = str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"ankiscape-dev-{scenario}"))
+    activated_at = 1785542400  # 2026-08-01T00:00:00Z fixed baseline
+    fixtures = _load_fixtures()
+    if scenario == "midgame":
+        ops = fixtures.midgame_ops(game_uuid)
+        cards, preset = 150, "mining"
+        blurb = "midgame"
+    else:
+        ops = fixtures.endgame_ops(game_uuid)
+        cards, preset = 650, "mining"
+        blurb = "endgame"
+    base["cards"] = cards
+    base["evolved"] = {
+        "game_uuid": game_uuid, "activated_at": activated_at,
+        "device_id": "dev-seed", "preset": preset,
+        "selections": {"mining": "Iron ore", "woodcutting": "Oak",
+                       "smithing": "Steel bar", "crafting": "Gold ring",
+                       "fishing": "Trout", "cooking": "Trout"},
+    }
+    # Pre-build the journal (pure Python; keeps profile load fast).
+    sys.path.insert(0, ROOT)
+    try:
+        from evolved.journal import Journal, journal_path_for_profile
+        from evolved.reducer import replay
+        from evolved.data import load_rules
+        journal = Journal(journal_path_for_profile(
+            os.path.join(_scenario_dir(scenario), profile), game_uuid))
+        try:
+            observations = [
+                {"review_key": op["payload"]["review_key"],
+                 "revlog_id": 1000000 + i, "card_id": 2000000 + i,
+                 "fingerprint": op["payload"]["review_key"]}
+                for i, op in enumerate(ops)]
+            counts = journal.import_game(
+                game_uuid, {"operations": ops, "observations": observations})
+        finally:
+            journal.close()
+        rules = load_rules()
+        state = replay(ops, rules, game_uuid)
+        levels = " ".join(f"{skill[:4]}:{level}"
+                          for skill, level in state["levels"].items())
+        base["summary"] = [
+            f"{blurb}: journal {len(ops)} ops ({counts['operations']} new this run), "
+            f"total level {state['total_level']} ({levels})",
+            f"{len(state['achievements'])} achievements, "
+            f"{sum(1 for _v in state['inventory'].values() if _v)} banked items, "
+            f"{cards} Dev Deck cards",
+        ]
+    finally:
+        try:
+            sys.path.remove(ROOT)
+        except ValueError:
+            pass
+    return base
+
+
+def cmd_reset(args) -> int:
+    scenario = args.scenario
+    sdir = _scenario_dir(scenario)
+    real = os.path.realpath(sdir)
+    if os.path.islink(sdir) or (os.path.exists(sdir) and os.path.realpath(sdir) != os.path.abspath(sdir)
+                                and False):
+        return _fail("symlink escape rejected")
+    if _reject_personal_paths(sdir):
+        return _fail(f"refusing to reset outside .dev: {sdir}")
+    if not _check_marker(sdir):
+        return _fail(f"no dev marker in {sdir}; refusing to delete",
+                     "only reset scenarios created by dev.py launch")
+    lock = os.path.join(sdir, "collection.anki2-journal")
+    if os.path.exists(lock):
+        return _fail("collection looks open/locked; close Anki first")
+    # Refuse if Anki seems to run with this base (owned-process check only).
+    try:
+        ps = subprocess.run(["pgrep", "-af", "Anki"], capture_output=True, text=True, timeout=10)
+        if real in (ps.stdout or ""):
+            return _fail("an Anki process references this base; close it first")
+    except FileNotFoundError:
+        pass
+    shutil.rmtree(sdir, ignore_errors=False)
+    os.makedirs(sdir, exist_ok=True)
+    _write_marker(sdir, scenario)
+    print(f"dev: scenario '{scenario}' reset to identical seed state")
+    return 0
+
+
+def cmd_test(args) -> int:
+    suite = args.suite
+    if suite == "python":
+        proc = _run([sys.executable, os.path.join(ROOT, "run_tests.py")])
+        return proc.returncode
+    if suite == "backend":
+        return _backend_suite()
+    if suite == "e2e":
+        return _e2e_suite(getattr(args, "anki", ""), getattr(args, "qt", ""),
+                          getattr(args, "journey", "fresh"))
+    return _fail(f"unknown suite {suite!r}")
+
+
+def _backend_suite() -> int:
+    # Real local Supabase stack required; missing Docker is failure, not skip.
+    info = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=30)
+    if info.returncode != 0:
+        return _fail("Docker daemon unavailable; backend suite cannot run",
+                     "start Docker Desktop safely (no factory reset) and retry; "
+                     f"docker info: {(info.stderr or info.stdout)[:300]}")
+    server_dir = os.path.join(ROOT, "server")
+    # Clean migration reset twice (idempotency), then pgTAP, then live smoke.
+    for i in (1, 2):
+        proc = subprocess.run(["supabase", "db", "reset"], cwd=server_dir, timeout=300)
+        if proc.returncode != 0:
+            print(f"dev: (backend) db reset #{i} FAILED", file=sys.stderr)
+            return 1
+    proc = subprocess.run(["supabase", "test", "db"], cwd=server_dir, timeout=300)
+    if proc.returncode != 0:
+        print("dev: (backend) pgTAP FAILED", file=sys.stderr)
+        return 1
+    proc = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "auth_smoke.py")],
+                          cwd=ROOT, timeout=600)
+    if proc.returncode != 0:
+        print("dev: (backend) auth smoke FAILED", file=sys.stderr)
+        return 1
+    print("dev: (backend) reset x2 + pgTAP + live Auth/RPC smoke PASS")
+    return 0
+
+
+def _ensure_e2e_profile(base: str, profile: str) -> None:
+    """Pre-create an Anki profile so -p loads it directly.
+
+    Replicates ProfileManager.create() (Anki 26.08.1, qt/aqt/profiles.py):
+    insert pickle-protocol-4 of the default profileConf dict into the
+    prefs21.db profiles table. All values are plain types, so Anki's own
+    unpickler reads it without Qt involvement. Anki will NOT auto-create a
+    -p profile (it shows the profile manager instead), which would strand
+    the driver before profileLoaded ever fires.
+    """
+    import pickle
+    import random
+    import sqlite3
+
+    prof = {"mainWindowGeom": None, "mainWindowState": None, "numBackups": 50,
+            "lastOptimize": int(time.time()), "searchHistory": [],
+            "syncKey": None, "syncMedia": True, "autoSync": True,
+            "allowHTML": False, "importMode": 1, "lastColour": "#00f",
+            "stripHTML": True, "deleteMedia": False}
+    # A pre-existing prefs21.db WITHOUT a _global row makes _loadMeta take
+    # the corrupt-recovery path (deleting our profile row), so seed _global
+    # with the default metaConf shape too.
+    meta = {"ver": 0, "updates": False, "created": int(time.time()),
+            "id": random.randrange(0, 2 ** 63), "lastMsg": 0,
+            "suppressUpdate": False, "firstRun": False, "defaultLang": "en_US"}
+    db_path = os.path.join(base, "prefs21.db")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("create table if not exists profiles"
+                     " (name text primary key collate nocase, data blob not null)")
+        conn.execute("insert or ignore into profiles values (?, ?)",
+                     (profile, pickle.dumps(prof, protocol=4)))
+        conn.execute("insert or ignore into profiles values ('_global', ?)",
+                     (pickle.dumps(meta, protocol=4),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _kill_owned_child(child, base: str) -> None:
+    """Stop the Anki process THIS invocation launched. Anki ignores SIGTERM,
+    so escalate to SIGKILL and verify death. Also reaps its orphaned mpv
+    audio children (they outlive Anki and hold base files). Never touches
+    other processes: mpv orphans match only via our base in --config-dir."""
+    try:
+        child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        if child.poll() is None:
+            try:
+                child.kill()
+            except OSError:
+                pass
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                print(f"dev: WARNING: owned Anki pid={child.pid} survived SIGKILL; "
+                      f"base {base} may be locked", file=sys.stderr)
+    except OSError:
+        pass
+    try:
+        ps = subprocess.run(["pgrep", "-af", "mpv --idle"], capture_output=True,
+                            text=True, timeout=10)
+        for line in (ps.stdout or "").splitlines():
+            if base in line:
+                try:
+                    pid = int(line.split()[0])
+                    os.kill(pid, 9)
+                except (ValueError, OSError):
+                    pass
+    except (FileNotFoundError, OSError):
+        pass
+
+
+def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
+    import zipfile
+
+    journeys = ("fresh", "upgrade", "undo", "catchup")
+    if journey not in journeys:
+        return _fail(f"unknown journey {journey!r}", f"choose from {journeys}")
+    print(f"dev: (e2e) journey={journey} target Anki={anki or '?'} Qt={qt or '?'}")
+    _app, anki_bin, installed = _pick_app(anki)
+    if not anki_bin:
+        if anki:
+            return _fail(f"no installed Anki.app matches {anki}",
+                         "install the target (e.g. Anki 23.10 alongside) first")
+        return _fail("Anki.app not found")
+    # Single-instance safety: a running Anki would swallow our launch args
+    # and open the PERSONAL profile instead. Refuse outright.
+    if _refuse_running_anki("e2e"):
+        return 1
+    # Build the exact artifact under test (installed from zip, not symlink).
+    proc = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "build_addon.py")])
+    if proc.returncode != 0:
+        return 1
+    import json as _json
+    with open(os.path.join(ROOT, "dist", "manifest.json"), encoding="utf-8") as fh:
+        build_record = _json.load(fh)
+    artifact = os.path.join(ROOT, "dist", build_record["archive"])
+    artifact_sha = build_record["artifact_sha256"]
+
+    base = os.path.join(DEV_DIR, "e2e", journey)
+    if _reject_personal_paths(base):
+        return _fail(f"refusing e2e base outside .dev: {base}")
+    # Anki ignores SIGTERM: a leftover from a killed run would survive and
+    # lock the base, silently breaking rmtree (ignore_errors) and causing a
+    # second instance to open a half-wiped tree. Refuse instead of guessing.
+    try:
+        ps = subprocess.run(["pgrep", "-x", "Anki"], capture_output=True,
+                            text=True, timeout=10)
+        if (ps.stdout or "").strip():
+            return _fail("an Anki process is already running (leftover or personal)",
+                         "close personal Anki; kill only E2E leftovers you own, "
+                         "then retry - e2e never drives a foreign process")
+    except FileNotFoundError:
+        pass
+    run_id = f"{journey}-{int(time.time())}"
+    shutil.rmtree(base, ignore_errors=True)
+    if os.path.exists(base):
+        return _fail(f"could not wipe {base}; a process still holds it")
+    os.makedirs(base, exist_ok=True)
+    _write_marker(base, f"e2e-{journey}")
+    with open(os.path.join(base, "run-id.txt"), "w", encoding="utf-8") as fh:
+        fh.write(run_id)
+    addons = os.path.join(base, "addons21")
+    os.makedirs(addons, exist_ok=True)
+    with zipfile.ZipFile(artifact) as archive:
+        archive.extractall(os.path.join(addons, "ankiscape"))
+    # Dev-only driver (never shipped: outside the package allowlist).
+    shutil.copytree(os.path.join(ROOT, "dev", "e2e", "driver_addon"),
+                    os.path.join(addons, "e2e_driver"))
+    with open(os.path.join(base, "artifact_sha256.txt"), "w", encoding="utf-8") as fh:
+        fh.write(artifact_sha)
+
+    profile = f"e2e-{journey}"
+    # Anki will not auto-create a -p profile (profile manager instead), so
+    # pre-create it exactly like ProfileManager.create() does.
+    _ensure_e2e_profile(base, profile)
+    with open(os.path.join(base, "journey.json"), "w", encoding="utf-8") as fh:
+        json.dump({"journey": journey, "phase": 1, "run_id": run_id}, fh)
+    if journey == "upgrade":
+        # Classic 2.0.2-shape fixture for the driver's phase-1 seeding.
+        fixtures = _load_fixtures()
+        with open(os.path.join(base, "classic-fixture.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"player_data": fixtures.classic_player_data(),
+                       "current_skill": "Mining"}, fh)
+    log_path = os.path.join(base, "anki-stdout.log")
+    env = dict(os.environ, ANKISCAPE_DEBUG="1")
+
+    phase = 1
+    last_result = None
+    while phase <= 4:
+        print(f"dev: (e2e) launching {installed} phase={phase} -b {base} -p {profile}")
+        with open(log_path, "a", encoding="utf-8") as log:
+            try:
+                child = subprocess.Popen([anki_bin, "-b", base, "-p", profile],
+                                         stdout=log, stderr=subprocess.STDOUT, env=env)
+            except OSError as exc:
+                return _fail(f"could not launch Anki: {exc!r}")
+        outcome = _wait_e2e_phase(child, base, run_id, log_path)
+        if outcome == "timeout":
+            return 1
+        if outcome == "relaunch":
+            try:
+                with open(os.path.join(base, "relaunch.json"), encoding="utf-8") as fh:
+                    request = _json.load(fh)
+            except (OSError, ValueError):
+                return _fail("relaunch requested but relaunch.json unreadable")
+            if request.get("run_id") != run_id:
+                return _fail("stale relaunch.json (wrong run_id)")
+            try:
+                os.unlink(os.path.join(base, "relaunch.json"))
+            except OSError:
+                pass
+            phase = int(request.get("next_phase", phase + 1))
+            with open(os.path.join(base, "journey.json"), "w", encoding="utf-8") as fh:
+                _json.dump({"journey": journey, "phase": phase, "run_id": run_id}, fh)
+            continue
+        # Final assertions.
+        with open(os.path.join(base, "e2e-assertions.json"), encoding="utf-8") as fh:
+            last_result = _json.load(fh)
+        break
+    if last_result is None:
+        return _fail("e2e ended with no final assertions")
+    try:
+        child.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        _kill_owned_child(child, base)
+        return _fail("e2e wrote assertions but Anki did not exit")
+    steps = last_result.get("steps", [])
+    failed = [s for s in steps if not s.get("ok")]
+    print(f"dev: (e2e) journey={last_result.get('journey')} steps={len(steps)} "
+          f"failed={len(failed)} screenshots={len(last_result.get('screenshots', []))}")
+    for step in failed:
+        print(f"dev: (e2e) FAILED step: {step}", file=sys.stderr)
+    if child.returncode != 0:
+        print(f"dev: (e2e) Anki exit code {child.returncode}", file=sys.stderr)
+    if (failed or child.returncode != 0 or not last_result.get("screenshots")
+            or last_result.get("journey") != journey):
+        return 1
+    print(f"dev: (e2e) {journey} journey PASS on Anki {installed} "
+          f"(artifact {artifact_sha[:16]}...)")
+    return 0
+
+
+def _wait_e2e_phase(child, base: str, run_id: str, log_path: str) -> str:
+    """Wait for final assertions ('done'), a relaunch request ('relaunch'),
+    or failure ('timeout')."""
+    import json as _json
+
+    assertions = os.path.join(base, "e2e-assertions.json")
+    relaunch = os.path.join(base, "relaunch.json")
+    deadline = time.time() + 240
+    while time.time() < deadline:
+        if os.path.exists(assertions):
+            try:
+                with open(assertions, encoding="utf-8") as _fh:
+                    if _json.load(_fh).get("run_id") == run_id:
+                        return "done"
+            except (OSError, ValueError):
+                pass
+        if os.path.exists(relaunch):
+            try:
+                with open(relaunch, encoding="utf-8") as _fh:
+                    if _json.load(_fh).get("run_id") == run_id:
+                        _kill_owned_child(child, base)
+                        return "relaunch"
+            except (OSError, ValueError):
+                pass
+        if child.poll() is not None:
+            break  # exited without assertions -> diagnose from log
+        time.sleep(2)
+    _kill_owned_child(child, base)
+    print(f"dev: (e2e) no phase output; Anki log tail:", file=sys.stderr)
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            print("".join(fh.readlines()[-30:]), file=sys.stderr)
+    except OSError:
+        pass
+    print("dev: ERROR: e2e produced no phase output (crash, forwarding, or hang)",
+          file=sys.stderr)
+    return "timeout"
+
+
+def cmd_verify(args) -> int:
+    release = getattr(args, "release", False)
+    run_id = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    outdir = os.path.join(ARTIFACTS, run_id)
+    os.makedirs(outdir, exist_ok=True)
+    results: dict = {"run_id": run_id, "release": release, "steps": {}}
+
+    def _step(name, fn):
+        try:
+            rc = fn()
+        except Exception as exc:
+            rc = 1
+            print(f"dev: step {name} raised {exc!r}")
+        results["steps"][name] = {"returncode": rc}
+        return rc
+
+    overall = 0
+    overall |= _step("python", lambda: subprocess.run(
+        [sys.executable, os.path.join(ROOT, "run_tests.py")]).returncode)
+    overall |= _step("package", lambda: subprocess.run(
+        [sys.executable, os.path.join(ROOT, "scripts", "build_addon.py",
+                                      )]).returncode if os.path.exists(
+            os.path.join(ROOT, "scripts", "build_addon.py")) else 1)
+    if release:
+        overall |= _step("backend", _backend_suite)
+        overall |= _step("e2e", lambda: _e2e_suite("", ""))
+    results["overall"] = overall
+    results["note"] = ("Quick subsets are not release readiness. "
+                       "verify --release requires all steps incl. backend/e2e/evidence.")
+    with open(os.path.join(outdir, "summary.json"), "w", encoding="utf-8") as fh:
+        json.dump(results, fh, indent=2)
+    print(f"dev: verification {'PASS' if overall == 0 else 'FAIL'}; summary at {outdir}/summary.json")
+    return overall
+
+
+def cmd_verify_evidence(args) -> int:
+    matrix = args.matrix
+    if not os.path.exists(matrix):
+        return _fail(f"matrix not found: {matrix}")
+    with open(matrix, encoding="utf-8") as fh:
+        data = json.load(fh)
+    errors = []
+    required = data.get("required_targets", [])
+    records = {(r.get("os"), r.get("anki"), r.get("qt")): r for r in data.get("records", [])}
+    for target in required:
+        key = (target.get("os"), target.get("anki"), target.get("qt"))
+        rec = records.get(key)
+        if rec is None:
+            errors.append(f"missing target {key}")
+            continue
+        if not rec.get("passed"):
+            errors.append(f"target {key} not passed")
+        if not rec.get("artifact_sha256"):
+            errors.append(f"target {key} missing artifact hash")
+        if not rec.get("evidence_path"):
+            errors.append(f"target {key} missing evidence path")
+    # Hash match: every record must match the built artifact if dist exists.
+    dist_hash = None
+    dist_dir = os.path.join(ROOT, "dist")
+    if os.path.isdir(dist_dir):
+        cands = [f for f in os.listdir(dist_dir) if f.endswith(".ankiaddon")]
+        if cands:
+            h = hashlib.sha256()
+            with open(os.path.join(dist_dir, cands[0]), "rb") as fh:
+                h.update(fh.read())
+            dist_hash = h.hexdigest()
+    if dist_hash:
+        for key, rec in records.items():
+            if rec.get("artifact_sha256") and rec["artifact_sha256"] != dist_hash:
+                errors.append(f"target {key} hash mismatch vs dist")
+    if errors:
+        for err in errors:
+            print(f"dev: evidence: {err}", file=sys.stderr)
+        return 1
+    print(f"dev: evidence ok ({len(required)} required targets)")
+    return 0
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="dev.py")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("setup")
+    p_launch = sub.add_parser("launch")
+    p_launch.add_argument("--scenario", required=True, choices=SCENARIOS)
+    p_launch.add_argument("--anki", default="")
+    p_launch.add_argument("--symlink", action="store_true",
+                          help="link the repo instead of installing the zip (dev loop only)")
+    p_launch.add_argument("--fresh", action="store_true",
+                          help="wipe the scenario base first (verifies the wipe)")
+    p_launch.add_argument("--no-anki", action="store_true")
+    p_reset = sub.add_parser("reset")
+    p_reset.add_argument("--scenario", required=True, choices=SCENARIOS)
+    p_test = sub.add_parser("test")
+    p_test.add_argument("--suite", required=True, choices=("python", "backend", "e2e"))
+    p_test.add_argument("--anki", default="")
+    p_test.add_argument("--qt", default="")
+    p_test.add_argument("--journey", default="fresh",
+                        choices=("fresh", "upgrade", "undo", "catchup"))
+    p_verify = sub.add_parser("verify")
+    p_verify.add_argument("--release", action="store_true")
+    p_ev = sub.add_parser("verify-evidence")
+    p_ev.add_argument("--matrix", default=os.path.join(ROOT, "dev", "matrix.json"))
+    args = parser.parse_args(argv)
+    if args.cmd == "setup":
+        return cmd_setup(args)
+    if args.cmd == "launch":
+        return cmd_launch(args)
+    if args.cmd == "reset":
+        return cmd_reset(args)
+    if args.cmd == "test":
+        return cmd_test(args)
+    if args.cmd == "verify":
+        return cmd_verify(args)
+    if args.cmd == "verify-evidence":
+        return cmd_verify_evidence(args)
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

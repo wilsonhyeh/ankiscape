@@ -1,0 +1,110 @@
+{
+  "protocol_version": 1,
+  "rules_version": 1,
+  "micro_xp_per_xp": 1000000,
+  "practice_xp": 1,
+  "failed_gather_xp_factor": {"num": 1, "den": 4},
+  "burn_xp_factor": {"num": 1, "den": 4},
+  "tier_multiplier": {"base": 100, "per_tier": 5, "den": 100, "cap_num": 2, "cap_den": 1},
+  "gathering": {"base_probability": 0.8, "level_bonus_factor": 0.02, "cap": 0.95},
+  "gem_drop": {"num": 1, "den": 256},
+  "burn": {"base": 300, "per_level": 2, "den": 1000, "floor": 0},
+  "thresholds": [
+    0, 83, 174, 276, 388, 512, 650, 801, 969, 1154, 1358, 1584, 1833, 2107, 2411, 2746, 3115, 3523, 3973, 4470,
+    5018, 5624, 6291, 7028, 7842, 8740, 9730, 10824, 12031, 13363, 14833, 16456, 18247, 20224, 22406, 24815,
+    27473, 30408, 33648, 37224, 41171, 45529, 50339, 55649, 61512, 67983, 75127, 83014, 91721, 101333, 111945,
+    123660, 136594, 150872, 166636, 184040, 203254, 224466, 247886, 273742, 302288, 333804, 368599, 407015,
+    449428, 496254, 547953, 605032, 668051, 737627, 814445, 899257, 992895, 1096278, 1210421, 1336443, 1475581,
+    1629200, 1798808, 1986068, 2192818, 2421087, 2673114, 2951373, 3258594, 3597792, 3972294, 4385776, 4842295,
+    5346332, 5902831, 6517253, 7195629, 7944614, 8771558, 9684577, 10692629, 11805606, 13034431
+  ],
+  "ores": [
+    {"id": "rune_essence", "display": "Rune essence", "level": 1, "base_xp": 5.0, "probability": 0.95, "tier": 1},
+    {"id": "clay", "display": "Clay", "level": 1, "base_xp": 5.0, "probability": 0.9, "tier": 2},
+    {"id": "copper_ore", "display": "Copper ore", "level": 1, "base_xp": 17.5, "probability": 0.85, "tier": 3},
+    {"id": "tin_ore", "display": "Tin ore", "level": 1, "base_xp": 17.5, "probability": 0.85, "tier": 4},
+    {"id": "iron_ore", "display": "Iron ore", "level": 15, "base_xp": 35, "probability": 0.8, "tier": 5},
+    {"id": "silver_ore", "display": "Silver ore", "level": 20, "base_xp": 40, "probability": 0.75, "tier": 6},
+    {"id": "coal", "display": "Coal", "level": 30, "base_xp": 50, "probability": 0.7, "tier": 7},
+    {"id": "gold_ore", "display": "Gold ore", "level": 40, "base_xp": 65.0, "probability": 0.65, "tier": 8},
+    {"id": "mithril_ore", "display": "Mithril ore", "level": 55, "base_xp": 80, "probability": 0.6, "tier": 9},
+    {"id": "adamantite_ore", "display": "Adamantite ore", "level": 70, "base_xp": 95.0, "probability": 0.55, "tier": 10},
+    {"id": "runite_ore", "display": "Runite ore", "level": 85, "base_xp": 125, "probability": 0.5, "tier": 11}
+  ],
+  "trees": [
+    {"id": "tree", "display": "Tree", "level": 1, "base_xp": 25, "probability": 0.9, "tier": 1},
+    {"id": "oak", "display": "Oak", "level": 15, "base_xp": 37.5, "probability": 0.85, "tier": 2},
+    {"id": "willow", "display": "Willow", "level": 30, "base_xp": 67.5, "probability": 0.8, "tier": 3},
+    {"id": "teak", "display": "Teak", "level": 35, "base_xp": 85, "probability": 0.75, "tier": 4},
+    {"id": "maple", "display": "Maple", "level": 45, "base_xp": 100, "probability": 0.7, "tier": 5},
+    {"id": "mahogany", "display": "Mahogany", "level": 50, "base_xp": 125, "probability": 0.65, "tier": 6},
+    {"id": "yew", "display": "Yew", "level": 60, "base_xp": 175, "probability": 0.6, "tier": 7},
+    {"id": "magic", "display": "Magic", "level": 75, "base_xp": 250, "probability": 0.55, "tier": 8},
+    {"id": "redwood", "display": "Redwood", "level": 90, "base_xp": 380, "probability": 0.5, "tier": 9}
+  ],
+  "fish": [
+    {"id": "shrimp", "display": "Shrimp", "fishing_level": 1, "fishing_base_xp": 10, "probability": 0.9, "cooking_level": 1, "cooking_base_xp": 13, "tier": 1},
+    {"id": "sardine", "display": "Sardine", "fishing_level": 5, "fishing_base_xp": 20, "probability": 0.85, "cooking_level": 5, "cooking_base_xp": 26, "tier": 2},
+    {"id": "trout", "display": "Trout", "fishing_level": 20, "fishing_base_xp": 50, "probability": 0.8, "cooking_level": 20, "cooking_base_xp": 65, "tier": 3},
+    {"id": "tuna", "display": "Tuna", "fishing_level": 35, "fishing_base_xp": 80, "probability": 0.75, "cooking_level": 35, "cooking_base_xp": 104, "tier": 4},
+    {"id": "lobster", "display": "Lobster", "fishing_level": 40, "fishing_base_xp": 90, "probability": 0.7, "cooking_level": 40, "cooking_base_xp": 117, "tier": 5},
+    {"id": "swordfish", "display": "Swordfish", "fishing_level": 50, "fishing_base_xp": 100, "probability": 0.65, "cooking_level": 50, "cooking_base_xp": 130, "tier": 6},
+    {"id": "monkfish", "display": "Monkfish", "fishing_level": 62, "fishing_base_xp": 120, "probability": 0.6, "cooking_level": 62, "cooking_base_xp": 156, "tier": 7},
+    {"id": "shark", "display": "Shark", "fishing_level": 76, "fishing_base_xp": 140, "probability": 0.55, "cooking_level": 76, "cooking_base_xp": 182, "tier": 8},
+    {"id": "anglerfish", "display": "Anglerfish", "fishing_level": 82, "fishing_base_xp": 160, "probability": 0.5, "cooking_level": 82, "cooking_base_xp": 208, "tier": 9}
+  ],
+  "bars": [
+    {"id": "bronze_bar", "display": "Bronze bar", "level": 1, "base_xp": 6.2, "ore_required": {"Copper ore": 1, "Tin ore": 1}, "tier": 1},
+    {"id": "iron_bar", "display": "Iron bar", "level": 15, "base_xp": 12.5, "ore_required": {"Iron ore": 1}, "tier": 2},
+    {"id": "silver_bar", "display": "Silver bar", "level": 20, "base_xp": 13.67, "ore_required": {"Silver ore": 1}, "tier": 3},
+    {"id": "steel_bar", "display": "Steel bar", "level": 30, "base_xp": 17.5, "ore_required": {"Iron ore": 1, "Coal": 2}, "tier": 4},
+    {"id": "gold_bar", "display": "Gold bar", "level": 40, "base_xp": 22.5, "ore_required": {"Gold ore": 1}, "tier": 5},
+    {"id": "mithril_bar", "display": "Mithril bar", "level": 50, "base_xp": 30.0, "ore_required": {"Mithril ore": 1, "Coal": 4}, "tier": 6},
+    {"id": "adamantite_bar", "display": "Adamantite bar", "level": 70, "base_xp": 37.5, "ore_required": {"Adamantite ore": 1, "Coal": 6}, "tier": 7},
+    {"id": "runite_bar", "display": "Runite bar", "level": 85, "base_xp": 50.0, "ore_required": {"Runite ore": 1, "Coal": 8}, "tier": 8}
+  ],
+  "crafting": [
+    {"id": "soft_clay", "display": "Soft clay", "level": 1, "base_xp": 1, "requirements": {"Clay": 1}, "tier": 1},
+    {"id": "unfired_pot", "display": "Unfired pot", "level": 1, "base_xp": 6.3, "requirements": {"Soft clay": 1}, "tier": 2},
+    {"id": "pot", "display": "Pot", "level": 1, "base_xp": 6.3, "requirements": {"Unfired pot": 1}, "tier": 3},
+    {"id": "pie_dish", "display": "Pie dish", "level": 1, "base_xp": 10, "requirements": {"Unfired pie dish": 1}, "tier": 4},
+    {"id": "bowl", "display": "Bowl", "level": 1, "base_xp": 15, "requirements": {"Unfired bowl": 1}, "tier": 5},
+    {"id": "gold_ring", "display": "Gold ring", "level": 5, "base_xp": 15, "requirements": {"Gold bar": 1}, "tier": 6},
+    {"id": "gold_necklace", "display": "Gold necklace", "level": 6, "base_xp": 20, "requirements": {"Gold bar": 1}, "tier": 7},
+    {"id": "unfired_pie_dish", "display": "Unfired pie dish", "level": 7, "base_xp": 15, "requirements": {"Soft clay": 1}, "tier": 8},
+    {"id": "unfired_bowl", "display": "Unfired bowl", "level": 8, "base_xp": 18, "requirements": {"Soft clay": 1}, "tier": 9},
+    {"id": "unstrung_symbol", "display": "Unstrung symbol", "level": 16, "base_xp": 50, "requirements": {"Silver bar": 1}, "tier": 10},
+    {"id": "sapphire_ring", "display": "Sapphire ring", "level": 20, "base_xp": 40, "requirements": {"Gold bar": 1, "Sapphire": 1}, "tier": 11},
+    {"id": "sapphire", "display": "Sapphire", "level": 20, "base_xp": 50, "requirements": {"Uncut sapphire": 1}, "tier": 12},
+    {"id": "sapphire_necklace", "display": "Sapphire necklace", "level": 22, "base_xp": 60, "requirements": {"Gold bar": 1, "Sapphire": 1}, "tier": 13},
+    {"id": "tiara", "display": "Tiara", "level": 23, "base_xp": 52.5, "requirements": {"Silver bar": 1}, "tier": 14},
+    {"id": "emerald", "display": "Emerald", "level": 27, "base_xp": 67.5, "requirements": {"Uncut emerald": 1}, "tier": 15},
+    {"id": "emerald_ring", "display": "Emerald ring", "level": 27, "base_xp": 55, "requirements": {"Gold bar": 1, "Emerald": 1}, "tier": 16},
+    {"id": "emerald_necklace", "display": "Emerald necklace", "level": 29, "base_xp": 60, "requirements": {"Gold bar": 1, "Emerald": 1}, "tier": 17},
+    {"id": "ruby_ring", "display": "Ruby ring", "level": 34, "base_xp": 70, "requirements": {"Gold bar": 1, "Ruby": 1}, "tier": 18},
+    {"id": "ruby", "display": "Ruby", "level": 34, "base_xp": 85, "requirements": {"Uncut ruby": 1}, "tier": 19},
+    {"id": "ruby_necklace", "display": "Ruby necklace", "level": 40, "base_xp": 75, "requirements": {"Gold bar": 1, "Ruby": 1}, "tier": 20},
+    {"id": "diamond_ring", "display": "Diamond ring", "level": 43, "base_xp": 85, "requirements": {"Gold bar": 1, "Diamond": 1}, "tier": 21},
+    {"id": "diamond", "display": "Diamond", "level": 43, "base_xp": 107.5, "requirements": {"Uncut diamond": 1}, "tier": 22},
+    {"id": "diamond_necklace", "display": "Diamond necklace", "level": 56, "base_xp": 90, "requirements": {"Gold bar": 1, "Diamond": 1}, "tier": 23}
+  ],
+  "gems": [
+    {"id": "uncut_sapphire", "display": "Uncut sapphire", "probability_num": 1, "probability_den": 4, "base_xp": 50, "order": 1},
+    {"id": "uncut_emerald", "display": "Uncut emerald", "probability_num": 1, "probability_den": 8, "base_xp": 67.5, "order": 2},
+    {"id": "uncut_ruby", "display": "Uncut ruby", "probability_num": 1, "probability_den": 16, "base_xp": 85, "order": 3},
+    {"id": "uncut_diamond", "display": "Uncut diamond", "probability_num": 1, "probability_den": 64, "base_xp": 107.5, "order": 4}
+  ],
+  "achievements": {
+    "note": "Counters are lifetime successful actions + derived levels, not inventory-on-hand. Replay/Undo determines state.",
+    "required": [
+      "first_catch", "first_cook",
+      "skill_10_mining", "skill_30_mining", "skill_60_mining", "skill_99_mining",
+      "skill_10_woodcutting", "skill_30_woodcutting", "skill_60_woodcutting", "skill_99_woodcutting",
+      "skill_10_smithing", "skill_30_smithing", "skill_60_smithing", "skill_99_smithing",
+      "skill_10_crafting", "skill_30_crafting", "skill_60_crafting", "skill_99_crafting",
+      "skill_10_fishing", "skill_30_fishing", "skill_60_fishing", "skill_99_fishing",
+      "skill_10_cooking", "skill_30_cooking", "skill_60_cooking", "skill_99_cooking",
+      "cooks_100", "cooks_1000"
+    ]
+  }
+}

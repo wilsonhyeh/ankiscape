@@ -1,3 +1,4 @@
+import compileall
 import os
 import sys
 import unittest
@@ -8,6 +9,16 @@ def main() -> int:
     root = os.path.dirname(os.path.abspath(__file__))
     if root not in sys.path:
         sys.path.insert(0, root)
+
+    # Compile check over shipped + dev Python first: unittest discovery only
+    # imports tests/, so a syntax error anywhere else would slip through.
+    for subdir in (".", "dev", "evolved", "scripts", "server", "tests"):
+        target = os.path.join(root, subdir) if subdir != "." else root
+        if not os.path.isdir(target):
+            continue
+        if not compileall.compile_dir(target, maxlevels=12, quiet=1):
+            print(f"run_tests: compile failed under {subdir}", file=sys.stderr)
+            return 1
 
     # Discover and run tests under tests/
     loader = unittest.TestLoader()

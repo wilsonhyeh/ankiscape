@@ -463,6 +463,18 @@ def on_good_answer():
 
 def on_answer_card(self, ease, _old):
     global card_turned, exp_awarded, answer_shown
+    # Routing (3.0): this wrapper solely dispatches existing Classic behavior.
+    # In Evolved it passes through unchanged; Evolved credits from
+    # reviewer_did_answer_card after Anki accepts the answer.
+    try:
+        from . import runtime as _rt_mod
+        _rt = _rt_mod.get_runtime()
+        if _rt.profile_loaded and getattr(_rt.active_adapter, "name", "") == "evolved":
+            card_turned = False
+            answer_shown = False
+            return _old(self, ease)
+    except Exception:
+        pass
     if ease > 1 and current_skill in ["Mining", "Woodcutting",
                                       "Smithing", "Crafting"] and card_turned and not exp_awarded and answer_shown:
         on_good_answer()
@@ -719,3 +731,547 @@ def _force_deck_browser_refresh():
     except Exception:
         debug_log("force_refresh: failed to refresh")
         pass
+
+
+# --- 3.0 mode routing (contract A; additive, Classic behavior preserved) ---
+# Root hooks above are installed once at import. This section begins/ends the
+# per-profile Runtime without reading a collection at import time. Every new
+# Evolved callback routes through the Runtime; Classic keeps its legacy path.
+try:
+    from . import mode as _mode_mod
+    from . import runtime as _runtime_mod
+    _RUNTIME_AVAILABLE = True
+except Exception:
+    _mode_mod = None  # type: ignore
+    _runtime_mod = None  # type: ignore
+    _RUNTIME_AVAILABLE = False
+
+_EVOLVED_CTX: dict = {"engine": None, "journal": None, "game_uuid": None,
+                      "generation": 0, "user_id": None}
+
+
+def runtime_menu_opener():
+    """Preferred menu entry for injector bridges: routes via active adapter."""
+    try:
+        if _RUNTIME_AVAILABLE:
+            rt = _runtime_mod.get_runtime()
+            if rt.profile_loaded and getattr(rt.active_adapter, "name", "") == "evolved":
+                if _open_evolved_menu():
+                    return
+                # Fall through to Classic menu so there is always exactly
+                # one live menu owner per profile.
+    except Exception:
+        pass
+    return _on_main_menu()
+
+
+def _open_evolved_menu() -> bool:
+    """Open the Evolved tabbed menu. Returns False when unavailable."""
+    try:
+        from .evolved.data import load_rules
+        from .evolved.ui.menu import show_evolved_menu
+    except Exception:
+        return False
+    try:
+        col = getattr(mw, "col", None)
+        if col is None:
+            return False
+
+        def _get_projection():
+            try:
+                engine = _ensure_evolved_engine()
+                import json as _json
+                ops = engine._all_ops()
+                from .evolved.reducer import replay as _replay
+                return _replay(ops, load_rules(), engine.cfg.game_uuid)
+            except Exception:
+                return {"levels": {}, "xp_micro": {}, "inventory": {},
+                        "achievements": []}
+
+        selections = {}
+        for _skill in ("mining", "woodcutting", "smithing", "crafting",
+                       "fishing", "cooking"):
+            try:
+                selections[_skill] = col.get_config(
+                    f"ankiscape_evolved_current_{_skill}", "") or ""
+            except Exception:
+                selections[_skill] = ""
+        try:
+            preset = col.get_config("ankiscape_evolved_catchup_preset", "mining")
+        except Exception:
+            preset = "mining"
+
+        def _on_preset(skill: str):
+            try:
+                from .evolved.presets import apply_preset
+                engine = _ensure_evolved_engine()
+                col = getattr(mw, "col", None)
+                if engine is not None and col is not None:
+                    apply_preset(engine, engine.journal, col, skill)
+                    return
+                from .evolved.ui.menu_model import validate_preset
+                col.set_config("ankiscape_evolved_catchup_preset",
+                               validate_preset(skill))
+            except Exception:
+                pass
+
+        def _on_mode_switch(_mode_name: str):
+            try:
+                _mode_mod.set_requested_mode(col.set_config, "classic")
+            except Exception:
+                pass
+
+        deps = {"rules": load_rules(), "get_projection": _get_projection,
+                "selections": selections, "preset": preset,
+                "on_preset": _on_preset, "on_mode_switch": _on_mode_switch,
+                "logged_in": bool(_EVOLVED_CTX.get("user_id")),
+                "pending": 0, "last_success": None, "last_error": "",
+                "on_sync": lambda: None, "query_hiscores": None,
+                "on_account": lambda: None, "on_export": lambda: None,
+                "on_restore": lambda: None,
+                "get_diagnostics": lambda: "Evolved diagnostics: ok"}
+        show_evolved_menu(getattr(mw, "app", None) and mw or None, deps)
+        return True
+    except Exception:
+        return False
+
+
+def _routing_on_profile_load():
+    """Begin the Runtime for this profile; show the chooser on first load."""
+    if not _RUNTIME_AVAILABLE:
+        return
+    try:
+        # Resolve the collection FRESH on every use: Anki may close and
+        # reopen it during startup (23.10 first-run setup does), which would
+        # strand methods bound to the old object (writes silently lost).
+        def _col():
+            try:
+                return getattr(mw, "col", None)
+            except Exception:
+                return None
+
+        def _get_cfg(key, default=None):
+            col = _col()
+            if col is None:
+                return default
+            try:
+                return col.get_config(key, default)
+            except Exception:
+                return default
+
+        def _set_cfg(key, value):
+            col = _col()
+            if col is None:
+                raise RuntimeError("no collection")
+            return col.set_config(key, value)
+
+        get_cfg = _get_cfg
+        set_cfg = _set_cfg
+        if _col() is None:
+            return
+        requested = _mode_mod.get_requested_mode(get_cfg)
+        has_request = False
+        try:
+            has_request = get_cfg(_mode_mod.REQUEST_KEY, None) is not None
+        except Exception:
+            has_request = False
+        if not has_request:
+            # First load: present chooser (Evolved preselected); close selects Classic.
+            try:
+                from .evolved.ui.chooser import qt_chooser_dialog, show_mode_chooser
+                try:
+                    from aqt.qt import QTimer  # type: ignore
+
+                    def _ask():
+                        crumb = {"asked": True}
+                        try:
+                            # A second profile load may have persisted a choice
+                            # while this prompt was queued; honor it, no dialog.
+                            try:
+                                already = get_cfg(_mode_mod.REQUEST_KEY, None)
+                            except Exception:
+                                already = None
+                            if already in ("classic", "evolved"):
+                                chosen = already
+                                crumb["already"] = chosen
+                            else:
+                                try:
+                                    thunk = qt_chooser_dialog(getattr(mw, "app", None) and mw)
+                                    crumb["thunk"] = "built"
+                                except Exception as exc:
+                                    crumb["thunk_error"] = repr(exc)[:200]
+                                    raise
+                                try:
+                                    chosen = show_mode_chooser(
+                                        get_requested=lambda: _mode_mod.get_requested_mode(get_cfg),
+                                        set_requested=lambda m: _mode_mod.set_requested_mode(set_cfg, m),
+                                        qt_dialog=thunk,
+                                    )
+                                    crumb["chosen"] = chosen
+                                except Exception as exc:
+                                    crumb["dialog_error"] = repr(exc)[:200]
+                                    raise
+                                try:
+                                    back = get_cfg(_mode_mod.REQUEST_KEY, None)
+                                    crumb["read_back"] = back
+                                    if back != chosen:
+                                        set_cfg(_mode_mod.REQUEST_KEY, chosen)
+                                        crumb["read_back_retry"] = get_cfg(
+                                            _mode_mod.REQUEST_KEY, None)
+                                except Exception as exc:
+                                    crumb["persist_error"] = repr(exc)[:200]
+                        except Exception:
+                            chosen = "classic"
+                            crumb["fallback"] = "classic"
+                        try:
+                            _begin_runtime_with(chosen)
+                            crumb["began"] = chosen
+                        except Exception as exc:
+                            crumb["begin_error"] = repr(exc)[:200]
+                        try:
+                            set_cfg("ankiscape_evolved_routing", crumb)
+                        except Exception:
+                            pass
+                    QTimer.singleShot(0, _ask)
+                    return
+                except Exception:
+                    requested = show_mode_chooser(
+                        get_requested=lambda: _mode_mod.get_requested_mode(get_cfg),
+                        set_requested=lambda m: _mode_mod.set_requested_mode(set_cfg, m),
+                        qt_dialog=None,
+                    )
+            except Exception:
+                requested = "classic"
+        _begin_runtime_with(requested)
+    except Exception:
+        pass
+
+
+def _begin_runtime_with(requested: str):
+    try:
+        rt = _runtime_mod.get_runtime()
+        if requested == _mode_mod.EVOLVED:
+            from .runtime import EvolvedAdapter
+            rt.begin_profile(requested, EvolvedAdapter())
+        else:
+            from .runtime import ClassicAdapter
+            rt.begin_profile(requested, ClassicAdapter(legacy={
+                "on_review_answer": lambda ctx: None,
+                "on_menu": lambda ctx: _on_main_menu(),
+            }))
+        _EVOLVED_CTX["generation"] = rt.generation
+    except Exception:
+        pass
+    if not _RUNTIME_AVAILABLE:
+        return
+    try:
+        rt = _runtime_mod.get_runtime()
+        if getattr(rt.active_adapter, "name", "") != "evolved":
+            return
+        # Bounded catch-up scan off the review-critical path (fast path:
+        # rows newer than the persisted frontier). One summary, no popups.
+        try:
+            engine = _ensure_evolved_engine()
+            from .evolved.catchup import run_catchup
+            col = getattr(mw, "col", None)
+            if col is not None and engine is not None:
+                result = run_catchup(col, engine, engine.journal, full=False)
+                if isinstance(result, dict) and result.get("made"):
+                    debug_log(f"evolved: catch-up +{result['made']} (profile load)")
+        except Exception as exc:
+            debug_log(f"evolved: load catch-up failed: {exc!r}")
+    except Exception:
+        pass
+
+
+_UNDO_CAPTURE_INSTALLED = False  # historical: mw.undo wrapping retired 2026-09-09
+
+
+def _reconcile_undo_state():
+    """Reconcile recent Evolved awards against Anki history. Read-only unless
+    a retraction/restore operation is genuinely needed (journal SQLite writes
+    never touch Anki ops, so this cannot loop back into operation hooks)."""
+    try:
+        if not _RUNTIME_AVAILABLE:
+            return
+        rt = _runtime_mod.get_runtime()
+        if not rt.profile_loaded:
+            return
+        if getattr(rt.active_adapter, "name", "") != "evolved":
+            return
+        engine = _EVOLVED_CTX.get("engine")
+        col = getattr(mw, "col", None)
+        if engine is None or col is None or getattr(col, "db", None) is None:
+            return
+        db = col.db
+
+        def _row_exists(revlog_id):
+            try:
+                return db.scalar("select 1 from revlog where id = ?",
+                                 int(revlog_id)) is not None
+            except Exception:
+                return True  # unknown: never retract on doubt
+
+        result = engine.reconcile_undo(_row_exists)
+        if result.get("retracted") or result.get("restored"):
+            debug_log(f"evolved: undo reconcile {result}")
+    except Exception:
+        pass
+
+
+def _on_operation_did_execute(*_args, **_kwargs):
+    """Post-commit hook (23.10+): undo/redo complete asynchronously, so the
+    mw.undo() return point is too early to observe the deleted revlog row.
+    Reconciling here runs after the transaction commits, on the main thread.
+    Recent-window checks are a handful of indexed selects; ordinary ops are
+    unaffected no-ops."""
+    _reconcile_undo_state()
+
+
+def _on_collection_sync_finished():
+    """Full reconciliation scan after Anki sync (finds late mobile history)."""
+    try:
+        if not _RUNTIME_AVAILABLE:
+            return
+        rt = _runtime_mod.get_runtime()
+        if not rt.profile_loaded:
+            return
+        if getattr(rt.active_adapter, "name", "") != "evolved":
+            return
+        engine = _EVOLVED_CTX.get("engine")
+        col = getattr(mw, "col", None)
+        if engine is None or col is None:
+            return
+        from .evolved.catchup import run_catchup
+        result = run_catchup(col, engine, engine.journal, full=True)
+        if isinstance(result, dict) and result.get("made"):
+            debug_log(f"evolved: catch-up +{result['made']} (after sync)")
+    except Exception as exc:
+        debug_log(f"evolved: sync catch-up failed: {exc!r}")
+
+
+def _routing_on_profile_close():
+    """Invalidate generation before releasing widgets (contract A)."""
+    try:
+        if _RUNTIME_AVAILABLE:
+            _runtime_mod.get_runtime().end_profile()
+    except Exception:
+        pass
+    try:
+        journal = _EVOLVED_CTX.get("journal")
+        if journal is not None:
+            try:
+                journal.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    _EVOLVED_CTX.update({"engine": None, "journal": None, "game_uuid": None,
+                         "generation": 0, "user_id": None})
+    try:
+        from .evolved.ui.hud import HudOwner  # noqa: F401 (owner release point)
+    except Exception:
+        pass
+
+
+def _evolved_skill_selection():
+    try:
+        col = getattr(mw, "col", None)
+        if col is not None:
+            skill = col.get_config("ankiscape_evolved_current_skill", "mining")
+            if isinstance(skill, str) and skill.lower() in (
+                    "mining", "woodcutting", "smithing", "crafting", "fishing", "cooking"):
+                return skill.lower()
+    except Exception:
+        pass
+    return "mining"
+
+
+def _evolved_resource_for(skill: str) -> str:
+    defaults = {"mining": "Rune essence", "woodcutting": "Tree", "smithing": "Bronze bar",
+                "crafting": "Soft clay", "fishing": "Shrimp", "cooking": "Shrimp"}
+    try:
+        col = getattr(mw, "col", None)
+        if col is not None:
+            key = f"ankiscape_evolved_current_{skill}"
+            val = col.get_config(key, defaults.get(skill, ""))
+            if isinstance(val, str) and val:
+                return val
+    except Exception:
+        pass
+    return defaults.get(skill, "")
+
+
+def _ensure_evolved_engine():
+    """Lazily bind journal+engine for the active profile (main thread)."""
+    from .evolved.data import load_rules
+    from .evolved.engine import EngineConfig, EvolvedEngine
+    from .evolved.journal import Journal, journal_path_for_profile
+    import uuid as _uuid
+
+    col = getattr(mw, "col", None)
+    pm = getattr(mw, "pm", None)
+    profile_dir = None
+    try:
+        if pm is not None and hasattr(pm, "profileFolder"):
+            profile_dir = pm.profileFolder()
+    except Exception:
+        profile_dir = None
+    game_uuid = None
+    activated_at = 0
+    try:
+        if col is not None:
+            pointer = col.get_config("ankiscape_evolved_player_data", None)
+            if isinstance(pointer, dict):
+                game_uuid = pointer.get("game_uuid") or None
+                activated_at = int(pointer.get("activated_at", 0) or 0)
+    except Exception:
+        pass
+    if not game_uuid:
+        game_uuid = str(_uuid.uuid4())
+        activated_at = activated_at or 0
+        try:
+            if col is not None:
+                col.set_config("ankiscape_evolved_player_data",
+                               {"version": 1, "game_uuid": game_uuid,
+                                "activated_at": activated_at,
+                                "snapshot_revision": 0,
+                                "preset": {"skill": "mining", "effective_ts": activated_at}},
+                               undoable=False)
+        except Exception:
+            pass
+    if _EVOLVED_CTX.get("engine") is not None and _EVOLVED_CTX.get("game_uuid") == game_uuid:
+        return _EVOLVED_CTX["engine"]
+    device_id = "desktop"
+    try:
+        if col is not None:
+            stored = col.get_config("ankiscape_evolved_device_id", None)
+            if isinstance(stored, str) and stored:
+                device_id = stored
+            else:
+                device_id = str(_uuid.uuid4())
+                try:
+                    col.set_config("ankiscape_evolved_device_id", device_id, undoable=False)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    journal = None
+    if profile_dir:
+        try:
+            journal = Journal(journal_path_for_profile(profile_dir, game_uuid))
+        except Exception:
+            journal = None
+    if journal is None:
+        import tempfile
+        import os as _os
+        fallback = _os.path.join(tempfile.gettempdir(), "ankiscape-evolved-fallback",
+                                 game_uuid, "game.sqlite3")
+        journal = Journal(fallback)
+    engine = EvolvedEngine(EngineConfig(game_uuid=game_uuid, device_id=device_id,
+                                        activated_at=activated_at,
+                                        rules=load_rules()), journal)
+    try:
+        engine.hydrate()
+    except Exception:
+        pass
+    _EVOLVED_CTX.update({"engine": engine, "journal": journal, "game_uuid": game_uuid,
+                         "user_id": _EVOLVED_CTX.get("user_id")})
+    return engine
+
+
+def _on_did_answer_card(reviewer, card, ease):
+    """Evolved accepted-answer path (after Anki accepts; never pre-scheduling).
+
+    Game exceptions must not prevent scheduling; they produce a visible
+    diagnostics state and fail automated tests rather than silent success.
+    """
+    if not _RUNTIME_AVAILABLE:
+        return
+    try:
+        rt = _runtime_mod.get_runtime()
+        if not rt.profile_loaded:
+            return
+        if getattr(rt.active_adapter, "name", "") != "evolved":
+            return
+        try:
+            ease_int = int(ease)
+        except (TypeError, ValueError):
+            return
+        card_id = 0
+        try:
+            card_id = int(getattr(card, "id", 0) or 0)
+        except (TypeError, ValueError):
+            card_id = 0
+        revlog_id = 0
+        revlog_type = 1
+        review_ts = 0
+        try:
+            col = getattr(mw, "col", None)
+            if col is not None and getattr(col, "db", None) is not None:
+                row = col.db.first("SELECT id, type FROM revlog WHERE cid = ? ORDER BY id DESC LIMIT 1",
+                                   card_id)
+                # Note: columns are (id, type); timestamp is id (ms).
+                if row is not None:
+                    revlog_id = int(row[0])
+                    revlog_type = int(row[1])
+                    review_ts = revlog_id // 1000
+        except Exception:
+            pass
+        if revlog_id <= 0:
+            import time as _time
+            review_ts = int(_time.time())
+            revlog_id = review_ts * 1000
+        try:
+            engine = _ensure_evolved_engine()
+        except Exception as exc:
+            debug_log(f"evolved: journal init failed: {exc!r}")
+            return
+        skill = _evolved_skill_selection()
+        resource = _evolved_resource_for(skill)
+        try:
+            result = engine.credit_direct(revlog_id=revlog_id, card_id=card_id,
+                                          ease=ease_int, revlog_type=revlog_type,
+                                          review_ts=review_ts, skill=skill,
+                                          resource=resource)
+        except Exception as exc:
+            debug_log(f"evolved: credit failed: {exc!r}")
+            return
+        if isinstance(result, dict) and result.get("needs_recovery"):
+            debug_log("evolved: persistence failed; game requires recovery")
+    except Exception:
+        pass
+
+
+# Additive hook wiring (import-time dispatch install only; no collection reads).
+try:
+    if _RUNTIME_AVAILABLE:
+        try:
+            addHook("profileLoaded", _routing_on_profile_load)
+        except Exception:
+            pass
+        try:
+            gui_hooks.reviewer_did_answer_card.append(_on_did_answer_card)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            # Post-commit op hook (23.10+): where Undo/Redo reconciliation
+            # lives, since mw.undo() returns before the background op lands.
+            gui_hooks.operation_did_execute.append(  # type: ignore[attr-defined]
+                _on_operation_did_execute)
+        except Exception:
+            pass
+        try:
+            gui_hooks.sync_did_finish.append(  # type: ignore[attr-defined]
+                lambda *a, **k: _on_collection_sync_finished())
+        except Exception:
+            pass
+        try:
+            gui_hooks.profile_will_close.append(lambda *a, **k: _routing_on_profile_close())  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                gui_hooks.profile_did_close.append(lambda *a, **k: _routing_on_profile_close())  # type: ignore[attr-defined]
+            except Exception:
+                pass
+except Exception:
+    pass
