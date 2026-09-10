@@ -13,13 +13,13 @@ from evolved.net import Endpoint, NetError
 
 
 def _ok(data):
-    def _post(endpoint, path, payload, access_token=None):
+    def _post(endpoint, path, payload, access_token=None, method="POST"):
         return dict(data)
     return _post
 
 
 def _fail(kind):
-    def _post(endpoint, path, payload, access_token=None):
+    def _post(endpoint, path, payload, access_token=None, method="POST"):
         raise NetError(kind, "nope", status=401 if kind in ("unauthorized",) else 0)
     return _post
 
@@ -65,7 +65,7 @@ class TestAccounts(unittest.TestCase):
     def test_username_login_uses_edge(self):
         seen = {}
 
-        def _post(endpoint, path, payload, access_token=None):
+        def _post(endpoint, path, payload, access_token=None, method="POST"):
             seen["path"] = path
             return {"access_token": "a", "refresh_token": "r",
                     "user": {"id": "u1", "confirmed_at": "t"}}

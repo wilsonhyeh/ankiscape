@@ -21,7 +21,7 @@ from .theme import clamp_scale
 from .widgets import apply_theme, body_label, display_label, muted_label
 
 SHELL_OBJECT_NAME = OBJECT_NAMES.get("shell", "ankiscape-evolved-shell")
-SECTIONS = ("training", "skills", "bank", "achievements", "hiscores")
+SECTIONS = ("training", "skills", "bank", "achievements", "hiscores", "guide")
 SECTION_LABELS = {
     "training": "Train",
     "skills": "Skills",
@@ -29,6 +29,7 @@ SECTION_LABELS = {
     "achievements": "Feats",
     "hiscores": "Ranks",
     "settings": "Setup",
+    "guide": "Guide",
 }
 # Full names for headers/tooltips.
 SECTION_FULL = {
@@ -38,6 +39,7 @@ SECTION_FULL = {
     "achievements": "Achievements",
     "hiscores": "Hiscores",
     "settings": "Settings",
+    "guide": "Guide",
 }
 
 _CLASS = None
@@ -144,21 +146,72 @@ def refresh_shell(mw) -> bool:
         return False
 
 
+def _pending_suffix(pending: int) -> str:
+    if not pending:
+        return ""
+    return f" · {pending} review{'s' if pending != 1 else ''} pending"
+
+
 def status_text(status: Optional[Dict[str, Any]]) -> str:
-    """Compact status line copy (pure, testable)."""
+    """Short, typed status copy (pure, testable).
+
+    Raw exception text never reaches the header: the user sees a plain
+    state, and the selectable diagnostic detail carries sanitized context.
+    """
     if not status:
         return "Local progress · not signed in"
     if not status.get("logged_in"):
         return "Local progress · not signed in"
     last_error = str(status.get("last_error") or "")
     pending = int(status.get("pending", 0) or 0)
+    suffix = _pending_suffix(pending)
     if last_error:
-        return f"Sync problem · {last_error[:60]}"
+        lower = last_error.lower()
+        if "server update required" in lower or "server_update_required" in lower \
+                or "upgrade" in lower:
+            return "Sync paused · Server update required — update the add-on"
+        if any(token in lower for token in ("unauthorized", "jwt", "expired",
+                                            "sign in", "signed out")):
+            return "Session expired · sign in again — progress saved" + suffix
+        if any(token in lower for token in ("offline", "unconfigured",
+                                            "connection", "timed out",
+                                            "transient", "server")):
+            return "Offline · sync unavailable — progress saved" + suffix
+        return "Sync unavailable — progress saved" + suffix
     if pending:
         return f"Signed in · {pending} review{'s' if pending != 1 else ''} pending"
     if status.get("last_success"):
         return "Signed in · all progress synced"
     return "Signed in · never synced yet"
+
+
+def sanitize_detail(text: Any, limit: int = 240) -> str:
+    """Strip credential-shaped material from diagnostic text."""
+    import re
+    value = str(text or "")
+    value = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+",
+                   "Bearer <redacted>", value)
+    value = re.sub(r"eyJ[A-Za-z0-9_-]{10,}", "<redacted>", value)
+    value = re.sub(r"sb_(?:publishable|secret)_[A-Za-z0-9_-]+",
+                   "<redacted>", value)
+    value = re.sub(r"(?i)([a-z_]*token\"?\s*[:=]\s*\"?)[^\s\",}]+",
+                   r"\1<redacted>", value)
+    value = " ".join(value.split())
+    return value[:limit]
+
+
+def diagnostic_text(status: Optional[Dict[str, Any]]) -> str:
+    """Selectable detail view: sanitized, no secrets, always available."""
+    if not status:
+        return "Sync detail: no status available."
+    parts = [f"logged_in={bool(status.get('logged_in'))}",
+             f"pending={int(status.get('pending', 0) or 0)}"]
+    if status.get("last_success"):
+        parts.append(f"last_success={status.get('last_success')}")
+    last_error = str(status.get("last_error") or "")
+    if last_error:
+        parts.append(f"last_error={sanitize_detail(last_error)}")
+    return "Sync detail: " + " · ".join(parts)
 
 
 def _shell_class():
@@ -182,7 +235,7 @@ def _shell_class():
             self.setObjectName(SHELL_OBJECT_NAME)
             self.setWindowTitle("AnkiScape: Evolved")
             try:
-                self.setWindowFlags(Qt.WindowType.Window)
+                self.setWindowFlags(Qt.WindowType.Dialog)
                 self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
             except Exception:
                 pass
@@ -339,6 +392,7 @@ def _shell_class():
             if self.onboarding_active() and section != "settings":
                 return
             section = section if section in SECTION_LABELS else "training"
+            keep_focus = self.isActiveWindow()
             self._current = section
             screen = self._ensure_screen(section)
             if screen is None:
@@ -355,11 +409,17 @@ def _shell_class():
                 self._settings_btn.setChecked(section == "settings")
             except Exception:
                 pass
-            try:
-                screen.on_show()
-            except Exception:
-                pass
             self._refresh_screen(screen)
+            if keep_focus:
+                # Lazy widget construction can transfer macOS activation to Anki.
+                self.raise_()
+                self.activateWindow()
+                QTimer.singleShot(0, self._retain_navigation_focus)
+
+        def _retain_navigation_focus(self):
+            if self.isVisible() and QApplication.activeModalWidget() is None:
+                self.raise_()
+                self.activateWindow()
 
         def refresh_all(self, force: bool = False) -> None:
             onboarding = self.onboarding_active()
@@ -381,7 +441,7 @@ def _shell_class():
             screen = self._screens.get("onboarding")
             if screen is not None and self._stack.indexOf(screen) >= 0:
                 self._stack.removeWidget(screen)
-                screen.setParent(None)
+                screen.hide()
                 screen.deleteLater()
                 self._screens.pop("onboarding", None)
             self.set_section(self._current)
@@ -403,6 +463,12 @@ def _shell_class():
                 status = None
             try:
                 self._status.setText(status_text(status))
+                self._status.setToolTip(diagnostic_text(status))
+                try:
+                    self._status.setTextInteractionFlags(
+                        Qt.TextInteractionFlag.TextSelectableByMouse)
+                except Exception:
+                    pass
             except Exception:
                 pass
             self._publish_recap()
@@ -519,7 +585,13 @@ def _build_onboarding(shell, deps):
     return build_onboarding_screen(shell, deps)
 
 
+def _build_guide(shell, deps):
+    from .guide import build_guide_screen
+    return build_guide_screen(shell, deps)
+
+
 _BUILDERS = {
+    "guide": _build_guide,
     "training": _build_training,
     "skills": _build_skills,
     "bank": _build_bank,

@@ -15,7 +15,7 @@ def build_achievements_screen(shell, deps: Dict[str, Any]):
     from .widgets import (StonePanel, body_label, clear_layout, display_label,
                           icon_pixmap, muted_label, success_label)
 
-    root = QWidget()
+    root = QWidget(shell)
     root.setObjectName(OBJECT_NAMES["achievements_screen"])
     layout = QVBoxLayout(root)
     layout.setContentsMargins(0, 0, 0, 0)

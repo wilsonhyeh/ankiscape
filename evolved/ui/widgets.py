@@ -128,16 +128,21 @@ def success_label(text: str = "") -> "QLabel":
 
 
 def icon_pixmap(path: str, size: int):
-    """Return an integer-scaled QPixmap, or None when the asset is missing."""
+    """Integer-scaled QPixmap, or None when the asset is missing.
+
+    Aspect ratio and alpha are preserved; scaling is nearest-neighbor so
+    pixel art stays crisp at every actual slot size.
+    """
     if not HAS_QT or not path:
         return None
     try:
-        from aqt.qt import QPixmap
+        from aqt.qt import QPixmap, Qt
         pix = QPixmap(path)
         if pix.isNull():
             return None
-        # Keep pixel art sharp: integer scale, no smoothing.
-        scaled = pix.scaled(size, size)
+        scaled = pix.scaled(size, size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.FastTransformation)
         return scaled
     except Exception:
         return None
@@ -151,7 +156,7 @@ def clear_layout(layout) -> None:
             item = layout.takeAt(0)
             widget = item.widget() if item is not None else None
             if widget is not None:
-                widget.setParent(None)
+                widget.hide()
                 widget.deleteLater()
             else:
                 child = item.layout() if item is not None else None

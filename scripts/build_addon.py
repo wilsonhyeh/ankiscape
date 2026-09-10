@@ -34,7 +34,9 @@ ALLOWLIST_FILES = ("__init__.py", "constants.py", "debug.py", "deck_injection_pu
                    "manifest.json", "LICENSE", "LICENSE.txt", "README.md")
 REQUIRED_ASSETS = ("manifest.json", "__init__.py", "shared/rules-v1.json",
                    "fonts/PressStart2P-Regular.ttf", "textures/stone.png",
-                   "evolved/ui/theme.py", "evolved/ui/shell.py")
+                   "evolved/ui/theme.py", "evolved/ui/shell.py",
+                   "assets/manifest.json", "fish/ATTRIBUTION.md",
+                   "icon/fallback_missing.png")
 
 SECRET_PATTERNS = (
     # Concrete privileged material only - bare words like "service role" in
@@ -99,11 +101,96 @@ def _scan_secrets(members: list) -> list:
     return hits
 
 
-def main() -> int:
+def _source_hash(members: list) -> str:
+    sha = hashlib.sha256()
+    for member in members:
+        with open(os.path.join(ROOT, member), "rb") as fh:
+            sha.update(fh.read())
+    return sha.hexdigest()
+
+
+def _load_audit_module():
+    """scripts/audit_assets.py as a module (build fails on missing art)."""
+    import importlib.util
+    path = os.path.join(ROOT, "scripts", "audit_assets.py")
+    spec = importlib.util.spec_from_file_location(
+        "ankiscape_audit_assets", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _report_problems(step: str, problems: list) -> None:
+    print(f"build: {step} failed:", file=sys.stderr)
+    for problem in problems:
+        print(f"  {problem}", file=sys.stderr)
+
+
+def _check_current(source_hash: str, prod_baked: bool) -> int:
+    """--check: report whether dist/ matches current source + flavor.
+
+    Exit 0 when the packaged artifact is current, 1 when stale (a rebuild
+    would write different bytes), 2 on bad usage. Never writes anything.
+    """
+    manifest_path = os.path.join(DIST, "manifest.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as fh:
+            record = json.load(fh)
+    except (OSError, ValueError):
+        print("build: STALE: no readable dist/manifest.json", file=sys.stderr)
+        return 1
+    reasons = []
+    if not os.path.isfile(ARCHIVE):
+        reasons.append("archive missing")
+    if record.get("archive") != os.path.basename(ARCHIVE):
+        reasons.append(f"archive name changed ({record.get('archive')!r})")
+    if record.get("source_hash") != source_hash:
+        reasons.append("source changed "
+                       f"(dist {str(record.get('source_hash'))[:12]}... vs "
+                       f"now {source_hash[:12]}...)")
+    if bool(record.get("prod_endpoint_baked")) != prod_baked:
+        reasons.append("flavor changed (dist prod_endpoint_baked="
+                       f"{record.get('prod_endpoint_baked')} vs now {prod_baked})")
+    if reasons:
+        print(f"build: STALE: {'; '.join(reasons)}", file=sys.stderr)
+        return 1
+    print(f"build: artifact current ({os.path.basename(ARCHIVE)}, "
+          f"{record.get('members')} members, prod={prod_baked}, "
+          f"sha256={str(record.get('artifact_sha256'))[:12]}...)")
+    return 0
+
+
+def main(argv=None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    unknown = [a for a in args if a != "--check"]
+    if unknown:
+        print(f"build: unknown argument(s): {unknown} (only --check)", file=sys.stderr)
+        return 2
+    check_only = "--check" in args
     members = _collect()
     missing = [req for req in REQUIRED_ASSETS if req not in members]
     if missing:
         print(f"build: missing required assets: {missing}", file=sys.stderr)
+        return 1
+    # prod_config.py is generated at build time (public anon key only) and
+    # gitignored: refuse a stale/absent file silently becoming a dev build
+    # when the builder meant production, and vice versa. The build stamps
+    # which flavor it is into the manifest record below.
+    prod_config_path = os.path.join(ROOT, "evolved", "prod_config.py")
+    prod_baked = os.path.isfile(prod_config_path)
+    if prod_baked and "evolved/prod_config.py" not in members:
+        print("build: ERROR: evolved/prod_config.py exists but was not "
+              "collected; check the allowlist", file=sys.stderr)
+        return 1
+    source_hash = _source_hash(members)
+    if check_only:
+        return _check_current(source_hash, prod_baked)
+    # Complete asset coverage: missing, corrupt, placeholder or fallback
+    # supported art fails the build before any archive is written.
+    audit = _load_audit_module()
+    problems = audit.audit_repository()
+    if problems:
+        _report_problems("asset audit", problems)
         return 1
     # Compile check over shipped Python (catches syntax errors in modules
     # that headless unit tests never import, e.g. lazy-Qt shells).
@@ -132,23 +219,7 @@ def main() -> int:
         for hit in hits:
             print(f"  {hit}", file=sys.stderr)
         return 1
-    # prod_config.py is generated at build time (public anon key only) and
-    # gitignored: refuse a stale/absent file silently becoming a dev build
-    # when the builder meant production, and vice versa. The build stamps
-    # which flavor it is into the manifest record below.
-    prod_config_path = os.path.join(ROOT, "evolved", "prod_config.py")
-    prod_baked = os.path.isfile(prod_config_path)
-    if prod_baked and "evolved/prod_config.py" not in members:
-        print("build: ERROR: evolved/prod_config.py exists but was not "
-              "collected; check the allowlist", file=sys.stderr)
-        return 1
     os.makedirs(DIST, exist_ok=True)
-    # Source hash over member bytes (deterministic order).
-    sha = hashlib.sha256()
-    for member in members:
-        with open(os.path.join(ROOT, member), "rb") as fh:
-            sha.update(fh.read())
-    source_hash = sha.hexdigest()
     with zipfile.ZipFile(ARCHIVE, "w", zipfile.ZIP_DEFLATED) as archive:
         for member in members:
             full = os.path.join(ROOT, member)
@@ -160,6 +231,10 @@ def main() -> int:
                 archive.writestr(info, fh.read())
     with open(ARCHIVE, "rb") as fh:
         artifact_hash = hashlib.sha256(fh.read()).hexdigest()
+    archive_problems = audit.audit_archive(ARCHIVE)
+    if archive_problems:
+        _report_problems("archive audit", archive_problems)
+        return 1
     record = {"archive": os.path.basename(ARCHIVE), "version": VERSION,
               "package": PACKAGE_ID, "members": len(members),
               "source_hash": source_hash, "artifact_sha256": artifact_hash,

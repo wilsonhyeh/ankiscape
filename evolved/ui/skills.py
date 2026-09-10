@@ -19,7 +19,7 @@ def build_skills_screen(shell, deps: Dict[str, Any]):
     from .widgets import (ItemSlot, SkillTile, StonePanel, body_label,
                           display_label, error_label, muted_label,
                           success_label)
-    root = QWidget()
+    root = QWidget(shell)
     root.setObjectName(OBJECT_NAMES["skills_screen"])
     layout = QVBoxLayout(root)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -144,8 +144,6 @@ def build_skills_screen(shell, deps: Dict[str, Any]):
                           paused=(not entry["materials_ready"]),
                           level_req=entry["level"])
             slot.clicked = _select_resource
-            if entry["selected"]:
-                slot.setFocus()
             grid.addWidget(slot, index // columns, index % columns)
         grid.setRowStretch(grid.rowCount(), 1)
         _refresh_detail(rules, levels, inventory, entries)

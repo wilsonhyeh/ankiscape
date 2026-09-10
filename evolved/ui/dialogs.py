@@ -1,270 +1,135 @@
-# evolved/ui/dialogs.py - Qt account dialogs (lazy aqt.qt; Anki 23.10 + Qt5/Qt6).
-"""Register, email-code verify, login, recovery request, recovery confirm
-(code + new password), logout confirm. Bounded input, paste support (native
-QLineEdit), generic error labels. Opened only from explicit menu actions."""
+# Account forms submit while alive; errors stay beside editable fields.
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional
 
-
-def _qt():
+def _form(parent, title, name, fields):
     from aqt.qt import (QDialog, QDialogButtonBox, QFormLayout, QLabel,
                         QLineEdit, QVBoxLayout)
-    return QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout
-
-
-def _style(dlg) -> None:
-    try:
-        from .widgets import apply_theme
-        apply_theme(dlg)
-    except Exception:
-        pass
-
-
-def _error_label(QLabel, text: str = "") -> object:
-    label = QLabel(text)
-    label.setObjectName("ankiscape-error-label")
-    return label
-
-
-def _accepted(dlg) -> bool:
-    """One modal round; True on Accept. Factored so the E2E driver's popup
-    watchdog and automators can observe/close each round uniformly."""
-    from aqt.qt import QDialog as _QD
-    try:
-        return dlg.exec() == _QD.DialogCode.Accepted
-    except RuntimeError:
-        return False
-
-
-def show_register_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict],
-                         *, _test_hooks: Optional[Dict] = None) -> Optional[Dict]:
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout = _qt()
+    from .widgets import apply_theme
     dlg = QDialog(parent)
-    try:
-        from aqt.qt import Qt as _Qt
-        dlg.setAttribute(_Qt.WidgetAttribute.WA_DeleteOnClose, True)
-    except Exception:
-        pass
-    dlg.setWindowTitle("AnkiScape — Create account")
-    dlg.setObjectName("ankiscape-register-dialog")
-    _style(dlg)
+    dlg.setWindowTitle('AnkiScape — ' + title)
+    dlg.setObjectName(name)
+    apply_theme(dlg)
     layout = QVBoxLayout(dlg)
     form = QFormLayout()
-    username = QLineEdit()
-    username.setObjectName("ankiscape-register-username")
-    username.setMaxLength(20)
-    email = QLineEdit()
-    email.setObjectName("ankiscape-register-email")
-    email.setMaxLength(320)
-    password = QLineEdit()
-    password.setObjectName("ankiscape-register-password")
-    password.setEchoMode(QLineEdit.EchoMode.Password)
-    password.setMaxLength(256)
-    form.addRow("&Username (3–20, a–z 0–9 _):", username)
-    form.addRow("&Email (recovery only, never shown):", email)
-    form.addRow("&Password:", password)
+    inputs = {}
+    for key, label, object_name, secret, limit in fields:
+        edit = QLineEdit()
+        edit.setObjectName(object_name)
+        edit.setMaxLength(limit)
+        if secret:
+            edit.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow(label, edit)
+        inputs[key] = edit
     layout.addLayout(form)
-    error = _error_label(QLabel)
+    error = QLabel('')
+    error.setWordWrap(True)
+    error.setObjectName('ankiscape-error-label')
     layout.addWidget(error)
-    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
-                               | QDialogButtonBox.StandardButton.Cancel)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                               QDialogButtonBox.StandardButton.Cancel)
     layout.addWidget(buttons)
-    buttons.accepted.connect(dlg.accept)
     buttons.rejected.connect(dlg.reject)
-    if _test_hooks is not None:
-        # E2E/automation escape hatch (dev only): expose the live widgets +
-        # the submit closure so the driver can fill fields and invoke the
-        # exact on_submit path without fighting nested exec() modal loops.
-        # Production callers never pass this (dialogs stay purely modal).
-        _test_hooks.update({"dialog": dlg, "username": username,
-                            "email": email, "password": password,
-                            "error": error, "submit": lambda: on_submit(
-                                {"username": username.text(),
-                                 "email": email.text(),
-                                 "password": password.text()})})
-    if not _accepted(dlg):
-        return None
-    try:
-        fields = {"username": username.text(), "email": email.text(),
-                  "password": password.text()}
-    except RuntimeError:
-        return None
-    result = on_submit(fields)
-    if not isinstance(result, dict) or not result.get("ok"):
+    return dlg, layout, inputs, error, buttons
+
+
+def _run(dlg, inputs, error, buttons, submit, *, hooks=None, extra=None):
+    from aqt.qt import QDialog, QDialogButtonBox
+    state = {'result': None, 'busy': False, 'closed': False}
+    def values():
+        return {key: edit.text() for key, edit in inputs.items()}
+    def complete(result):
+        if state['closed']:
+            return
+        state['busy'] = False
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
+        if isinstance(result, dict) and result.get('ok'):
+            state['result'] = result
+            dlg.accept()
+        else:
+            error.setText((result or {}).get('error', 'Could not complete the request. Try again.'))
+    def send():
+        if state['busy']:
+            return
+        payload = values()
+        state['busy'] = True
+        error.setText('Working…')
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        # Account callbacks also update Anki state. Keep them on the main
+        # thread; the forms remain alive until a successful submission.
         try:
-            error.setText((result or {}).get("error", "invalid username or password"))
-        except RuntimeError:
-            pass
-        if not _accepted(dlg):  # let them read the error
-            return None
-        return None
+            complete(submit(payload))
+        except Exception:
+            complete({'ok': False, 'error': 'Could not connect. Try again.'})
+    buttons.accepted.connect(send)
+    if hooks is not None:
+        hooks.update({'dialog': dlg, **inputs, 'error': error,
+                      'submit': lambda: submit(values())})
+    try:
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        return state['result'] if accepted else None
+    finally:
+        state['closed'] = True
+        for edit in inputs.values():
+            edit.clear()
+        dlg.deleteLater()
+
+
+def show_register_dialog(parent, on_submit, *, _test_hooks=None):
+    args = _form(parent, 'Create account', 'ankiscape-register-dialog', [
+        ('username', '&Username (3–20, a–z 0–9 _):', 'ankiscape-register-username', False, 20),
+        ('email', '&Email (verification and recovery):', 'ankiscape-register-email', False, 320),
+        ('password', '&Password (at least 6 characters):', 'ankiscape-register-password', True, 256)])
+    dlg, layout, fields, error, buttons = args
+    return _run(dlg, fields, error, buttons, on_submit, hooks=_test_hooks)
+
+
+def show_code_dialog(parent, *, title, object_name, on_submit):
+    dlg, layout, fields, error, buttons = _form(parent, title.replace('AnkiScape — ', ''), object_name, [
+        ('code', '&Code from your email:', 'ankiscape-email-code', False, 32)])
+    return _run(dlg, fields, error, buttons, lambda data: on_submit(data['code']))
+
+
+def show_login_dialog(parent, on_submit, *, on_recovery=None, _test_hooks=None):
+    from aqt.qt import QCheckBox, QPushButton
+    dlg, layout, fields, error, buttons = _form(parent, 'Log in', 'ankiscape-login-dialog', [
+        ('identity', '&Username or email:', 'ankiscape-login-identity', False, 320),
+        ('password', '&Password:', 'ankiscape-login-password', True, 256)])
+    remember = QCheckBox('Keep me signed in on this computer')
+    remember.setObjectName('ankiscape-login-remember')
+    remember.setChecked(True)
+    layout.insertWidget(1, remember)
+    forgot = QPushButton('Forgot password?')
+    forgot.setObjectName('ankiscape-login-forgot')
+    forgot.setEnabled(callable(on_recovery))
+    def recover():
+        dlg.reject()
+        recovery['requested'] = True
+    recovery = {'requested': False}
+    forgot.clicked.connect(recover)
+    layout.insertWidget(2, forgot)
+    result = _run(dlg, fields, error, buttons,
+                 lambda data: on_submit({**data, 'remember': remember.isChecked()}),
+                 hooks=_test_hooks)
+    if recovery['requested'] and callable(on_recovery):
+        return on_recovery()
     return result
 
 
-def show_code_dialog(parent, *, title: str, object_name: str,
-                     on_submit: Callable[[str], Dict]) -> Optional[Dict]:
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout = _qt()
-    dlg = QDialog(parent)
-    try:
-        from aqt.qt import Qt as _Qt
-        dlg.setAttribute(_Qt.WidgetAttribute.WA_DeleteOnClose, True)
-    except Exception:
-        pass
-    dlg.setWindowTitle(title)
-    dlg.setObjectName(object_name)
-    _style(dlg)
-    layout = QVBoxLayout(dlg)
-    form = QFormLayout()
-    code = QLineEdit()
-    code.setObjectName("ankiscape-email-code")
-    code.setMaxLength(32)
-    code.setPlaceholderText("6-digit code from your email")
-    form.addRow("&Verification code:", code)
-    layout.addLayout(form)
-    error = _error_label(QLabel)
-    layout.addWidget(error)
-    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
-                               | QDialogButtonBox.StandardButton.Cancel)
-    layout.addWidget(buttons)
-    buttons.accepted.connect(dlg.accept)
-    buttons.rejected.connect(dlg.reject)
-    if not _accepted(dlg):
+def show_recovery_dialog(parent, on_request, on_confirm, *, _test_hooks=None):
+    # Request the code FIRST. Confirmation never sends a second code.
+    from aqt.qt import QLabel
+    dlg, layout, fields, error, buttons = _form(parent, 'Reset password', 'ankiscape-recovery-request', [
+        ('email', '&Account email:', 'ankiscape-recovery-email', False, 320)])
+    layout.insertWidget(0, QLabel('Request a code, then enter it with your new password.'))
+    saved = {}
+    def request(data):
+        saved.update(data)
+        return on_request(data['email'])
+    if not _run(dlg, fields, error, buttons, request):
         return None
-    try:
-        typed_code = code.text()
-    except RuntimeError:
-        return None
-    result = on_submit(typed_code)
-    if not isinstance(result, dict) or not result.get("ok"):
-        try:
-            error.setText((result or {}).get("error", "invalid or expired code"))
-        except RuntimeError:
-            pass
-        return None
-    return result
-
-
-def show_login_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict],
-                        *, _test_hooks: Optional[Dict] = None) -> Optional[Dict]:
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout = _qt()
-    dlg = QDialog(parent)
-    try:
-        from aqt.qt import Qt as _Qt
-        dlg.setAttribute(_Qt.WidgetAttribute.WA_DeleteOnClose, True)
-    except Exception:
-        pass
-    dlg.setWindowTitle("AnkiScape — Log in")
-    dlg.setObjectName("ankiscape-login-dialog")
-    _style(dlg)
-    layout = QVBoxLayout(dlg)
-    form = QFormLayout()
-    identity = QLineEdit()
-    identity.setObjectName("ankiscape-login-identity")
-    identity.setMaxLength(320)
-    identity.setPlaceholderText("username or email")
-    password = QLineEdit()
-    password.setObjectName("ankiscape-login-password")
-    password.setEchoMode(QLineEdit.EchoMode.Password)
-    password.setMaxLength(256)
-    form.addRow("&Username or email:", identity)
-    form.addRow("&Password:", password)
-    layout.addLayout(form)
-    note = QLabel("Login is forgotten on restart — that is deliberate. "
-                  "Your game stays on this computer either way.")
-    note.setWordWrap(True)
-    layout.addWidget(note)
-    error = _error_label(QLabel)
-    layout.addWidget(error)
-    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
-                               | QDialogButtonBox.StandardButton.Cancel)
-    layout.addWidget(buttons)
-    buttons.accepted.connect(dlg.accept)
-    buttons.rejected.connect(dlg.reject)
-    if _test_hooks is not None:
-        _test_hooks.update({"dialog": dlg, "identity": identity,
-                            "password": password, "error": error,
-                            "submit": lambda: on_submit(
-                                {"identity": identity.text(),
-                                 "password": password.text()})})
-    if not _accepted(dlg):
-        return None
-    try:
-        fields = {"identity": identity.text(), "password": password.text()}
-    except RuntimeError:
-        return None
-    result = on_submit(fields)
-    if not isinstance(result, dict) or not result.get("ok"):
-        try:
-            error.setText((result or {}).get("error", "invalid username or password"))
-        except RuntimeError:
-            pass
-        return None
-    return result
-
-
-def show_recovery_dialog(parent, on_request: Callable[[str], Dict],
-                         on_confirm: Callable[[Dict[str, str]], Dict],
-                         *, _test_hooks: Optional[Dict] = None) -> Optional[Dict]:
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout = _qt()
-    dlg = QDialog(parent)
-    try:
-        from aqt.qt import Qt as _Qt
-        dlg.setAttribute(_Qt.WidgetAttribute.WA_DeleteOnClose, True)
-    except Exception:
-        pass
-    dlg.setWindowTitle("AnkiScape — Recover account")
-    dlg.setObjectName("ankiscape-recovery-dialog")
-    _style(dlg)
-    layout = QVBoxLayout(dlg)
-    form = QFormLayout()
-    email = QLineEdit()
-    email.setObjectName("ankiscape-recovery-email")
-    email.setMaxLength(320)
-    code = QLineEdit()
-    code.setObjectName("ankiscape-email-code")
-    code.setMaxLength(32)
-    new_password = QLineEdit()
-    new_password.setObjectName("ankiscape-recovery-password")
-    new_password.setEchoMode(QLineEdit.EchoMode.Password)
-    new_password.setMaxLength(256)
-    form.addRow("&Email:", email)
-    form.addRow("Verification &code:", code)
-    form.addRow("&New password:", new_password)
-    layout.addLayout(form)
-    error = _error_label(QLabel)
-    layout.addWidget(error)
-    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
-                               | QDialogButtonBox.StandardButton.Cancel)
-    layout.addWidget(buttons)
-    buttons.accepted.connect(dlg.accept)
-    buttons.rejected.connect(dlg.reject)
-    if _test_hooks is not None:
-        def _recovery_submit():
-            try:
-                typed = {"email": email.text(), "code": code.text(),
-                         "new_password": new_password.text()}
-            except RuntimeError:
-                return {"ok": False, "error": "dialog closed"}
-            req = on_request(typed["email"])
-            if not req.get("ok"):
-                return req
-            return on_confirm(typed)
-        _test_hooks.update({"dialog": dlg, "email": email, "code": code,
-                            "new_password": new_password, "error": error,
-                            "submit": _recovery_submit})
-    if not _accepted(dlg):
-        return None
-    try:
-        typed = {"email": email.text(), "code": code.text(),
-                 "new_password": new_password.text()}
-    except RuntimeError:
-        return None
-    req = on_request(typed["email"])
-    if not req.get("ok"):
-        try:
-            error.setText(req.get("error", "network error; try again shortly"))
-        except RuntimeError:
-            pass
-        return None
-    return on_confirm(typed)
+    dlg, layout, fields, error, buttons = _form(parent, 'Enter reset code', 'ankiscape-recovery-dialog', [
+        ('code', '&Code from your email:', 'ankiscape-email-code', False, 32),
+        ('new_password', '&New password (at least 6 characters):', 'ankiscape-recovery-password', True, 256)])
+    return _run(dlg, fields, error, buttons,
+                lambda data: on_confirm({**saved, **data}), hooks=_test_hooks)

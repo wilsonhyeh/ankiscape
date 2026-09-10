@@ -17,7 +17,7 @@ def build_training_screen(shell, deps: Dict[str, Any]):
                           error_label, icon_pixmap, muted_label, success_label)
     from ..assets import display_icon
 
-    root = QWidget()
+    root = QWidget(shell)
     root.setObjectName(OBJECT_NAMES["training_screen"])
     layout = QVBoxLayout(root)
     layout.setContentsMargins(0, 0, 0, 0)

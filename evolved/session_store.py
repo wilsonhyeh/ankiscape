@@ -7,10 +7,10 @@
     place (`evolved/prod_config.py`, generated at build time from
     environment — never committed with secrets) so a misconfigured build
     fails closed (no endpoint) rather than pointing at a wrong project.
-  - The MemorySession singleton per profile generation: login/logout bind
-    and clear it; the sync service reads it; profile close clears it even
-    offline. Passwords/tokens never enter collection config, journals, or
-    logs (enforced by construction: only tokens/user_id live here).
+  - One MemorySession per profile generation. Remembered sessions are restored
+    from the OS credential vault; profile close clears RAM and explicit logout
+    removes the saved session. Passwords/tokens never enter collection config,
+    journals or logs.
 
 Refresh serialization: concurrent 401s must produce ONE refresh attempt.
 The session carries a lock; `refresh_once()` runs the supplied refresh
@@ -81,9 +81,17 @@ def resolve_endpoint(*, dev: bool, anon_key: str = "",
 class ProfileSession:
     """MemorySession + refresh lock + generation binding for one profile."""
 
-    def __init__(self, *, generation: int):
+    def __init__(self, *, generation: int, vault=None):
         self.generation = generation
         self.session = MemorySession()
+        self.vault = vault
+        self.remember = bool(vault is not None and vault.available)
+        self.persistence_ok = True
+        if self.remember:
+            saved = vault.read()
+            if saved:
+                self.session.set(**saved)
+        self.session.on_change = self._persist
         self._refresh_lock = threading.Lock()
         self._refresh_fn: Optional[Callable[[MemorySession], bool]] = None
 
@@ -95,10 +103,37 @@ class ProfileSession:
         return self.session.user_id
 
     @property
+    def access_token(self) -> Optional[str]:
+        """Read-only delegation to the inner MemorySession.
+
+        The transport reads this at request time so a refresh that swaps the
+        token is picked up by later requests. No second copy is cached and
+        the MemorySession's own persistence callback keeps running.
+        """
+        return self.session.access_token
+
+    @property
     def logged_in(self) -> bool:
         return self.session.logged_in
 
+    @property
+    def username(self):
+        return self.session.username
+
+    def _persist(self, session):
+        if self.vault is None:
+            return
+        if not session.logged_in or not self.remember:
+            self.persistence_ok = self.vault.delete()
+        else:
+            self.persistence_ok = self.vault.write({
+                "access_token": session.access_token,
+                "refresh_token": session.refresh_token,
+                "user_id": session.user_id, "username": session.username})
+
     def clear(self) -> None:
+        # Profile close clears RAM; explicit logout clears the vault too.
+        self.session.on_change = None
         self.session.clear()
 
     def refresh_once(self) -> bool:

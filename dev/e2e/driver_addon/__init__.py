@@ -537,6 +537,8 @@ def _click_rail(section):
                         and child.property("section") == section
                         and child.isVisible()):
                     child.click()
+                    from aqt.qt import QApplication
+                    QApplication.processEvents()
                     return True
             except Exception:
                 continue
@@ -737,6 +739,29 @@ def _drive_answer(state, ease=3):
             return False
         rst = getattr(reviewer, "state", "")
         if rst == "question":
+            card_id = getattr(getattr(reviewer, "card", None), "id", None)
+            if state.get("ready_card") != card_id:
+                if not state.get("page_probe_pending"):
+                    state["page_probe_pending"] = True
+                    state["page_probe_ticks"] = 0
+
+                    def ready(value):
+                        state["page_probe_pending"] = False
+                        if value:
+                            state["ready_card"] = card_id
+                    reviewer.web.evalWithCallback(
+                        "typeof _showAnswer === 'function' && !!document.getElementById('qa')", ready)
+                else:
+                    # A lost evalWithCallback must not wedge the run forever:
+                    # re-issue the (idempotent) probe after a bounded wait.
+                    state["page_probe_ticks"] = state.get(
+                        "page_probe_ticks", 0) + 1
+                    if state["page_probe_ticks"] > 50:
+                        state["page_probe_pending"] = False
+                        state["page_probe_ticks"] = 0
+                        _trace(state, "page-probe-retry")
+                state["drive_note"] = "waiting-for-review-page"
+                return False
             show = getattr(reviewer, "_showAnswer", None)
             if callable(show):
                 before = (getattr(mw, "state", "?"), getattr(reviewer, "state", "?"))
@@ -901,11 +926,10 @@ def _revlog_count():
 
 
 def _journal_path():
-    import glob
     from aqt import mw
-    found = glob.glob(os.path.join(_base_dir(), mw.pm.name,
-                                   "ankiscape-evolved", "*", "game.sqlite3"))
-    return found[0] if len(found) == 1 else ""
+    game = _game_uuid()
+    path = os.path.join(mw.pm.profileFolder(), "ankiscape-evolved", game, "game.sqlite3")
+    return path if game and os.path.isfile(path) else ""
 
 
 def _journal_ops():
@@ -1767,115 +1791,44 @@ def _poll_dialogs(state):
 
 
 def _drive_account_dialog_hooked(state, idx):
-    """Correct sequencing: arm the fill timer FIRST, then construct.
-
-    The fill timer (800 ms) fires while the dialog's exec() nested loop
-    runs: it fills the live widgets found by object name, invokes the
-    exposed submit closure (the exact callable OK would trigger), records
-    the result, and closes the dialog with reject() so exec() returns
-    Cancelled. _account_submitted() verifies + chains from the submit
-    return value — no second modal frame is ever entered.
-    """
+    """Exercise real OK buttons, including the two-stage recovery form."""
     from aqt import mw
-    from aqt.qt import QApplication as _QApp
-    from aqt.qt import QLineEdit as _LE
-    from aqt.qt import QTimer as _QT3
-    import ankiscape.evolved.ui.dialogs as _dlg
+    from aqt.qt import QApplication, QLineEdit, QTimer, QDialogButtonBox
+    import ankiscape.evolved.ui.dialogs as dialogs
     if idx >= 3:
         state["acct_done"] = True
         return
     state["acct_index"] = idx
-    _step(f"dialog_{idx}_opens", True, "invoked")
-    holder: dict = {}
-    fills = [
-        [("ankiscape-register-username", "e2e_user"),
-         ("ankiscape-register-email", "e2e@example.com"),
-         ("ankiscape-register-password", "correct horse 9")],
-        [("ankiscape-login-identity", "e2e_user"),
-         ("ankiscape-login-password", "correct horse 9")],
-        [("ankiscape-recovery-email", "e2e@example.com"),
-         ("ankiscape-email-code", "123456"),
-         ("ankiscape-recovery-password", "new horse 9")],
-    ]
-    names = ["ankiscape-register-dialog", "ankiscape-login-dialog",
-             "ankiscape-recovery-dialog"]
-
-    def _fill_and_submit():
-        hooks = holder.get("hooks") or {}
-        dlg = hooks.get("dialog")
-        submit = hooks.get("submit")
-        if dlg is None or submit is None:
-            # Builder hasn't populated hooks yet (still constructing):
-            # retry shortly; bounded by the journey watchdog.
-            _QT3.singleShot(300, _fill_and_submit)
+    values = {
+        "ankiscape-register-username": "e2e_user",
+        "ankiscape-register-email": "e2e@example.com",
+        "ankiscape-register-password": "example-password",
+        "ankiscape-login-identity": "e2e_user",
+        "ankiscape-login-password": "example-password",
+        "ankiscape-recovery-email": "e2e@example.com",
+        "ankiscape-email-code": "123456",
+        "ankiscape-recovery-password": "example-new-password",
+    }
+    def fill():
+        dlg = QApplication.activeModalWidget()
+        if dlg is None or not dlg.objectName().startswith("ankiscape-"):
+            QTimer.singleShot(100, fill)
             return
-        try:
-            for obj_name, text in fills[idx]:
-                field = dlg.findChild(_LE, obj_name)
-                if field is None:
-                    _step(f"dialog_{idx}_fill", False, f"missing {obj_name}")
-                    state["acct_done"] = True
-                    try:
-                        dlg.reject()
-                    except Exception:
-                        pass
-                    return
-                field.setText(text)
-        except Exception as exc:
-            _step(f"dialog_{idx}_fill", False, repr(exc))
-            state["acct_done"] = True
-            try:
-                dlg.reject()
-            except Exception:
-                pass
-            return
-        _step(f"dialog_{idx}_filled", True)
-        try:
-            result = submit()
-        except Exception as exc:
-            _step(f"dialog_{idx}_submit", False, repr(exc))
-            state["acct_done"] = True
-            try:
-                dlg.reject()
-            except Exception:
-                pass
-            return
-        # submit() already recorded+verified via _account_submitted; close
-        # the modal so exec() returns Cancelled (submit path proven).
-        _step(f"dialog_{idx}_submit_return", True, str(result)[:120])
-        try:
-            dlg.reject()
-        except Exception:
-            pass
-
-    def _construct():
-        try:
-            if idx == 0:
-                _dlg.show_register_dialog(
-                    mw, lambda fields: _account_submitted(state, idx, dict(fields)),
-                    _test_hooks=holder.setdefault("hooks", {}))
-            elif idx == 1:
-                _dlg.show_login_dialog(
-                    mw, lambda fields: _account_submitted(state, idx, dict(fields)),
-                    _test_hooks=holder.setdefault("hooks", {}))
-            else:
-                _dlg.show_recovery_dialog(
-                    mw, lambda email: {"ok": True},
-                    lambda fields: _account_submitted(state, idx, dict(fields)),
-                    _test_hooks=holder.setdefault("hooks", {}))
-        except Exception as exc:
-            _step(f"dialog_{idx}_construct", False, repr(exc))
-            state["acct_done"] = True
-            return
-        # exec() returned (we rejected after submit): chain is already
-        # scheduled from _account_submitted; nothing more to do here.
-        _step(f"dialog_{idx}_closed", True)
-
-    _QT3.singleShot(1500, _fill_and_submit)  # armed BEFORE construction
-    _QT3.singleShot(0, _construct)
-
-    _QT3.singleShot(0, _open)
-    _QT3.singleShot(1200, lambda: _fill(0))
+        for field in dlg.findChildren(QLineEdit):
+            if field.objectName() in values:
+                field.setText(values[field.objectName()])
+        buttons = dlg.findChild(QDialogButtonBox)
+        if dlg.objectName() == "ankiscape-recovery-request":
+            QTimer.singleShot(200, fill)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).click()
+    QTimer.singleShot(250, fill)
+    submit = lambda fields: _account_submitted(state, idx, dict(fields))
+    if idx == 0:
+        dialogs.show_register_dialog(mw, submit)
+    elif idx == 1:
+        dialogs.show_login_dialog(mw, submit)
+    else:
+        dialogs.show_recovery_dialog(mw, lambda email: {"ok": True}, submit)
 
 
 def _account_submitted(state, idx, fields):
@@ -1892,7 +1845,7 @@ def _account_submitted(state, idx, fields):
         and fields.get("code") == "123456",
     ]
     names = ["register_submit", "login_submit", "recovery_submit"]
-    _step(names[idx], bool(checks[idx]), str(fields)[:200])
+    _step(names[idx], bool(checks[idx]), "fields validated (credentials omitted)")
     _QT4.singleShot(800, lambda: _drive_account_dialog_hooked(state, idx + 1))
     return {"ok": True}
 
@@ -1921,6 +1874,8 @@ def _find_child(widget, object_name, *, cls_name=""):
 
 
 def _click_slot(display):
+    from aqt.qt import QApplication
+    QApplication.processEvents()
     shell = _find_shell()
     if shell is None:
         return False
@@ -1928,7 +1883,7 @@ def _click_slot(display):
         from aqt.qt import QWidget
         for child in shell.findChildren(QWidget):
             try:
-                if child.objectName() != "ankiscape-item-slot":
+                if child.objectName() != "ankiscape-item-slot" or not child.isVisible():
                     continue
                 tip = str(child.toolTip() or child.accessibleName() or "")
                 if tip.startswith(display):
@@ -1970,6 +1925,12 @@ def _poll_ui_onboarding(state):
         result = _drive_onboarding(state, "woodcutting")
         if result is not True:
             return
+        from .regressions import run as interaction_regressions
+        try:
+            interaction_regressions(_step, _shot)
+        except Exception as exc:
+            _step("interaction_regression_exception", False, repr(exc))
+            raise
         _step("ui_onboarding_complete", True)
         state["stage"] = "verify"
         return
@@ -2054,7 +2015,42 @@ def _poll_ui_training(state):
         _shot("ui-training-bank")
         _click_rail("achievements")
         _shot("ui-training-achievements")
-        _finish(0 if not RESULT["errors"] else 1)
+        state["stage"] = "navigation_focus"
+        state["navigation_index"] = 0
+        _find_shell().activateWindow()
+        return
+    if stage == "navigation_focus":
+        sections = ("skills", "bank", "achievements", "hiscores", "guide", "settings", "training")
+        shell = _find_shell()
+        index = state["navigation_index"]
+        # Re-assert activation each tick: macOS can refuse a programmatic
+        # activateWindow() while another app is frontmost, and screenshots
+        # taken just before can steal it back. Judge only after a bounded
+        # retry, and accept either an active window or focused shell.
+        try:
+            from aqt.qt import QApplication, Qt
+            QApplication.setActiveWindow(shell)
+            shell.raise_()
+            shell.activateWindow()
+            shell.setFocus(Qt.FocusReason.OtherFocusReason)
+            QApplication.processEvents()
+        except Exception:
+            pass
+        if index:
+            focused = shell.isActiveWindow() or shell.hasFocus()
+            if not focused and state.get("focus_attempts", 0) < 15:
+                state["focus_attempts"] = state.get("focus_attempts", 0) + 1
+                return
+            state["focus_attempts"] = 0
+            _step("navigation_focus_" + sections[index-1], focused)
+        if index == len(sections):
+            _finish(0 if not RESULT["errors"] else 1)
+            return
+        shell.set_section(sections[index])
+        if sections[index] == "guide":
+            _step("guide_accessible_from_rail", "guide" in shell._screens)
+            _shot("ui-skill-guide")
+        state["navigation_index"] += 1
 
 
 def _poll_ui_settings(state):
@@ -2289,6 +2285,405 @@ def _poll_ui_lifecycle(state):
         _finish(0 if not RESULT["errors"] else 1)
 
 
+# --------------------------------------------------------------------------
+# Journey: ui-art (every bundled asset decoded in real Qt; every tab visited)
+# --------------------------------------------------------------------------
+
+ART_SECTIONS = ("training", "skills", "bank", "achievements", "hiscores",
+                "guide", "settings")
+ART_SCREEN_NAMES = {
+    "training": "ankiscape-screen-training",
+    "skills": "ankiscape-screen-skills",
+    "bank": "ankiscape-screen-bank",
+    "achievements": "ankiscape-screen-achievements",
+    "hiscores": "ankiscape-screen-hiscores",
+    "settings": "ankiscape-screen-settings",
+    "guide": "ankiscape-guide",
+}
+
+
+def _art_manifest():
+    import json
+    import ankiscape
+    path = os.path.join(os.path.dirname(ankiscape.__file__), "assets",
+                        "manifest.json")
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _addon_tree_snapshot():
+    """Hash of the installed add-on tree (excluding bytecode caches)."""
+    import hashlib
+    import ankiscape
+    root = os.path.dirname(ankiscape.__file__)
+    out = {}
+    for base, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git")]
+        for name in files:
+            if name.endswith((".pyc", ".pyo")) or name == ".DS_Store":
+                continue
+            full = os.path.join(base, name)
+            rel = os.path.relpath(full, root)
+            try:
+                with open(full, "rb") as fh:
+                    out[rel] = hashlib.sha256(fh.read()).hexdigest()
+            except OSError:
+                out[rel] = "unreadable"
+    return out
+
+
+def _install_addon_network_guard(state):
+    """Deny and record any HTTP(S) connection attempted from ankiscape code.
+
+    The image path must be fully offline; anything from the add-on itself is
+    recorded, refused, and fails the journey. Connections from Anki or the
+    driver are left alone so the check cannot lie about unrelated traffic.
+    """
+    import socket
+    import sys as _sys
+    attempts = state.setdefault("net_attempts", [])
+
+    def _from_addon():
+        frame = _sys._getframe()
+        while frame is not None:
+            name = str(frame.f_globals.get("__name__", ""))
+            if name == "ankiscape" or name.startswith("ankiscape."):
+                return True
+            frame = frame.f_back
+        return False
+
+    def _wrap(real):
+        def wrapper(self, address, *args, **kwargs):
+            if isinstance(address, tuple) and len(address) > 1 \
+                    and address[1] in (80, 443) and _from_addon():
+                attempts.append(str(address))
+                raise ConnectionRefusedError(
+                    "AnkiScape offline test: image network denied")
+            return real(self, address, *args, **kwargs)
+        return wrapper
+
+    try:
+        socket.socket.connect = _wrap(socket.socket.connect)
+        socket.socket.connect_ex = _wrap(socket.socket.connect_ex)
+        _step("art_network_guard", True)
+    except Exception as exc:
+        _step("art_network_guard", False, repr(exc))
+
+
+def _pixmap_has_visible_alpha(pix):
+    if pix.isNull():
+        return False
+    image = pix.toImage()
+    width, height = image.width(), image.height()
+    if width < 1 or height < 1:
+        return False
+    step_x = max(1, width // 48)
+    step_y = max(1, height // 48)
+    for y in range(0, height, step_y):
+        for x in range(0, width, step_x):
+            if image.pixelColor(x, y).alpha() > 8:
+                return True
+    return False
+
+
+def _art_contact_sheet(entries, out_path):
+    from aqt.qt import QImage, QPainter, QPixmap, Qt
+    scale, cell, cols = 3, 200, 6
+    rows = max(1, (len(entries) + cols - 1) // cols)
+    sheet = QImage(cols * cell, rows * cell, QImage.Format.Format_ARGB32)
+    sheet.fill(Qt.GlobalColor.black)
+    painter = QPainter(sheet)
+    try:
+        painter.setPen(Qt.GlobalColor.gray)
+        for i, (abs_path, label) in enumerate(entries):
+            pix = QPixmap(abs_path)
+            if pix.isNull():
+                continue
+            scaled = pix.scaled(pix.width() * scale, pix.height() * scale,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.FastTransformation)
+            x = (i % cols) * cell + (cell - scaled.width()) // 2
+            y = (i // cols) * cell + 6
+            painter.drawPixmap(x, y, scaled)
+            painter.setPen(Qt.GlobalColor.white)
+            painter.drawText((i % cols) * cell + 4,
+                             (i // cols) * cell + cell - 20,
+                             str(label)[-26:])
+            painter.setPen(Qt.GlobalColor.gray)
+    finally:
+        painter.end()
+    return sheet.save(out_path)
+
+
+def _run_art_checks(state):
+    from aqt.qt import QPixmap
+    import ankiscape
+    from ankiscape.evolved import assets as assets_mod
+    from ankiscape.evolved.ui.widgets import icon_pixmap
+
+    base = os.path.dirname(ankiscape.__file__)
+    manifest = _art_manifest()
+    records = [r for r in manifest.get("files", []) if isinstance(r, dict)]
+    by_path = {str(r.get("path")): r for r in records}
+    fallback_sha = str(by_path.get("icon/fallback_missing.png", {}).get(
+        "sha256") or "")
+
+    problems = []
+    contact = []
+    for record in records:
+        if record.get("kind") in ("font", "sound"):
+            continue
+        rel = str(record.get("path") or "")
+        full = os.path.join(base, rel)
+        pix = QPixmap(full)
+        if not _pixmap_has_visible_alpha(pix):
+            problems.append(f"undecodable/blank: {rel}")
+            continue
+        contact.append((full, rel))
+        if record.get("kind") in ("skill", "nav", "ore", "log", "bar", "gem",
+                                  "craft", "fish_raw", "fish_cooked"):
+            if fallback_sha and record.get("sha256") == fallback_sha:
+                problems.append(f"known art is the fallback: {rel}")
+            if record.get("bytes") and os.path.getsize(full) != record["bytes"]:
+                problems.append(f"byte drift: {rel}")
+    _step("art_manifest_decodes", not problems, "; ".join(problems[:4]))
+
+    mapping_problems = []
+
+    def check_asset(key, rel, *, require_verified):
+        record = by_path.get(rel)
+        allowed = ("verified",) if require_verified else ("verified", "original")
+        if record is None or record.get("status") not in allowed:
+            mapping_problems.append(f"{key}->{rel} not a supported record")
+            return
+        if fallback_sha and record.get("sha256") == fallback_sha:
+            mapping_problems.append(f"{key}->{rel} is the fallback")
+            return
+        pix = QPixmap(os.path.join(base, rel))
+        if pix.isNull():
+            mapping_problems.append(f"{key}->{rel} will not decode")
+            return
+        for size in (24, 28, 48):
+            scaled = icon_pixmap(os.path.join(base, rel), size)
+            if scaled is None or scaled.isNull():
+                mapping_problems.append(f"{rel} null at {size}")
+                continue
+            if scaled.width() > size or scaled.height() > size:
+                mapping_problems.append(f"{rel} exceeds {size}px slot")
+            if pix.width() and pix.height():
+                want = pix.height() / pix.width()
+                got = scaled.height() / scaled.width()
+                if abs(got - want) > 0.08:
+                    mapping_problems.append(f"{rel} aspect drift at {size}")
+
+    for display, name in assets_mod.ITEM_FILES.items():
+        rel = f"{assets_mod._folder_for(name)}/{name}"
+        check_asset(display, rel, require_verified=True)
+    for skill, rel in assets_mod.SKILL_ICONS.items():
+        check_asset(skill, rel, require_verified=True)
+    for section, rel in assets_mod.NAV_ICONS.items():
+        check_asset(section, rel, require_verified=False)
+    _step("art_semantic_mapping", not mapping_problems,
+          "; ".join(mapping_problems[:4]))
+
+    fish = ("shrimp", "sardine", "trout", "tuna", "lobster", "swordfish",
+            "monkfish", "shark", "anglerfish")
+    same = [name for name in fish
+            if QPixmap(os.path.join(base, f"fish/{name}.png")).toImage()
+            == QPixmap(os.path.join(base, f"fish/cooked_{name}.png")).toImage()]
+    _step("art_fish_variants_distinct", not same, ",".join(same))
+    gems = (("sapphire", "Sapphire"), ("emerald", "Emerald"),
+            ("ruby", "Ruby"), ("diamond", "Diamond"))
+    same = [gem for gem, cut in gems
+            if QPixmap(os.path.join(base, f"gems/{gem}.png")).toImage()
+            == QPixmap(os.path.join(base,
+                                    f"crafteditems/{cut}.png")).toImage()]
+    _step("art_gem_variants_distinct", not same, ",".join(same))
+
+    try:
+        from ankiscape.evolved.data import load_rules
+        from ankiscape.evolved.ui.guide import guide_pages
+        pages = guide_pages(load_rules())
+        short = [title for title, body in pages.items() if len(body) < 100]
+        credits = pages.get("Credits & assets", "")
+        ok = (not short and "Jagex Ltd" in credits
+              and "oldschool.runescape.wiki" in credits)
+        _step("art_guide_pages_render", ok,
+              f"pages={len(pages)} short={short}")
+    except Exception as exc:
+        _step("art_guide_pages_render", False, repr(exc))
+
+    try:
+        sheet_path = _out_path("art-contact-sheet.png")
+        ok = _art_contact_sheet(contact, sheet_path)
+        if ok:
+            RESULT["screenshots"].append(sheet_path)
+        _step("art_contact_sheet", bool(ok), f"{len(contact)} assets")
+    except Exception as exc:
+        _step("art_contact_sheet", False, repr(exc))
+
+
+def _poll_ui_art(state):
+    stage = state.get("stage", "setup")
+    if stage == "setup":
+        if not state.get("guard_installed"):
+            state["guard_installed"] = True
+            _install_addon_network_guard(state)
+            state["install_snapshot"] = _addon_tree_snapshot()
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        state["stage"] = "fixture"
+        return
+    if stage == "fixture":
+        try:
+            import ankiscape
+            engine = ankiscape._EVOLVED_CTX.get("engine")
+            if engine is None:
+                return
+            if not state.get("art_fixture"):
+                with open(os.path.join(_base_dir(), "art-fixture.json"),
+                          encoding="utf-8") as fh:
+                    data = json.load(fh)
+                game = engine.cfg.game_uuid
+                ops = [dict(op, game_uuid=game)
+                       for op in data.get("operations", [])]
+                counts = engine.journal.import_game(
+                    game, {"operations": ops, "observations": []})
+                engine.invalidate_projection()
+                state["art_fixture"] = True
+                _step("art_fixture_imported", True,
+                      f"{counts.get('operations', len(ops))} ops")
+            if not _find_shell():
+                _open_shell_via_menu()
+                return
+            state["stage"] = "tabs"
+            state["tab_index"] = 0
+        except Exception as exc:
+            _step("art_fixture", False, repr(exc))
+            state["stage"] = "tabs"
+            state["tab_index"] = 0
+        return
+    if stage == "tabs":
+        index = int(state.get("tab_index", 0))
+        if index >= len(ART_SECTIONS):
+            state["stage"] = "checks"
+            return
+        section = ART_SECTIONS[index]
+        shell = _find_shell()
+        if shell is None:
+            state["shell_ticks"] = state.get("shell_ticks", 0) + 1
+            if state["shell_ticks"] > 80:
+                _step("art_shell", False, "shell never appeared")
+                state["stage"] = "checks"
+            return
+        state["shell_ticks"] = 0
+        if not _click_rail(section):
+            state["tab_ticks"] = state.get("tab_ticks", 0) + 1
+            if state["tab_ticks"] > 80:
+                _step(f"art_tab_{section}", False, "rail button missing")
+                state["tab_index"] = index + 1
+                state["tab_ticks"] = 0
+            return
+        from aqt.qt import QApplication
+        QApplication.processEvents()
+        screen = _shell_child(shell, ART_SCREEN_NAMES[section])
+        if screen is None:
+            state["tab_ticks"] = state.get("tab_ticks", 0) + 1
+            if state["tab_ticks"] > 60:
+                _step(f"art_tab_{section}", False, "screen widget missing")
+                state["tab_index"] = index + 1
+                state["tab_ticks"] = 0
+            return
+        state["tab_ticks"] = 0
+        _shot(f"ui-art-{section}")
+        _step(f"art_tab_{section}", True,
+              f"{screen.objectName()} {screen.width()}x{screen.height()}")
+        state["tab_index"] = index + 1
+        return
+    if stage == "checks":
+        if not state.get("art_checks_done"):
+            _run_art_checks(state)
+            _verify_art_environment(state)
+            state["art_checks_done"] = True
+        _shot("ui-art-done")
+        _finish_phase(2)
+
+
+def _verify_art_environment(state):
+    """Offline + immutability assertions for the installed add-on."""
+    attempts = state.get("net_attempts") or []
+    _step("art_no_image_network", not attempts,
+          f"attempts={attempts[:3]}")
+    before = state.get("install_snapshot") or {}
+    after = _addon_tree_snapshot()
+    if before:
+        added = sorted(set(after) - set(before))
+        removed = sorted(set(before) - set(after))
+        changed = sorted(k for k in set(before) & set(after)
+                         if before[k] != after[k])
+        ok = not added and not removed and not changed
+        _step("art_install_unchanged", ok,
+              f"added={added[:3]} removed={removed[:3]} "
+              f"changed={changed[:3]}")
+    else:
+        _step("art_install_unchanged", False, "no pre-resolution snapshot")
+
+
+def _poll_ui_art_2(state):
+    """Restart phase: graceful account state + unchanged offline art."""
+    stage = state.get("stage", "open")
+    if stage == "open":
+        if not state.get("guard_installed"):
+            state["guard_installed"] = True
+            _install_addon_network_guard(state)
+            state["install_snapshot"] = _addon_tree_snapshot()
+        if not _find_shell():
+            state["shell_ticks"] = state.get("shell_ticks", 0) + 1
+            if state["shell_ticks"] % 20 == 0:
+                _open_shell_via_menu()
+            if state["shell_ticks"] > 120:
+                _step("art_restart_shell", False, "shell never appeared")
+                _finish(1)
+            return
+        state["shell_ticks"] = 0
+        try:
+            import ankiscape
+            info = ankiscape._evolved_account_info()
+            ok = not bool(info.get("logged_in"))
+            _step("art_restart_graceful_logged_out", ok, str(info)[:120])
+        except Exception as exc:
+            _step("art_restart_graceful_logged_out", False, repr(exc))
+        state["stage"] = "tabs"
+        state["tab_index"] = 0
+        return
+    if stage == "tabs":
+        index = int(state.get("tab_index", 0))
+        if index >= len(ART_SECTIONS):
+            state["stage"] = "checks"
+            return
+        section = ART_SECTIONS[index]
+        shell = _find_shell()
+        if shell is None:
+            return
+        if not _click_rail(section):
+            state["tab_index"] = index + 1
+            return
+        from aqt.qt import QApplication
+        QApplication.processEvents()
+        screen = _shell_child(shell, ART_SCREEN_NAMES[section])
+        _shot(f"ui-art-restart-{section}")
+        _step(f"art_restart_tab_{section}", screen is not None)
+        state["tab_index"] = index + 1
+        return
+    if stage == "checks":
+        if not state.get("art_checks_done"):
+            _run_art_checks(state)
+            _verify_art_environment(state)
+            state["art_checks_done"] = True
+        _shot("ui-art-restart-done")
+        _finish(0 if not RESULT["errors"] else 1)
+
+
 _PHASE_POLLS = {
     ("fresh", 1): _poll_fresh,
     ("upgrade", 1): _poll_upgrade_1,
@@ -2304,6 +2699,8 @@ _PHASE_POLLS = {
     ("ui-settings", 1): _poll_ui_settings,
     ("ui-review", 1): _poll_ui_review,
     ("ui-lifecycle", 1): _poll_ui_lifecycle,
+    ("ui-art", 1): _poll_ui_art,
+    ("ui-art", 2): _poll_ui_art_2,
 }
 
 

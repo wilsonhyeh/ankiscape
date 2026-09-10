@@ -1,15 +1,17 @@
-# evolved/icons.py - Deterministic placeholder icons (no runtime downloads).
-"""Copy appropriate legacy resource icons; fish/cooked images carry recorded
-source/attribution. A deterministic placeholder covers missing assets so a
-missing file can never break review or packaging."""
+# evolved/icons.py - Shipped fallback icon resolution (no runtime downloads).
+"""Every unknown item resolves to ONE shipped, visible fallback tile.
+
+Nothing is written to the installed add-on at runtime: a missing file can
+never break review or packaging, and a missing image never creates a new
+file inside the installation. Known supported items are audited
+(`scripts/audit_assets.py`) to never resolve through this fallback; the
+deterministic bytes below exist only so tests and tools can recognize it.
+"""
 from __future__ import annotations
 
-import base64
 import os
 
-# 1x1 transparent PNG (deterministic bytes).
-_PLACEHOLDER_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+FALLBACK_REL = os.path.join("icon", "fallback_missing.png")
 
 
 def repo_root() -> str:
@@ -20,27 +22,24 @@ def icon_path(*parts: str) -> str:
     return os.path.join(repo_root(), *parts)
 
 
-def ensure_placeholder(path: str) -> str:
-    """Write the deterministic placeholder if missing; return path."""
-    if not os.path.exists(path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as fh:
-            fh.write(_PLACEHOLDER_PNG)
-    return path
+def fallback_path() -> str:
+    """Absolute path of the single bundled fallback image."""
+    return icon_path(FALLBACK_REL)
 
 
 def resolve_icon(*, kind: str, display: str, mapping: dict) -> str:
-    """Return an existing icon path, else a deterministic placeholder.
+    """Return an existing icon path, else the shipped fallback.
 
-    kind: ore|tree|bar|gem|craft|fish|cooked. mapping: legacy display->path.
+    kind/display are informational only; resolution never creates a file.
     """
-    _ = kind
+    _ = kind, display
     candidate = mapping.get(display, "")
     if candidate and os.path.exists(candidate):
         return candidate
-    safe = "".join(ch if ch.isalnum() else "_" for ch in display.strip().lower())
-    return ensure_placeholder(icon_path("icon", "placeholder", f"{safe}.png"))
+    return fallback_path()
 
 
 def placeholder_bytes() -> bytes:
-    return bytes(_PLACEHOLDER_PNG)
+    """The shipped fallback's bytes (deterministic; read-only)."""
+    with open(fallback_path(), "rb") as fh:
+        return fh.read()

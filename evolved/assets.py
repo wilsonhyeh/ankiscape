@@ -1,8 +1,8 @@
 # evolved/assets.py - Display-name -> bundled asset mapping (pure, no Qt).
 """One mapping for every screen: skill tiles, item slots, navigation icons,
-textures, fonts and sounds. Missing files resolve to the deterministic
-transparent placeholder from evolved.icons (never a crash, never a runtime
-download). Asset provenance/license lives in assets/manifest.json.
+textures, fonts and sounds. Missing files resolve to the single shipped
+fallback from evolved.icons (never a crash, never a runtime download, never
+a runtime file write). Asset provenance/license lives in assets/manifest.json.
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ NAV_ICONS = {
     "bank": "icon/bank_icon.png",
     "achievements": "icon/achievements_icon.png",
     "hiscores": "icon/hiscores_icon.png",
+    "guide": "icon/guide_icon.png",
     "settings": "icon/settings_icon.png",
 }
 

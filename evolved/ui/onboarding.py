@@ -18,7 +18,7 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
     from ..assets import display_icon, skill_icon_path
     from ..onboarding import STEPS, level_one_resource, step_number
 
-    root = QWidget()
+    root = QWidget(shell)
     root.setObjectName(OBJECT_NAMES["onboarding_screen"])
     layout = QVBoxLayout(root)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -57,6 +57,10 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
     except Exception:
         pass
     nav.addWidget(back_btn)
+    classic = QPushButton("Continue Classic")
+    classic.setObjectName("ankiscape-onboarding-classic")
+    classic.clicked.connect(lambda: shell.call("on_mode_switch", "classic"))
+    nav.addWidget(classic)
     nav.addStretch(1)
     nav.addWidget(primary)
     layout.addLayout(nav)
@@ -84,9 +88,12 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
         current, total = step_number(_from_draft(draft))
         progress.setText(f"Setup step {current} of {total}")
         for child in _choice_widgets(choices):
-            child.setParent(None)
+            choices.removeWidget(child)
+            child.hide()
             child.deleteLater()
         error.setVisible(False)
+        primary.setVisible(True)
+        primary.setEnabled(True)
         rules = shell.call("get_rules", default={}) or {}
 
         if step == "welcome":
@@ -94,7 +101,7 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
             title.setText("Welcome to AnkiScape Evolved")
             body.setText(
                 "Anki stays your study app — the game rides along. Every "
-                "accepted review earns XP for one of six skills and can produce "
+                "Hard, Good, or Easy review attempts training in one of six skills and can produce "
                 "items. This short setup picks where to start. An account is "
                 "optional and never required to play.")
             primary.setText("Get started")
@@ -179,7 +186,7 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
     def _choose_skill(skill: str):
         rules = shell.call("get_rules", default={}) or {}
         resource = level_one_resource(rules, skill)
-        _persist(step="resource", gathering_skill=skill,
+        _persist(step="skill", gathering_skill=skill,
                  starting_resource=resource)
         # Persist then advance locally through the pure model.
         shell.call("advance_onboarding")
@@ -188,7 +195,6 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
     def _primary():
         step = state["step"]
         if step == "welcome":
-            _persist(step="skill")
             shell.call("advance_onboarding")
             _refresh()
             return

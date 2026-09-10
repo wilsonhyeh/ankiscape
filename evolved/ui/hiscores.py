@@ -17,13 +17,14 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
     from .widgets import (StonePanel, body_label, display_label, muted_label,
                           error_label, success_label)
 
-    root = QWidget()
+    root = QWidget(shell)
     root.setObjectName(OBJECT_NAMES["hiscores_screen"])
     layout = QVBoxLayout(root)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(8)
 
-    state: Dict[str, Any] = {"loading": False, "result": None, "lookup": None}
+    state: Dict[str, Any] = {"loading": False, "result": None, "lookup": None,
+                             "req": 0, "closed": False, "account": None}
 
     # Logged-out panel
     logged_out = StonePanel()
@@ -97,6 +98,16 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
 
     def _refresh():
         account = _account()
+        key = (str(account.get("username") or ""),
+               bool(account.get("logged_in")))
+        if state["account"] is not None and state["account"] != key:
+            # Profile/identity changed: discard any in-flight callback so a
+            # late result cannot render into the new context.
+            state["req"] += 1
+            state["result"] = None
+            state["lookup"] = None
+            state["loading"] = False
+        state["account"] = key
         logged_in = bool(account.get("logged_in"))
         logged_out.setVisible(not logged_in)
         panel.setVisible(logged_in)
@@ -110,15 +121,22 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
             _load()
 
     def _load():
-        if state["loading"]:
+        if state["closed"] or state["loading"]:
             return
+        state["req"] += 1
+        req = state["req"]
         state["loading"] = True
         state["lookup"] = None
         _set_status("Loading rankings…")
-        listing.clear()
+        # Cached rows stay visible while the refresh runs; a successful
+        # result or an error replaces them below.
         requested = skill.currentText()
 
         def _done(result):
+            if state["closed"] or req != state["req"]:
+                return  # superseded by a newer request or profile change
+            if skill.currentText() != requested:
+                return  # the user moved to another skill mid-flight
             state["loading"] = False
             if not isinstance(result, dict):
                 result = {"ok": False, "error": "unexpected response"}
@@ -160,7 +178,9 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
             _set_status(f"{prefix} {when}. Competition ranks; ties share a rank.",
                         "muted" if stale else "ok")
         for row in rows:
-            label = (f"#{row.get('rank', '?')}  {row.get('username', '?')}  —  "
+            rank = row.get("rank")
+            rank_text = f"#{rank}" if rank else "unranked"
+            label = (f"{rank_text}  {row.get('username', '?')}  —  "
                      f"{row.get('xp_display', row.get('xp', '0'))} XP")
             item = QListWidgetItem(label)
             if me and str(row.get("username", "")) == me:
@@ -202,22 +222,36 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
 
     def _lookup():
         name = lookup.text().strip()
-        if not name:
+        if not name or state["closed"]:
             return
+        state["req"] += 1
+        req = state["req"]
+        selected = skill.currentText()
         state["lookup"] = {"text": name}
         listing.clear()
         _set_status(f"Looking up {name}…")
 
         def _done(result):
+            if state["closed"] or req != state["req"]:
+                return  # superseded by a refresh, skill switch or close
             if not isinstance(result, dict) or not result.get("ok"):
+                not_found = bool((result or {}).get("not_found"))
                 _set_status(
                     f"No player named “{name}” was found."
-                    if result and result.get("not_found")
+                    if not_found
                     else f"Lookup failed: {str((result or {}).get('error', ''))[:80]}",
-                    "error" if not (result or {}).get("not_found") else "muted")
+                    "muted" if not_found else "error")
                 return
             profile = result.get("profile") or {}
-            _set_status(f"Found {profile.get('username', name)}.", "ok")
+            found = str(profile.get("username") or name)
+            rank = profile.get("rank")
+            xp_display = str(profile.get("xp_display") or "")
+            if rank:
+                _set_status(f"Found {found} — rank #{rank}, "
+                            f"{xp_display} XP.", "ok")
+            else:
+                _set_status(f"Found {found} — {xp_display} XP; rank "
+                            f"unavailable outside the loaded top list.", "ok")
             rows = result.get("rows") or []
             if rows:
                 _render({"ok": True, "rows": rows,
@@ -226,7 +260,7 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         async_fn = shell.deps.get("lookup_player_async")
         if callable(async_fn):
             try:
-                async_fn(name, _done)
+                async_fn(name, selected, _done)
                 return
             except Exception as exc:
                 _done({"ok": False, "error": repr(exc)})
@@ -250,7 +284,12 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
     root.refresh = _refresh
     root.on_show = _refresh
     root.invalidate = lambda: None
-    root.release = lambda: None
+
+    def _release():
+        state["closed"] = True
+        state["req"] += 1
+
+    root.release = _release
     root.deps = deps
     _refresh()
     return root

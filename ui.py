@@ -712,6 +712,7 @@ def show_main_menu(
     on_set_craft,
     on_set_floating_enabled=None,
     on_set_floating_position=None,
+    on_try_evolved=None,
 ):
     """Show a consolidated window with tabs for Skills, Mining, Woodcutting, Smithing, Crafting,
     and quick access buttons for Stats and Achievements.
@@ -719,13 +720,26 @@ def show_main_menu(
     """
     _debug_log("ui.show_main_menu: enter")
     dialog = QDialog(mw)
-    dialog.setWindowTitle("AnkiScape Menu")
+    dialog.setWindowTitle("AnkiScape: Classic")
     dialog.setMinimumWidth(720)
     dialog.setMinimumHeight(620)
 
     layout = QVBoxLayout()
     layout.setContentsMargins(16, 16, 16, 16)
     layout.setSpacing(12)
+    mode_note = QLabel("You are playing Classic. Your original progress stays here. "
+                       "Evolved is a separate six-skill game; you can switch back anytime.")
+    mode_note.setWordWrap(True)
+    layout.addWidget(mode_note)
+    if callable(on_try_evolved):
+        try_button = QPushButton("Try / resume AnkiScape Evolved…")
+        try_button.setObjectName("ankiscape-classic-try-evolved")
+        def try_evolved():
+            from aqt.qt import QTimer
+            dialog.accept()
+            QTimer.singleShot(0, on_try_evolved)
+        try_button.clicked.connect(try_evolved)
+        layout.addWidget(try_button)
 
     tabs = QTabWidget()
     tabs.setDocumentMode(True)

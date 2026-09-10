@@ -3,11 +3,15 @@
 icons, sounds). No runtime downloads; no third-party art.
 
 Run from the repo root:  python3 scripts/make_ui_assets.py
-Overwrites generated files in place. All output bytes are reproducible.
+Overwrites generated files in place, EXCEPT anything recorded in
+assets/manifest.json as verified third-party art (downloaded Wiki art) —
+routine regeneration can never clobber verified files. All output bytes are
+reproducible.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import struct
@@ -223,7 +227,44 @@ ICONS = {
 ................
 ................
 """,
+    "fallback_missing": """
+................
+..bbbbbbbbbbbb..
+..b..........b..
+..b..tt....t.b..
+..b..tt....t.b..
+..b....tt....b..
+..b...tt.....b..
+..b...tt.....b..
+..b...tt.....b..
+..b...tt.....b..
+..b..........b..
+..b......tt..b..
+..b......tt..b..
+..bbbbbbbbbbbb..
+................
+................
+""",
 }
+
+
+def _verified_paths() -> set:
+    """Paths recorded as verified third-party art in the manifest."""
+    path = os.path.join(ROOT, "assets", "manifest.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return set()
+    protected = set()
+    for record in manifest.get("files", []):
+        if not isinstance(record, dict):
+            continue
+        if record.get("status") == "verified" or record.get("rights") == "jagex-wiki":
+            rel = str(record.get("path") or "")
+            if rel:
+                protected.add(rel)
+    return protected
 
 
 def _write_png(path: str, width: int, height: int, rows) -> None:
@@ -257,7 +298,12 @@ def _render_icon(grid: str, scale: int = 2) -> None:
 
 def make_icons() -> None:
     base = os.path.join(ROOT, "icon")
+    protected = _verified_paths()
     for name, grid in ICONS.items():
+        rel = f"icon/{name}.png"
+        if rel in protected:
+            print(f"asset: {rel} kept (verified download; regeneration skipped)")
+            continue
         w, h, rows = _render_icon(grid)
         _write_png(os.path.join(base, f"{name}.png"), w, h, rows)
         print(f"asset: icon/{name}.png ({w}x{h})")

@@ -60,7 +60,8 @@ def run():
     _write_done(base)
     try:
         from aqt.utils import tooltip
-        tooltip(f"[DEV {SEED.get('scenario', '?')}] isolated playground — synthetic data only")
+        tooltip(f"[{SEED.get('scenario', '?')}] isolated test profile — "
+                "personal data untouched")
     except Exception:
         pass
 
@@ -77,7 +78,7 @@ def _apply(mw, base, seed):
     from aqt import mw as _mw
     col = mw.col
     scenario = seed.get("scenario", "fresh")
-    _seed_cards(col, seed.get("cards", 20))
+    _seed_cards(col, seed.get("cards", 20), seed.get("deck", "Dev Deck"))
     if seed.get("classic"):
         _seed_classic(col, seed["classic"])
         _note("classic", f"skill={seed['classic'].get('current_skill')}")
@@ -88,14 +89,14 @@ def _apply(mw, base, seed):
     _note("scenario", scenario)
 
 
-def _seed_cards(col, count):
+def _seed_cards(col, count, deck_name="Dev Deck"):
     model = col.models.by_name("Basic")
     if model is None:
         _note("cards", "no Basic model")
         return
-    deck_id = col.decks.id("Dev Deck")
+    deck_id = col.decks.id(deck_name)
     col.decks.select(deck_id)
-    have = len(col.find_cards('deck:"Dev Deck"'))
+    have = len(col.find_cards(f'deck:"{deck_name}"'))
     for i in range(max(0, count - have)):
         note = col.new_note(model)
         note["Front"] = f"Dev front {i}"

@@ -321,6 +321,7 @@ def _on_main_menu():
         on_set_craft=lambda item: _set_value("current_craft", item),
         on_set_floating_enabled=_set_floating_enabled,
         on_set_floating_position=_set_floating_position,
+        on_try_evolved=lambda: _switch_mode_now("evolved", open_onboarding=True),
     )
 
 
@@ -331,7 +332,8 @@ def _set_value(key: str, value):
 
 def initialize_menu():
     debug_log("initialize_menu: creating AnkiScape menu")
-    ui.create_menu(on_main_menu=_on_main_menu)
+    ui.create_menu(on_main_menu=runtime_menu_opener,
+                   on_try_evolved=lambda: _switch_mode_now("evolved", open_onboarding=True))
     # Refresh Deck Browser so injected content becomes visible after login
     try:
         debug_log("initialize_menu: forcing deck browser refresh")
@@ -946,7 +948,7 @@ def _evolved_selections() -> dict:
 
 
 def _evolved_status() -> dict:
-    sess = _EVOLVED_CTX.get("profile_session")
+    sess = _evolved_profile_session()
     svc = _EVOLVED_CTX.get("sync_service")
     status = {
         "logged_in": bool(sess is not None and sess.logged_in),
@@ -967,9 +969,11 @@ def _evolved_status() -> dict:
 
 
 def _evolved_account_info() -> dict:
-    sess = _EVOLVED_CTX.get("profile_session")
+    sess = _evolved_profile_session()
     return {"logged_in": bool(sess is not None and sess.logged_in),
-            "username": (getattr(sess, "username", None) if sess else None) or ""}
+            "username": (getattr(sess, "username", None) if sess else None) or "",
+            "remembered": bool(sess and sess.remember and sess.persistence_ok),
+            "vault_available": bool(sess and sess.vault and sess.vault.available)}
 
 
 def _evolved_change_training(skill: str, resource: str) -> dict:
@@ -1140,7 +1144,8 @@ def _evolved_hud_apply_settings() -> None:
     try:
         from .evolved.ui import qt_hud
         qt_hud.apply_settings(getattr(mw, "ankiscape_evolved_hud", None),
-                              _evolved_get_settings())
+                              {**_evolved_get_settings(),
+                               "position": _evolved_get_settings().get("hud_position", "bottom")}, mw=mw)
     except Exception:
         pass
 
@@ -1649,8 +1654,17 @@ def _evolved_query_hiscores_async(skill: str, limit: int, on_done) -> None:
         _failure(exc)
 
 
-def _evolved_lookup_async(username: str, on_done) -> None:
-    """Username lookup against public_profile (returns rank rows when found)."""
+def _evolved_lookup_async(username: str, skill: str, on_done) -> None:
+    """Username lookup against public_profile + selected-skill Hiscores
+    rank. Delivered on the main thread; late callbacks after a profile or
+    generation change are discarded (same guard as the ranks query)."""
+    try:
+        rt = _runtime_mod.get_runtime()
+        generation = int(rt.generation or 0)
+        user = _EVOLVED_CTX.get("user_id")
+    except Exception:
+        generation, user = 0, None
+
     def _task():
         from .evolved.net import post_json as _post
         from .evolved.service import query_public_profile
@@ -1658,16 +1672,27 @@ def _evolved_lookup_async(username: str, on_done) -> None:
         endpoint = _evolved_endpoint()
         if endpoint is None:
             return {"ok": False, "error": "unconfigured"}
-        if sess is not None and sess.logged_in:
-            try:
-                return query_public_profile(_post, endpoint, sess,
-                                            username=username,
-                                            skill=_evolved_skill_selection(),
-                                            limit=50)
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)[:200]}
-        return query_public_profile(_post, endpoint, None, username=username,
-                                    skill=_evolved_skill_selection(), limit=50)
+        selected = str(skill or "").lower() or _evolved_skill_selection()
+        try:
+            return query_public_profile(_post, endpoint, sess,
+                                        username=username, skill=selected,
+                                        limit=50)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:200]}
+
+    def _deliver(result):
+        try:
+            rt = _runtime_mod.get_runtime()
+            if int(rt.generation or 0) != generation:
+                return
+            if (_EVOLVED_CTX.get("user_id") or None) != (user or None):
+                return
+        except Exception:
+            return
+        try:
+            on_done(result)
+        except Exception:
+            pass
 
     taskman = getattr(mw, "taskman", None)
     if taskman is not None:
@@ -1678,15 +1703,15 @@ def _evolved_lookup_async(username: str, on_done) -> None:
                         value = value.result()
                 except Exception as exc:
                     value = {"ok": False, "error": str(exc)[:200]}
-                on_done(value)
+                _deliver(value)
             taskman.run_in_background(_task, _on_bg)
             return
         except Exception:
             pass
     try:
-        on_done(_task())
+        _deliver(_task())
     except Exception as exc:
-        on_done({"ok": False, "error": repr(exc)[:200]})
+        _deliver({"ok": False, "error": repr(exc)[:200]})
 
 
 def _evolved_register_dialog_flow() -> None:
@@ -1738,8 +1763,8 @@ def _evolved_register_dialog_flow() -> None:
         if result:
             try:
                 from aqt.utils import showInfo
-                showInfo("Account created and linked. Your progress can sync "
-                         "from Account & Sync.", parent=getattr(mw, "app", None))
+                showInfo("Email verified. Your progress can sync "
+                         "from Account & Sync.", parent=getattr(mw, "ankiscape_evolved_shell", None) or mw)
             except Exception:
                 pass
         _evolved_refresh_views()
@@ -1777,6 +1802,7 @@ def _evolved_shell_deps() -> dict:
         "on_start_studying": _evolved_start_studying,
         "on_account": _evolved_account_dialog,
         "on_register": _evolved_register_dialog_flow,
+        "on_recovery": _evolved_recovery_flow,
         "on_logout": _evolved_logout,
         "on_sync": _evolved_manual_sync,
         "query_hiscores": _evolved_query_hiscores,
@@ -1822,9 +1848,17 @@ def _evolved_profile_session():
         from .evolved.session_store import ProfileSession
         from .evolved import accounts as _accounts
         from .evolved.net import post_json as _post
-        sess = ProfileSession(generation=gen)
+        from .evolved.credentials import CredentialVault
+        endpoint = _evolved_endpoint()
+        pm = getattr(mw, "pm", None)
+        try:
+            vault = CredentialVault(pm.profileFolder(), endpoint.base_url) if pm and endpoint else None
+        except Exception:
+            vault = None
+        sess = ProfileSession(generation=gen, vault=vault)
         sess.bind_refresh(lambda s: _evolved_refresh_session(s, _accounts, _post))
         _EVOLVED_CTX["profile_session"] = sess
+        _EVOLVED_CTX["user_id"] = sess.user_id
         return sess
     except Exception:
         return None
@@ -1881,7 +1915,9 @@ def _evolved_refresh_session(session, accounts_mod, post_fn) -> bool:
         try:
             data = post_fn(endpoint, "/auth/v1/token?grant_type=refresh_token",
                            {"refresh_token": session.refresh_token})
-        except NetError:
+        except NetError as exc:
+            if exc.kind in ("unauthorized", "invalid", "forbidden"):
+                session.clear()
             return False
         if not isinstance(data, dict):
             return False
@@ -2037,16 +2073,49 @@ def _evolved_account_dialog() -> None:
         if sess is None or endpoint is None:
             return
         if sess.logged_in:
-            _accounts.logout(sess.session)
-            _EVOLVED_CTX["user_id"] = None
-            _EVOLVED_CTX["sync_service"] = None
+            _evolved_logout()
             return
         _dlg.show_login_dialog(
             getattr(mw, "app", None) and mw or None,
             lambda fields: _evolved_login_submit(
-                fields, sess, endpoint, _accounts, _post))
+                fields, sess, endpoint, _accounts, _post),
+            on_recovery=_evolved_recovery_flow)
+        _evolved_refresh_views()
     except Exception:
         pass
+
+
+def _evolved_recovery_flow():
+    from .evolved.ui.dialogs import show_recovery_dialog
+    from .evolved import accounts
+    from .evolved.net import post_json
+    sess, endpoint = _evolved_profile_session(), _evolved_endpoint()
+    if sess is None or endpoint is None:
+        return {"ok": False, "error": "Account service is not configured."}
+    def request(email):
+        result = accounts.request_recovery(post_json, endpoint, email=email)
+        return {"ok": result.ok, "error": result.error}
+    from .evolved.auth import MemorySession
+    recovery_session = MemorySession()
+    def confirm(fields):
+        if len(fields["new_password"]) < 6:
+            return {"ok": False, "error": "Use at least 6 characters for your new password."}
+        if not recovery_session.logged_in:
+            result = accounts.verify_code(post_json, endpoint, email=fields["email"],
+                code=fields["code"], kind="recovery", session=recovery_session)
+            if not result.ok:
+                return {"ok": False, "error": result.error}
+        result = accounts.set_new_password(post_json, endpoint,
+            access_token=recovery_session.access_token, new_password=fields["new_password"])
+        if result.ok:
+            sess.session.set(access_token=recovery_session.access_token,
+                refresh_token=recovery_session.refresh_token,
+                user_id=recovery_session.user_id, username=recovery_session.username)
+            _EVOLVED_CTX["user_id"] = sess.user_id
+        return {"ok": result.ok, "error": result.error}
+    result = show_recovery_dialog(getattr(mw, "ankiscape_evolved_shell", None) or mw, request, confirm)
+    _evolved_refresh_views()
+    return result
 
 
 def _evolved_login_submit(fields, sess, endpoint, accounts_mod, post_fn) -> dict:
@@ -2054,6 +2123,7 @@ def _evolved_login_submit(fields, sess, endpoint, accounts_mod, post_fn) -> dict
     try:
         identity = (fields.get("identity") or "").strip()
         password = fields.get("password") or ""
+        sess.remember = bool(fields.get("remember", True) and sess.vault and sess.vault.available)
         if "@" in identity:
             result = accounts_mod.login_password(
                 post_fn, endpoint, email=identity, password=password,
@@ -2118,27 +2188,43 @@ def _evolved_restore_backup() -> dict:
             data = _json.load(fh)
         bundle = validate_backup(data)
         game_uuid = bundle["game_uuid"]
+        if _evolved_reviewer_active():
+            return {"ok": False, "error": "Leave the reviewer before restoring a backup."}
         engine = _ensure_evolved_engine()
-        if engine is not None and engine.cfg.game_uuid == game_uuid:
-            journal = engine.journal
+        different = engine is None or engine.cfg.game_uuid != game_uuid
+        message = (f"Restore {len(bundle.get('operations', []))} saved operations "
+                   f"from game {game_uuid[:8]}?\n\n")
+        message += ("This opens the backup's Evolved game and signs out of the current account. "
+                    "Your current game remains saved separately. Anki cards are unchanged."
+                    if different else "This merges missing history into the current game. "
+                    "Existing operations and Anki cards are preserved.")
+        if not askUser(message, parent=getattr(mw, "ankiscape_evolved_shell", None) or mw):
+            return {"ok": False, "error": "cancelled"}
+        if not different:
+            counts = engine.journal.import_game(game_uuid, bundle)
+            engine.hydrate()
         else:
             pm = getattr(mw, "pm", None)
             profile_dir = pm.profileFolder() if pm is not None else None
             if not profile_dir:
                 return {"ok": False, "error": "no profile"}
             journal = _Journal(journal_path_for_profile(profile_dir, game_uuid))
-        counts = journal.import_game(game_uuid, bundle)
-        try:
-            if engine is not None and engine.cfg.game_uuid == game_uuid:
-                engine.hydrate()
-        except Exception:
-            pass
-        try:
-            askUser(f"Restored {counts['operations']} operations "
-                    f"({counts['observations']} observations). "
-                    f"Restart Anki to play the restored game.")
-        except Exception:
-            pass
+            try:
+                counts = journal.import_game(game_uuid, bundle)
+            finally:
+                journal.close()
+            _evolved_logout()
+            activated = int(time.time())
+            mw.col.set_config("ankiscape_evolved_player_data", {
+                "version": 1, "game_uuid": game_uuid, "activated_at": activated,
+                "snapshot_revision": 0,
+                "preset": {"skill": "mining", "effective_ts": activated}}, undoable=False)
+            if engine is not None:
+                engine.journal.close()
+            _EVOLVED_CTX.update(engine=None, journal=None, game_uuid=None,
+                                sync_service=None, session=None)
+            _ensure_evolved_engine()
+        _evolved_refresh_views()
         return {"ok": True, **counts}
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:300]}

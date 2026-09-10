@@ -81,9 +81,11 @@ class TestQueryHiscores(unittest.TestCase):
     def test_rows_passthrough(self):
         rows = [{"rank": 1, "username": "Amy", "xp": "5000"}]
 
-        def _post(endpoint, path, payload, access_token=None):
+        def _post(endpoint, path, payload, access_token=None,
+                  response_shape="object"):
             self.assertTrue(path.endswith("hiscores"))
             self.assertEqual(payload["p_skill"], "mining")
+            self.assertEqual(response_shape, "array")
             return list(rows)
 
         from evolved.net import Endpoint

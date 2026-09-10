@@ -13,10 +13,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 REQUEST_TIMEOUT_S = 10
 MAX_RESPONSE_BYTES = 512 * 1024
+
+RESPONSE_SHAPES = ("object", "array")
+JsonPayload = Union[Dict[str, Any], List[Any]]
 
 
 @dataclass(frozen=True)
@@ -54,10 +57,23 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def post_json(endpoint: Endpoint, path: str, payload: Dict[str, Any],
               *, access_token: Optional[str] = None,
-              headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+              headers: Optional[Dict[str, str]] = None,
+              method: str = "POST",
+              response_shape: str = "object") -> JsonPayload:
+    """POST JSON and return the parsed body as an object or array.
+
+    `response_shape` is an explicit contract: authentication and every
+    object-returning RPC stay on the strict object default, while the
+    Hiscores RPC — which returns a JSON array by design — opts into
+    `"array"` and gets strict list validation instead. Unsupported values
+    are rejected before any HTTP request is made.
+    """
+    if response_shape not in RESPONSE_SHAPES:
+        raise NetError("invalid", f"unsupported response_shape "
+                                 f"{response_shape!r}")
     url = _check_url(endpoint, path)
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    req = urllib.request.Request(url, data=body, method="POST",
+    req = urllib.request.Request(url, data=body, method=method,
                                  headers={"Content-Type": "application/json",
                                           "apikey": endpoint.project_key})
     if access_token:
@@ -67,7 +83,6 @@ def post_json(endpoint: Endpoint, path: str, payload: Dict[str, Any],
     opener = urllib.request.build_opener(_NoRedirect)
     try:
         with opener.open(req, timeout=REQUEST_TIMEOUT_S) as resp:
-            status = getattr(resp, "status", 200)
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         raise _map_http_error(exc)
@@ -81,6 +96,10 @@ def post_json(endpoint: Endpoint, path: str, payload: Dict[str, Any],
         data = json.loads(raw.decode("utf-8"))
     except Exception:
         raise NetError("malformed_response", "invalid JSON")
+    if response_shape == "array":
+        if not isinstance(data, list):
+            raise NetError("malformed_response", "top-level JSON must be array")
+        return data
     if not isinstance(data, dict):
         raise NetError("malformed_response", "top-level JSON must be object")
     return data
@@ -98,7 +117,7 @@ def _map_http_error(exc: urllib.error.HTTPError) -> NetError:
         retry_after = int(ra) if ra is not None else None
     except (ValueError, TypeError):
         retry_after = None
-    kinds = {401: "unauthorized", 403: "forbidden", 404: "not_found",
+    kinds = {400: "invalid", 401: "unauthorized", 403: "forbidden", 404: "not_found",
              409: "conflict", 422: "invalid", 429: "rate_limited"}
     if exc.code in kinds:
         return NetError(kinds[exc.code], detail, status=exc.code, retry_after=retry_after)

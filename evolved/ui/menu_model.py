@@ -426,10 +426,18 @@ def format_hiscores_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Competition ranking display: ties share a rank (server computes rank).
 
     XP arrives in micro units; display divides exactly, never raw micro.
+    `rank` may be None for a found lookup player outside the loaded top
+    list; the UI renders that as rank unavailable rather than a fake rank.
     """
     out = []
     for row in rows:
-        out.append({"rank": int(row.get("rank", 0)),
+        rank = row.get("rank")
+        if rank is not None:
+            try:
+                rank = int(rank)
+            except (TypeError, ValueError):
+                rank = None
+        out.append({"rank": rank,
                     "username": str(row.get("username", "?")),
                     "xp": str(row.get("xp", 0)),
                     "xp_display": format_xp(row.get("xp", 0))})

@@ -11,13 +11,13 @@ from typing import Any, Dict
 def build_settings_screen(shell, deps: Dict[str, Any]):
     from aqt.qt import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLabel,
                         QPushButton, QTabWidget, QTextEdit, QVBoxLayout,
-                        QWidget)
+                        QWidget, QSignalBlocker)
     from . import OBJECT_NAMES
     from .menu_model import CATCHUP_PRESETS
     from .theme import SCALES
     from .widgets import StonePanel, body_label, display_label, muted_label
 
-    root = QWidget()
+    root = QWidget(shell)
     root.setObjectName(OBJECT_NAMES["settings_screen"])
     layout = QVBoxLayout(root)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -100,9 +100,12 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
     account_actions.addStretch(1)
     account.layout().addLayout(account_actions)
     account.layout().addWidget(muted_label(
-        "Login is forgotten when Anki restarts — that is deliberate; tokens "
-        "are never written to disk. Your offline progress is preserved either "
-        "way.", wrap=True))
+        "Keep me signed in saves your session in the operating system credential "
+        "vault when available. Log out removes it. Your password is never saved.", wrap=True))
+    recover = QPushButton("Forgot password?")
+    recover.setObjectName("ankiscape-settings-recovery")
+    recover.clicked.connect(lambda: shell.call("on_recovery"))
+    account.layout().addWidget(recover)
     account.layout().addStretch(1)
     tabs.addTab(account, "&Account")
 
@@ -143,6 +146,8 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
     tabs.addTab(advanced, "Ad&vanced")
 
     def _refresh():
+        blockers = [QSignalBlocker(w) for w in (scale, hud_visible, hud_position,
+                    celebrations, reduced, sound, preset)]
         settings = shell.call("get_settings", default={}) or {}
         scale.setCurrentText(str(settings.get("ui_scale", 100)))
         hud_visible.setChecked(bool(settings.get("hud_visible", True)))
@@ -162,6 +167,8 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
                 + ("All progress synced."
                    if not status.get("pending")
                    else f"{status.get('pending')} review(s) waiting to sync."))
+            if not account_info.get("remembered"):
+                account_status.setText(account_status.text() + " Sign-in is active for this session only; no saved credential is available.")
             login.setVisible(False)
             register.setVisible(False)
             sync_now.setVisible(True)
@@ -209,8 +216,15 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
     register.clicked.connect(lambda: shell.call("on_register"))
     sync_now.clicked.connect(lambda: shell.call("on_sync"))
     logout.clicked.connect(lambda: shell.call("on_logout"))
-    export.clicked.connect(lambda: shell.call("on_export"))
-    restore.clicked.connect(lambda: shell.call("on_restore"))
+    def backup_action(name):
+        result = shell.call(name, default={}) or {}
+        from aqt.utils import showInfo, showWarning
+        if result.get("ok"):
+            showInfo("Backup exported." if name == "on_export" else "Backup restored.", parent=shell)
+        elif result.get("error") != "cancelled":
+            showWarning(str(result.get("error", "Could not complete the backup action.")), parent=shell)
+    export.clicked.connect(lambda: backup_action("on_export"))
+    restore.clicked.connect(lambda: backup_action("on_restore"))
     switch_btn.clicked.connect(lambda: _switch_mode(switch_btn))
 
     def _switch_mode(button):

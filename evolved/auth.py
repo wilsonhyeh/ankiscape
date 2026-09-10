@@ -4,8 +4,9 @@ preserved via a narrowly scoped Edge Function: normalize username, resolve its
 private Auth identity server-side, call managed password auth, generic failure
 on missing user/bad password. Never expose username-to-email lookup.
 
-Access/refresh tokens stay memory-only; restart requires login again.
-Passwords/tokens never enter collection config, journals or logs.
+Live tokens stay in MemorySession. ProfileSession can mirror them to the OS
+credential vault when remembered sign-in is enabled. Passwords and tokens never
+enter collection config, journals or logs.
 """
 from __future__ import annotations
 
@@ -37,12 +38,13 @@ def validate_password(raw: str) -> None:
 
 @dataclass
 class MemorySession:
-    """Tokens live here only; cleared on logout/profile close even offline."""
+    """Live tokens; an optional change callback owns secure persistence."""
 
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
     user_id: Optional[str] = None
     username: Optional[str] = None
+    on_change: object = None
     _lock: threading.Lock = None  # type: ignore
 
     def __post_init__(self):
@@ -55,6 +57,8 @@ class MemorySession:
             self.refresh_token = refresh_token
             self.user_id = user_id
             self.username = username
+        if callable(self.on_change):
+            self.on_change(self)
 
     def clear(self) -> None:
         with self._lock:
@@ -62,6 +66,8 @@ class MemorySession:
             self.refresh_token = None
             self.user_id = None
             self.username = None
+        if callable(self.on_change):
+            self.on_change(self)
 
     @property
     def logged_in(self) -> bool:

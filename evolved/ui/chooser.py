@@ -1,7 +1,7 @@
 # evolved/ui/chooser.py - Classic/Evolved first-run chooser (Qt-lazy).
 """Evolved preselected. Closing/Escape selects Classic and persists that
-choice. Both menus expose switching; the new choice takes effect after Anki
-restart. See mode.py for headless semantics (tested without Qt).
+choice. Both menus expose immediate switching outside the reviewer.
+See mode.py for headless semantics (tested without Qt).
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def qt_chooser_dialog(parent=None) -> Callable[[], object]:
         except Exception:
             pass
         layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("Choose your AnkiScape mode (takes effect after restart):"))
+        layout.addWidget(QLabel("Choose your AnkiScape mode:"))
         classic_btn = QRadioButton("Classic (existing progress)")
         classic_btn.setObjectName("ankiscape-chooser-classic")
         evolved_btn = QRadioButton("Evolved (fresh six-skill progress)")

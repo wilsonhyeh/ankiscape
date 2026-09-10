@@ -18,7 +18,7 @@ def build_bank_screen(shell, deps: Dict[str, Any]):
     from .widgets import (ItemSlot, StonePanel, body_label, clear_layout,
                           display_label, muted_label)
 
-    root = QWidget()
+    root = QWidget(shell)
     root.setObjectName(OBJECT_NAMES["bank_screen"])
     layout = QVBoxLayout(root)
     layout.setContentsMargins(0, 0, 0, 0)

@@ -31,10 +31,10 @@ ARTIFACTS = os.path.join(ROOT, "artifacts", "ui-ux")
 ALL_SCENARIOS = (
     "fresh", "upgrade", "undo", "catchup", "sync", "dialogs",
     "ui-onboarding", "ui-training", "ui-settings", "ui-review",
-    "ui-lifecycle",
+    "ui-lifecycle", "ui-art",
 )
 SHELL_SCENARIOS = ("ui-onboarding", "ui-training", "ui-settings",
-                   "ui-review", "ui-lifecycle")
+                   "ui-review", "ui-lifecycle", "ui-art")
 
 
 def _load_dev():

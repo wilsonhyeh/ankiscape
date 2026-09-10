@@ -26,12 +26,12 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .net import Endpoint, NetError, post_json
 from .sync import UPLOAD_BATCH_MAX, SyncJob, SyncTriggers
 
-PostFn = Callable[..., Dict[str, Any]]
+PostFn = Callable[..., Union[Dict[str, Any], List[Any]]]
 
 # New-protocol submissions carry this header; servers with authoritative
 # scoring accept them, older servers can reject with an explicit update
@@ -185,19 +185,131 @@ def make_transport(config: ServiceConfig,
     return {"upload": upload, "download": download}
 
 
+def _session_token(session) -> Optional[str]:
+    """Read the live token at request time (never a cached copy)."""
+    try:
+        return getattr(session, "access_token", None)
+    except Exception:
+        return None
+
+
+def _validated_hiscores_row(row: Any) -> Dict[str, Any]:
+    """Validate one Hiscores row at the service boundary.
+
+    Typed NetError instead of an uncaught AttributeError/ValueError keeps the
+    UI's problem line informative; a half-formed row never reaches Qt.
+    """
+    if not isinstance(row, dict):
+        raise NetError("malformed_response", "hiscores row must be an object")
+    username = row.get("username")
+    if not isinstance(username, str) or not username.strip():
+        raise NetError("malformed_response", "hiscores row missing username")
+    xp_raw = row.get("xp")
+    if isinstance(xp_raw, bool):
+        raise NetError("malformed_response", "hiscores row xp is not numeric")
+    try:
+        xp = int(xp_raw)
+    except (TypeError, ValueError):
+        raise NetError("malformed_response", "hiscores row xp is not numeric")
+    if xp < 0:
+        raise NetError("malformed_response", "hiscores row xp is negative")
+    rank_raw = row.get("rank")
+    if isinstance(rank_raw, bool):
+        raise NetError("malformed_response", "hiscores row rank is not numeric")
+    try:
+        rank = int(rank_raw)
+    except (TypeError, ValueError):
+        raise NetError("malformed_response", "hiscores row rank is not numeric")
+    if rank < 1:
+        raise NetError("malformed_response", "hiscores row rank is not positive")
+    return {"rank": rank, "username": username, "xp": xp}
+
+
+def _fetch_hiscores_rows(post: PostFn, endpoint: Endpoint, session, *,
+                         skill: str, limit: int) -> List[Dict[str, Any]]:
+    """Array-mode Hiscores RPC + per-row validation (shared by Ranks and
+    player lookup). Empty list is a successful empty state."""
+    data = post(endpoint, "/rest/v1/rpc/hiscores",
+                {"p_skill": str(skill), "p_limit": int(limit)},
+                access_token=_session_token(session), response_shape="array")
+    if not isinstance(data, list):
+        raise NetError("malformed_response", "hiscores must be a list")
+    return [_validated_hiscores_row(row) for row in data]
+
+
 def query_hiscores(post: PostFn, endpoint: Endpoint, session, *,
                    skill: str, limit: int = 50) -> List[Dict[str, Any]]:
     """Hiscores query over real transport. Raises NetError on failure; the
     Qt caller converts to a problem line (never a modal)."""
     from .ui.menu_model import format_hiscores_rows
 
-    token = getattr(session, "access_token", None)
-    data = post(endpoint, "/rest/v1/rpc/hiscores",
-                {"p_skill": str(skill), "p_limit": int(limit)},
-                access_token=token)
-    if not isinstance(data, list):
-        raise NetError("malformed_response", "hiscores must be a list")
-    return format_hiscores_rows(data)
+    return format_hiscores_rows(_fetch_hiscores_rows(
+        post, endpoint, session, skill=skill, limit=limit))
+
+
+def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
+                         username: str, skill: str,
+                         limit: int = 50) -> Dict[str, Any]:
+    """Player lookup: normalize, fetch the public profile, then match the
+    player in the selected-skill Hiscores list for a rank.
+
+    The server's public_profile RPC returns `{username, state}` (not rank
+    rows). A found player whose rank falls outside the loaded top list gets
+    an explicit rank-unavailable row; a missing profile is a distinct
+    friendly not-found result (`no_profile`). Unrelated transport failures
+    raise NetError so the caller shows a service problem, not "not found".
+    """
+    from .auth import normalize_username
+    from .ui.menu_model import format_hiscores_rows, format_xp
+
+    try:
+        norm = normalize_username(username)
+    except ValueError:
+        return {"ok": False, "not_found": True}
+    skill = str(skill or "").lower()
+    try:
+        data = post(endpoint, "/rest/v1/rpc/public_profile",
+                    {"p_username_norm": norm},
+                    access_token=_session_token(session))
+    except NetError as exc:
+        if exc.kind == "not_found" or "no_profile" in str(exc.detail):
+            return {"ok": False, "not_found": True}
+        raise
+    if not isinstance(data, dict):
+        raise NetError("malformed_response", "public_profile must be an object")
+    name = data.get("username")
+    if not isinstance(name, str) or not name.strip():
+        raise NetError("malformed_response", "public_profile missing username")
+    state = data.get("state")
+    if not isinstance(state, dict):
+        raise NetError("malformed_response", "public_profile missing state")
+    xp_table = state.get("xp")
+    if not isinstance(xp_table, dict):
+        raise NetError("malformed_response", "public_profile missing xp table")
+    xp_raw = xp_table.get(skill, 0)
+    if isinstance(xp_raw, bool):
+        raise NetError("malformed_response", "public_profile xp is not numeric")
+    try:
+        xp_micro = int(xp_raw)
+    except (TypeError, ValueError):
+        raise NetError("malformed_response", "public_profile xp is not numeric")
+    if xp_micro < 0:
+        raise NetError("malformed_response", "public_profile xp is negative")
+    rank: Optional[int] = None
+    try:
+        for row in _fetch_hiscores_rows(post, endpoint, session,
+                                        skill=skill, limit=limit):
+            if row["username"].casefold() == name.casefold():
+                rank = row["rank"]
+                break
+    except NetError:
+        rank = None
+    row = {"rank": rank, "username": name, "xp": xp_micro}
+    return {"ok": True,
+            "profile": {"username": name, "skill": skill, "rank": rank,
+                        "xp": xp_micro, "xp_display": format_xp(xp_micro)},
+            "rows": format_hiscores_rows([row]),
+            "fetched_at": time.time()}
 
 
 class SyncService:

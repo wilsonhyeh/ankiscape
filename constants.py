@@ -44,7 +44,7 @@ CRAFTING_DATA = {
     "Diamond necklace": {"level": 56, "exp": 90, "requirements": {"Gold bar": 1, "Diamond": 1}},
 }
 
-CRAFTED_ITEM_IMAGES = {item: os.path.join(CRAFTED_ITEMS_FOLDER, f"{item.lower().replace(' ', '_')}.png") for item in CRAFTING_DATA}
+CRAFTED_ITEM_IMAGES = {item: os.path.join(CRAFTED_ITEMS_FOLDER, f"{item.replace(' ', '_')}.png") for item in CRAFTING_DATA}
 
 TREE_IMAGES = {tree.split('.')[0]: os.path.join(trees_folder, tree) for tree in os.listdir(trees_folder) if tree.endswith('.png')}
 

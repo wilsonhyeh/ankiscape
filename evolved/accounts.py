@@ -37,6 +37,8 @@ def register(post: PostFn, endpoint: Endpoint, *, username: str, email: str,
         validate_password(password)
     except ValueError:
         return AccountResult(False, error="invalid username or password")
+    if len(password) < 6:
+        return AccountResult(False, error="Use at least 6 characters for your password.")
     email = (email or "").strip()
     if "@" not in email or len(email) > 320:
         return AccountResult(False, error="invalid username or password")
@@ -115,8 +117,8 @@ def set_new_password(post: PostFn, endpoint: Endpoint, *, access_token: str,
     except ValueError:
         return AccountResult(False, error="invalid username or password")
     try:
-        _auth_path(post, endpoint, "/auth/v1/user", {"password": new_password},
-                     token=access_token)
+        post(endpoint, "/auth/v1/user", {"password": new_password},
+             access_token=access_token, method="PUT")
     except NetError as exc:
         return AccountResult(False, error=_generic(exc))
     return AccountResult(True)

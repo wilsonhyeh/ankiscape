@@ -32,8 +32,9 @@ Qt5/Qt6, macOS/Linux/Windows.
   Offline results are provisional until reconciliation; concurrent
   ingredient conflicts resolve to zero reward for the losing action (policy
   2), and reconciliation says so.
-- Login is forgotten on restart (deliberate — tokens stay memory-only).
-  Your game stays on the computer either way.
+- Keep me signed in stores the session in macOS Keychain (or an available system credential backend). Passwords are never saved; Log out removes the saved session. If no secure backend is available, sign-in lasts for this session only.
+- Forgot password is available from Log in and Settings → Account. Request an email code, then enter it with a new password.
+- The Guide tab is an offline handbook covering all six skills, exact XP formulas, every recipe and resource, levels 1–99, gems, achievements, catch-up, accounts, and backups. Tables are generated from the shipped game rules.
 - Undo retracts its review's rewards; Redo restores them; a replacement
   answer earns once. Scores and levels can decrease after Undo/sync.
 - Production training pauses automatically when materials run out or Undo
@@ -140,9 +141,11 @@ python3 dev.py test --suite e2e --journey sync     # live local-stack sync
 python3 dev.py test --suite e2e --journey dialogs  # live Qt menu + dialogs
 python3 dev.py verify --release
 ```
-All state under gitignored `.dev/`; reports under `artifacts/`. Never touches
-personal collections or production. Double-click `Launch AnkiScape Dev.command`
-for a scenario picker.
+Synthetic CLI tests keep state under gitignored `.dev/` and reports under
+`artifacts/`; they do not touch personal collections or production.
+Double-click `Launch AnkiScape.command` for production rehearsal in an isolated
+test profile. It uses the live backend and defaults to Resume when a profile
+exists. New user and Upgrade replace that test profile; Resume preserves it.
 
 ## Packaging notes
 Deterministic build from an explicit allowlist:

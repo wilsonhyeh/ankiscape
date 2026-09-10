@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""dev.py - One-command synthetic Anki playground + verification orchestrator.
+"""dev.py - One-command Anki playground + verification orchestrator.
 
 All generated state goes under gitignored .dev/; reports under artifacts/.
-Never touches personal Anki data or production services. No hosted project
-link, real SMTP credentials, or AnkiWeb login in dev mode.
+Synthetic scenarios (`fresh`/`midgame`/`endgame`/`classic-upgrade`) run on
+the local stack and never touch personal Anki data or production services.
+The `user-*` scenarios are deliberate production rehearsals: the packaged
+prod artifact in an isolated profile, pointed at the live backend.
 
 Commands:
   python3 dev.py setup
   python3 dev.py launch --scenario fresh
+  python3 dev.py launch --scenario user-new      # packaged prod artifact
   python3 dev.py reset --scenario midgame
   python3 dev.py test --suite python
   python3 dev.py test --suite backend
@@ -35,6 +38,11 @@ MARKER = ".ankiscape-dev-marker"
 ARTIFACTS = os.path.join(ROOT, "artifacts", "verification")
 
 SCENARIOS = ("fresh", "midgame", "endgame", "classic-upgrade")
+# Production rehearsals: shared isolated base/profile, packaged prod artifact,
+# live backend. Wiped by user-new/user-upgrade; user-resume keeps state.
+USER_SCENARIOS = ("user-new", "user-upgrade", "user-resume")
+USER_BASE = os.path.join(ANKI_BASE, "user")
+USER_PROFILE = "dev-user"
 
 
 def _fail(msg: str, hint: str = "") -> int:
@@ -181,9 +189,25 @@ def _anki_env(extra: dict) -> dict:
     return env
 
 
-def _install_addon(addons_dir: str, *, symlink: bool) -> str:
+def _prod_env() -> dict:
+    """Child env for production rehearsals.
+
+    Never let a shell export flip the run into dev/LAN-local mode: with
+    these unset, the baked prod endpoint wins exactly like an installed
+    release.
+    """
+    env = _anki_env({})
+    for key in ("ANKISCAPE_DEV", "ANKISCAPE_DEV_BACKEND",
+                "ANKISCAPE_SUPABASE_URL", "ANKISCAPE_SUPABASE_ANON_KEY"):
+        env.pop(key, None)
+    return env
+
+
+def _install_addon(addons_dir: str, *, symlink: bool, prebuilt: bool = False) -> str:
     """Install the packaged add-on (zip, like a user) or a source symlink
-    (manual dev loop only). Returns 'zip' or 'symlink'."""
+    (manual dev loop only). `prebuilt` skips the build and installs the
+    current dist/ artifact (the caller already ensured it is current).
+    Returns 'zip ...' or 'symlink'."""
     import zipfile
 
     dest = os.path.join(addons_dir, "ankiscape")
@@ -195,10 +219,11 @@ def _install_addon(addons_dir: str, *, symlink: bool) -> str:
     if symlink:
         os.symlink(ROOT, dest)
         return "symlink"
-    proc = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "build_addon.py")],
-                          capture_output=True, text=True, timeout=120)
-    if proc.returncode != 0:
-        raise RuntimeError(f"package build failed: {(proc.stderr or proc.stdout)[:400]}")
+    if not prebuilt:
+        proc = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "build_addon.py")],
+                              capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            raise RuntimeError(f"package build failed: {(proc.stderr or proc.stdout)[:400]}")
     import json as _json
     with open(os.path.join(ROOT, "dist", "manifest.json"), encoding="utf-8") as fh:
         record = _json.load(fh)
@@ -209,20 +234,17 @@ def _install_addon(addons_dir: str, *, symlink: bool) -> str:
 
 def cmd_launch(args) -> int:
     scenario = args.scenario
-    if scenario not in SCENARIOS and scenario != "prod-smoke":
-        return _fail(f"unknown scenario {scenario!r}", f"choose from {SCENARIOS + ('prod-smoke',)}")
+    if scenario not in SCENARIOS + USER_SCENARIOS:
+        return _fail(f"unknown scenario {scenario!r}",
+                     f"choose from {SCENARIOS + USER_SCENARIOS}")
     if _refuse_running_anki(f"launch --scenario {scenario}"):
         return 1
     _app, anki_bin, installed = _pick_app(getattr(args, "anki", ""))
     if not anki_bin:
         return _fail(f"no installed Anki.app matches {getattr(args, 'anki', '')!r}",
                      "install the target first")
-    if scenario == "prod-smoke":
-        return cmd_prod_smoke(args, anki_bin, installed)
-    _app, anki_bin, installed = _pick_app(getattr(args, "anki", ""))
-    if not anki_bin:
-        return _fail(f"no installed Anki.app matches {getattr(args, 'anki', '')!r}",
-                     "install the target first")
+    if scenario in USER_SCENARIOS:
+        return cmd_user_journey(args, anki_bin, installed)
     sdir = _scenario_dir(scenario)
     if _reject_personal_paths(sdir):
         return _fail(f"refusing to use path outside .dev: {sdir}")
@@ -278,59 +300,168 @@ def cmd_launch(args) -> int:
     return 0
 
 
-def cmd_prod_smoke(args, anki_bin: str, installed: str) -> int:
-    """Isolated Anki pointed at the PROD backend for Wilson's inbox test.
+def _ensure_prod_artifact():
+    """Make sure dist/ holds the current PROD package; return its manifest.
 
-    Base: .dev/anki/prod-smoke, profile dev-prod-smoke (marker-guarded like
-    every other scenario; never the personal profile). Installs the CURRENT
-    packaged artifact (which must have the prod endpoint baked —
-    dist/manifest.json prod_endpoint_baked must be true, else refuse).
-    No seeder addon, no synthetic cards: Wilson reviews/registers for real.
-    Crucially, ANKISCAPE_DEV is NOT set, so _evolved_endpoint() resolves the
-    baked prod config instead of the local stack.
+    Reuses the packaged artifact when shipped bytes are unchanged
+    (`build_addon.py --check` is a pure comparison) and rebuilds
+    deterministically when they moved. Returns the manifest record, or None
+    after printing a failure.
     """
-    import json as _json
-
+    script = os.path.join(ROOT, "scripts", "build_addon.py")
+    check = subprocess.run([sys.executable, script, "--check"],
+                           capture_output=True, text=True, timeout=120)
+    output = (check.stdout or check.stderr or "").strip()
+    if check.returncode == 1:
+        print(f"dev: {output}")
+        print("dev: rebuilding the prod package from current source...")
+        build = subprocess.run([sys.executable, script], capture_output=True,
+                               text=True, timeout=300)
+        if build.returncode != 0:
+            return _fail("prod package build failed",
+                         (build.stderr or build.stdout or "")[:400])
+        print(f"dev: {(build.stdout or '').strip()}")
+    elif check.returncode != 0:
+        return _fail(f"prod package check failed: {output}")
+    else:
+        print(f"dev: {output}")
     try:
         with open(os.path.join(ROOT, "dist", "manifest.json"), encoding="utf-8") as fh:
-            record = _json.load(fh)
-    except (OSError, ValueError):
-        return _fail("no dist/manifest.json; build the prod artifact first",
-                      "scripts/make_prod_config.py + scripts/build_addon.py")
+            record = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return _fail(f"no dist/manifest.json: {exc!r}",
+                     "run scripts/build_addon.py")
     if not record.get("prod_endpoint_baked"):
         return _fail("current dist/ artifact is a DEV build (no prod endpoint)",
-                      "bake + rebuild before the inbox test")
+                     "run scripts/make_prod_config.py --url ... --anon-key ...")
     if not record.get("artifact_sha256"):
         return _fail("dist/manifest.json has no artifact hash; rebuild")
-    sdir = os.path.join(ANKI_BASE, "prod-smoke")
+    return record
+
+
+def _user_seed(scenario: str) -> dict:
+    """Fixture payload for the production rehearsals.
+
+    Collection content only: a starter deck, plus the 2.0.2-shape Classic
+    data for the upgrade journey. No Evolved journal and no local overlay,
+    so the packaged add-on behaves exactly as users receive it.
+    """
+    base = {"scenario": scenario, "profile": USER_PROFILE, "deck": "Sample Deck",
+            "seeded_at": time.time(), "summary": []}
+    if scenario == "user-new":
+        base["cards"] = 20
+        base["summary"] = ["20-card Sample Deck so the review loop is testable",
+                           "no game state: this is the first-launch experience"]
+        return base
+    fixtures = _load_fixtures()
+    base["cards"] = 100
+    base["classic"] = {"player_data": fixtures.classic_player_data(),
+                       "current_skill": "Mining"}
+    base["summary"] = ["Classic 2.0.2-shape data: Mining 23, Woodcutting 17, "
+                       "320 Rune essence banked",
+                       "expect the Try Evolved / Continue Classic upgrade path"]
+    return base
+
+
+def _print_user_steps(scenario: str) -> None:
+    print("dev: isolated test profile on the production backend; personal Anki "
+          "untouched. OTP emails go to whatever address you register.")
+    if scenario == "user-new":
+        print("dev:   1. Chooser: pick Evolved (or Classic to exercise that path).")
+        print("dev:   2. Guided setup -> finish it -> study the Sample Deck.")
+        print("dev:   3. Evolved menu -> Account -> register with your real email ->")
+        print("dev:      OTP from ankiscape@ankiscape.xyz -> enter the code.")
+        print("dev:   4. Review -> XP/HUD -> Sync -> Hiscores. Close and reopen, then")
+        print("dev:      pick 'Resume last session' to check the resume path.")
+        print("dev: note: each wiped profile needs its own account (an email/username")
+        print("dev: registers once); reuse an alias when starting over.")
+    elif scenario == "user-upgrade":
+        print("dev:   1. Expect the 2.0.2 -> 3.0 upgrade prompt (Try Evolved /")
+        print("dev:      Continue Classic).")
+        print("dev:   2. Continue Classic keeps Classic progress; Try Evolved starts")
+        print("dev:      the Evolved setup fresh.")
+        print("dev:   3. Settings -> Advanced switches modes both ways; both games persist.")
+        print("dev: note: the Classic state is the 2.0.2-shape fixture, not a real save.")
+    else:
+        print("dev:   1. State is preserved from the last session; log in again if")
+        print("dev:      asked (tokens are memory-only by design).")
+        print("dev:   2. 'New user' / 'Upgrade' wipe this profile; Resume never does.")
+
+
+def cmd_user_journey(args, anki_bin: str, installed: str) -> int:
+    """Real-user journeys on the packaged prod artifact + production backend.
+
+    Shared marker-guarded base .dev/anki/user, profile dev-user. user-new and
+    user-upgrade wipe it and seed collection fixtures; user-resume relaunches
+    it untouched. ANKISCAPE_DEV is never set, so the add-on resolves its baked
+    production endpoint exactly like an installed release.
+    """
+    scenario = args.scenario
+    if getattr(args, "symlink", False):
+        return _fail("--symlink is for the synthetic dev playground only",
+                     "production rehearsals always install the packaged artifact")
+    if scenario == "user-resume" and getattr(args, "fresh", False):
+        return _fail("--fresh conflicts with user-resume",
+                     "use --scenario user-new to start over")
+    if not os.path.isfile(os.path.join(ROOT, "evolved", "prod_config.py")):
+        return _fail("evolved/prod_config.py is absent; the launcher needs a "
+                     "prod build",
+                     "bake it first: python3 scripts/make_prod_config.py --url "
+                     "https://<project>.supabase.co --anon-key <public anon key>")
+    record = _ensure_prod_artifact()
+    if record is None:
+        return 1
+    wipe = scenario != "user-resume"
+    sdir = USER_BASE
     if _reject_personal_paths(sdir):
         return _fail(f"refusing to use path outside .dev: {sdir}")
-    if getattr(args, "fresh", False):
-        shutil.rmtree(sdir, ignore_errors=True)
+    if wipe:
         if os.path.exists(sdir):
-            return _fail(f"could not wipe {sdir}; a process still holds it")
+            _reap_mpv(sdir)
+            shutil.rmtree(sdir, ignore_errors=True)
+        if os.path.exists(sdir):
+            return _fail(f"could not wipe {sdir}; close Anki first")
+    elif not (os.path.isdir(sdir) and _check_marker(sdir)
+              and os.path.isfile(os.path.join(sdir, USER_PROFILE,
+                                              "collection.anki2"))):
+        return _fail("no production test session to resume",
+                     "pick 'New user' first (resume keeps the dev-user profile)")
     os.makedirs(sdir, exist_ok=True)
-    _write_marker(sdir, "prod-smoke")
-    profile = "dev-prod-smoke"
-    _ensure_e2e_profile(sdir, profile)
+    _write_marker(sdir, scenario)
+    _ensure_e2e_profile(sdir, USER_PROFILE)
     addons = os.path.join(sdir, "addons21")
     os.makedirs(addons, exist_ok=True)
     try:
-        installed_kind = _install_addon(addons, symlink=False)
+        installed_kind = _install_addon(addons, symlink=False, prebuilt=True)
     except RuntimeError as exc:
         return _fail(str(exc))
-    # No seed addon, no seed.json: this is a real-user walkthrough, not a
-    # synthetic fixture. The chooser appears on first load; Wilson picks
-    # Evolved and registers with his real email.
-    env = _anki_env({})
-    print(f"dev: [PROD SMOKE] Anki {installed} ({installed_kind}) -b {sdir} -p {profile}")
-    print(f"dev: artifact {record['artifact_sha256'][:16]}... (prod endpoint baked)")
-    print("dev: isolated profile; personal Anki untouched. Steps:")
-    print("dev:   1. Pick Evolved at the chooser. 2. Evolved menu -> Account ->")
-    print("dev:   register with your real email -> OTP from ankiscape@ankiscape.xyz")
-    print("dev:   -> enter code -> answer cards -> Sync -> hiscores. 3. Test recovery.")
+    if wipe:
+        # Dev-only seeder (never shipped): starter deck, plus the 2.0.2-shape
+        # Classic fixture for the upgrade journey. The packaged add-on itself
+        # stays exact release bits.
+        seed_dest = os.path.join(addons, "seed_addon")
+        if os.path.exists(seed_dest):
+            shutil.rmtree(seed_dest)
+        shutil.copytree(os.path.join(ROOT, "dev", "seed_addon"), seed_dest)
+        seed_payload = _user_seed(scenario)
+        with open(os.path.join(sdir, "seed.json"), "w", encoding="utf-8") as fh:
+            json.dump(seed_payload, fh)
+        if os.path.exists(os.path.join(sdir, "seed-done.json")):
+            os.unlink(os.path.join(sdir, "seed-done.json"))
+    else:
+        seed_payload = {"summary": []}
+    env = _prod_env()
+    print(f"dev: [PROD {scenario}] Anki {installed} ({installed_kind}) "
+          f"-b {sdir} -p {USER_PROFILE}")
+    print(f"dev: artifact {record['artifact_sha256'][:12]}... "
+          f"({record['members']} members, prod endpoint baked)")
+    _print_scenario_summary(seed_payload)
+    _print_user_steps(scenario)
+    if getattr(args, "no_anki", False):
+        print(f"dev: scenario '{scenario}' prepared at {sdir} (Anki launch skipped)")
+        return 0
     try:
-        proc = subprocess.Popen([anki_bin, "-b", sdir, "-p", profile], env=env)
+        proc = subprocess.Popen([anki_bin, "-b", sdir, "-p", USER_PROFILE], env=env)
     except Exception as exc:
         return _fail(f"could not launch Anki: {exc!r}")
     try:
@@ -437,7 +568,7 @@ def _scenario_seed(scenario: str, profile: str) -> dict:
 
 def cmd_reset(args) -> int:
     scenario = args.scenario
-    sdir = _scenario_dir(scenario)
+    sdir = USER_BASE if scenario in USER_SCENARIOS else _scenario_dir(scenario)
     real = os.path.realpath(sdir)
     if os.path.islink(sdir) or (os.path.exists(sdir) and os.path.realpath(sdir) != os.path.abspath(sdir)
                                 and False):
@@ -458,6 +589,9 @@ def cmd_reset(args) -> int:
     except FileNotFoundError:
         pass
     shutil.rmtree(sdir, ignore_errors=False)
+    if scenario in USER_SCENARIOS:
+        print(f"dev: production rehearsal profile removed ({sdir})")
+        return 0
     os.makedirs(sdir, exist_ok=True)
     _write_marker(sdir, scenario)
     print(f"dev: scenario '{scenario}' reset to identical seed state")
@@ -596,7 +730,7 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
 
     journeys = ("fresh", "upgrade", "undo", "catchup", "sync", "dialogs",
                 "ui-onboarding", "ui-training", "ui-settings", "ui-review",
-                "ui-lifecycle")
+                "ui-lifecycle", "ui-art")
     if journey not in journeys:
         return _fail(f"unknown journey {journey!r}", f"choose from {journeys}")
     print(f"dev: (e2e) journey={journey} target Anki={anki or '?'} Qt={qt or '?'}")
@@ -671,6 +805,15 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
                   encoding="utf-8") as fh:
             json.dump({"player_data": fixtures.classic_player_data(),
                        "current_skill": "Mining"}, fh)
+    if journey == "ui-art":
+        # High-level / full-bank world for offline art rendering (same
+        # generator as the synthetic endgame scenario). The driver swaps the
+        # placeholder uuid for the game it created during onboarding.
+        fixtures = _load_fixtures()
+        with open(os.path.join(base, "art-fixture.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"operations": fixtures.endgame_ops("ART_PLACEHOLDER"),
+                       "observations": []}, fh)
     log_path = os.path.join(base, "anki-stdout.log")
     env = _anki_env({"ANKISCAPE_DEBUG": "1"})
 
@@ -709,8 +852,16 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
                 _json.dump({"journey": journey, "phase": phase, "run_id": run_id}, fh)
             continue
         # Final assertions.
-        with open(os.path.join(base, "e2e-assertions.json"), encoding="utf-8") as fh:
-            last_result = _json.load(fh)
+        try:
+            with open(os.path.join(base, "e2e-assertions.json"),
+                      encoding="utf-8") as fh:
+                last_result = _json.load(fh)
+        except (OSError, ValueError):
+            # Early Anki exit (e.g. an orphaned audio helper blocking launch):
+            # still reap this base's mpv children so they cannot accumulate
+            # and break every later journey.
+            _reap_mpv(base)
+            return _fail("e2e exited without final assertions")
         break
     if last_result is None:
         _reap_mpv(base)
@@ -896,9 +1047,10 @@ def main(argv=None) -> int:
     sub.add_parser("setup")
     p_launch = sub.add_parser("launch")
     p_launch.add_argument("--scenario", required=True,
-                          choices=SCENARIOS + ("prod-smoke",),
-                          help="prod-smoke: isolated profile on the PROD backend "
-                               "(Wilson's inbox test; needs baked prod artifact)")
+                          choices=SCENARIOS + USER_SCENARIOS,
+                          help="user-new/user-upgrade/user-resume: packaged prod "
+                               "artifact on the production backend (isolated "
+                               "profile; auto rebuild if source changed)")
     p_launch.add_argument("--anki", default="")
     p_launch.add_argument("--symlink", action="store_true",
                           help="link the repo instead of installing the zip (dev loop only)")
@@ -907,7 +1059,7 @@ def main(argv=None) -> int:
     p_launch.add_argument("--no-anki", action="store_true")
     p_reset = sub.add_parser("reset")
     p_reset.add_argument("--scenario", required=True,
-                         choices=SCENARIOS + ("prod-smoke",))
+                         choices=SCENARIOS + USER_SCENARIOS)
     p_test = sub.add_parser("test")
     p_test.add_argument("--suite", required=True, choices=("python", "backend", "e2e"))
     p_test.add_argument("--anki", default="")
@@ -915,7 +1067,8 @@ def main(argv=None) -> int:
     p_test.add_argument("--journey", default="fresh",
                         choices=("fresh", "upgrade", "undo", "catchup", "sync",
                                  "dialogs", "ui-onboarding", "ui-training",
-                                 "ui-settings", "ui-review", "ui-lifecycle"))
+                                 "ui-settings", "ui-review", "ui-lifecycle",
+                                 "ui-art"))
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("--release", action="store_true")
     p_ev = sub.add_parser("verify-evidence")

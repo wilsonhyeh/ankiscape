@@ -10,6 +10,11 @@ the Wilson-operated device checklist at the bottom.
 - Artifact built by `python3 scripts/build_addon.py` (record SHA-256 +
   `prod_endpoint_baked` flavor from `dist/manifest.json`).
 - Isolated base: `python3 dev.py launch --scenario <name>` (never personal).
+- Real-user journeys on the packaged prod artifact: double-click
+  `Launch AnkiScape.command` (or `dev.py launch --scenario
+  user-new|user-upgrade|user-resume`) — shared isolated `.dev/anki/user`
+  profile, production backend, artifact rebuilt automatically when shipped
+  source changed, hash printed at launch.
 - Local Supabase stack healthy (`cd server && supabase status`).
 - Dev builds (no prod endpoint baked) point at the local stack only and
   refuse prod-looking HTTPS; prod builds carry the baked anon endpoint.
@@ -40,9 +45,15 @@ the Wilson-operated device checklist at the bottom.
 5b. Shell + account screens live: `python3 dev.py test --suite e2e --journey
    dialogs` (icon rail + Hiscores controls + register/login/recovery submit
    paths through the shipped builders).
-6. Offline review -> restart -> reconnect/login -> pending uploads in bounded
+6. Enable Keep me signed in -> restart with Resume -> account restored from
+   Keychain. Log out -> restart -> signed out. Unchecked remember stays
+   session-only. Offline review -> restart -> reconnect -> pending uploads in bounded
    batches, newer reviews never cleared on acknowledgment.
-7. Email-code recovery via captured local mail; old password/token fails.
+7. Login -> Forgot password -> request code -> enter code/new password.
+   A bad code or rejected password keeps the form open for correction.
+   `dev/account_regressions.py` verifies hosted signup/login/refresh/recovery
+   with admin-generated codes (no email sent), then deletes its test account.
+   Inbox delivery remains a manual check.
 8. Undo/re-answer policy; Anki scheduling/Undo still works; Redo restores.
 9. Corrupt/unsupported state recovery via Export/Restore Game Backup.
 10. UI/UX shell journeys: `ui-onboarding`, `ui-training`, `ui-settings`,
@@ -53,7 +64,7 @@ the Wilson-operated device checklist at the bottom.
 Fail on native exception dialogs, hangs, missing screenshots/assertions, or a
 dead local service.
 
-## UI/UX verification (2026-09-10, macOS, packaged artifact)
+## Earlier release-candidate UI/UX verification (before user-reported fixes)
 
 Artifact: `ankiscape-3.0.0.ankiaddon`, sha256 `5c7575ac85652f0b...`, 155
 members, prod endpoint baked. Commands and results:
@@ -115,3 +126,11 @@ scenario under `artifacts/ui-ux/<anki>-qt<qt>-<stamp>/`.
 
 Updater behavior, exact package identity (`1808450369`), Classic preservation,
 production gameplay/account flow. Complements - never replaces - pre-upload tests.
+
+## User-reported repair pass (unpublished, 2026-09-10)
+
+See `artifacts/user-reported-fixes-2026-09-10.md`: 219 Python tests, 11/11
+scenarios on both macOS Anki versions, plus hosted account/recovery and
+Keychain checks. These local changes supersede the earlier frozen RC for
+launcher testing; they are not a new published release. Real inbox delivery
+and Windows/Linux GUI verification remain manual.

@@ -6,6 +6,7 @@ backup (never mint historical rewards from a cached XP total)."""
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from typing import Any, Dict
 
@@ -38,6 +39,8 @@ def validate_backup(data: Dict[str, Any]) -> Dict[str, Any]:
     game_uuid = data.get("game_uuid")
     if not isinstance(game_uuid, str) or not game_uuid:
         raise ValueError("backup missing game_uuid")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", game_uuid):
+        raise ValueError("backup has an invalid game identifier")
     body = canonical_json({"game_uuid": game_uuid,
                            "operations": data.get("operations", []),
                            "observations": data.get("observations", [])})
