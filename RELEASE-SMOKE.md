@@ -102,6 +102,23 @@ scenario under `artifacts/ui-ux/<anki>-qt<qt>-<stamp>/`.
   and keeps local pending progress until it updates. The new artifact
   (`5c7575ac...`) sends the header and is the compatible client.
 
+### Hosted migration 0005 (PERFORMED 2026-09-10)
+
+- Pre-migration backup: schema + data dumps to
+  `/tmp/ankiscape-deploy-0005/` before applying.
+- `supabase db push --dry-run` listed only `0005_gem_inventory_grant.sql`;
+  the push applied it; `supabase migration list` shows 0005 on both sides.
+- Post-deploy schema dump confirms both corrected functions: `gem_out` is
+  written to the inventory in `evolved_replay`, and `_evolved_apply_direct`
+  gates cooking by `cooking_level`.
+- `dev/prod_e2e.py` against the hosted project: ALL PASS (28 checks),
+  including two new checks that submit a deterministic gem-drop mining op and
+  read the replayed server state: "mined gem granted to Bank" and "gem bonus
+  XP applied (57.75)". Test users/games cleaned up.
+- Net effect: gem-based Crafting (tiers 11-23) now scores server-side, and
+  below-level cooking pauses in authoritative replay, matching the fixed
+  client (artifact `cbd4516a`).
+
 ### Remaining manual release steps
 
 - Wilson's real-inbox delivery smoke (register with a real email, OTP from

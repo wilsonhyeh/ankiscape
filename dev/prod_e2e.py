@@ -28,6 +28,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+from fractions import Fraction
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -35,6 +36,8 @@ sys.path.insert(0, ROOT)
 FAILURES = []
 
 from evolved.auth import MemorySession  # noqa: E402
+from evolved.draws import draw_r, frac_hits  # noqa: E402
+from evolved import reviews as reviews_mod  # noqa: E402
 from evolved.journal import Journal  # noqa: E402
 from evolved.net import Endpoint, post_json  # noqa: E402
 from evolved.service import ServiceConfig, SyncService, make_transport  # noqa: E402
@@ -326,6 +329,81 @@ def main():
                             token="", anon=anon)
         check("prod username-login rejects bad password", status == 401,
               f"status {status}")
+
+        # 9. Migration 0005 behavior: a mined gem is real loot. Submits one
+        # Clay mining op whose review key deterministically rolls success +
+        # gem drop + sapphire for a fresh level-1 game, then reads the
+        # replayed server state. Also proves the bonus XP used the ore's
+        # tier multiplier (5 x 1.05 + 50 x 1.05 = 57.75).
+        username_c = f"e2epc{stamp % 100000}"
+        status, user = _admin("POST", "/auth/v1/admin/users",
+                              {"email": f"e2epc{stamp}@example.com",
+                               "password": "correct horse 9",
+                               "email_confirm": True,
+                               "user_metadata": {"username_norm": username_c,
+                                                 "username_display": username_c.title()}})
+        check("prod admin creates gem-check user", status in (200, 201),
+              f"{status} {str(user)[:150]}")
+        if status in (200, 201):
+            uid_c = user["id"]
+            created_users.append(uid_c)
+            status, sess = _authed(
+                "POST", "/auth/v1/token?grant_type=password",
+                {"email": f"e2epc{stamp}@example.com",
+                 "password": "correct horse 9"}, token="", anon=anon)
+            check("prod gem-check password grant",
+                  status == 200 and bool(sess.get("access_token")),
+                  f"{status} {str(sess)[:150]}")
+            mem_c = MemorySession()
+            mem_c.set(access_token=sess.get("access_token", ""),
+                      refresh_token=sess.get("refresh_token", ""),
+                      user_id=(sess.get("user") or {}).get("id", ""))
+            game_c = str(uuid.uuid4())
+            games.append(game_c)
+            _authed("POST", "/rest/v1/rpc/link_game", {"p_game_uuid": game_c},
+                    token=mem_c.access_token, anon=anon)
+            # Fresh level-1 Clay: success chance min(.80+.02, .95) x .90.
+            prob = Fraction(82, 100) * Fraction(9, 10)
+            gem_key = ""
+            for rid in range(1, 200_001):
+                candidate = reviews_mod.make_review_key(game_c, rid, rid + 1000)
+                if (frac_hits(draw_r(1, game_c, candidate, "action"), prob)
+                        and frac_hits(draw_r(1, game_c, candidate, "gem_drop"),
+                                      Fraction(1, 256))
+                        and frac_hits(draw_r(1, game_c, candidate, "gem_pick"),
+                                      Fraction(1, 4))):
+                    gem_key = candidate
+                    break
+            check("prod deterministic gem key found", bool(gem_key))
+            if gem_key:
+                status, data = _authed(
+                    "POST", "/rest/v1/rpc/submit_operations",
+                    {"p_game_uuid": game_c, "p_ops": [{
+                        "op_id": str(uuid.uuid4()), "game_uuid": game_c,
+                        "device_id": "dev-c", "device_seq": 1, "lamport": 1,
+                        "kind": "review_award",
+                        "payload": {"review_key": gem_key,
+                                    "review_ts": 1_800_000_000, "rating": 3,
+                                    "review_kind": "review",
+                                    "provenance": "direct",
+                                    "reward_policy": 2, "skill": "mining",
+                                    "resource": "Clay"}}]},
+                    token=mem_c.access_token, anon=anon)
+                check("prod gem op accepted",
+                      status == 200 and not data.get("conflicts"),
+                      f"{status} {str(data)[:200]}")
+                status, state = _authed(
+                    "POST", "/rest/v1/rpc/get_game_state",
+                    {"p_game_uuid": game_c}, token=mem_c.access_token,
+                    anon=anon)
+                state = state if isinstance(state, dict) else {}
+                inventory = state.get("inventory") or {}
+                xp = (state.get("xp") or {}).get("mining", 0)
+                check("prod mined gem granted to Bank",
+                      status == 200 and inventory.get("Uncut sapphire") == 1,
+                      f"{status} {str(state)[:200]}")
+                check("prod gem bonus XP applied (57.75)",
+                      int(xp) == 57_750_000, f"xp={xp}")
     finally:
         cleanup()
         check("prod cleanup ran", True)
