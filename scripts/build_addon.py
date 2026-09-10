@@ -25,12 +25,16 @@ PACKAGE_ID = "1808450369"
 ARCHIVE = os.path.join(DIST, f"ankiscape-{VERSION}.ankiaddon")
 
 # Explicit runtime allowlist (relative to repo root). Nothing else ships.
-ALLOWLIST_DIRS = ("bars", "crafteditems", "fish", "gems", "icon", "ores", "trees", "evolved", "shared")
+ALLOWLIST_DIRS = ("assets", "bars", "crafteditems", "fish", "fonts", "gems",
+                  "icon", "ores", "sounds", "textures", "trees", "evolved",
+                  "shared")
 ALLOWLIST_FILES = ("__init__.py", "constants.py", "debug.py", "deck_injection_pure.py",
                    "hooks.py", "injectors.py", "logic.py", "logic_pure.py", "mode.py",
                    "runtime.py", "storage.py", "storage_pure.py", "ui.py", "utils.py",
                    "manifest.json", "LICENSE", "LICENSE.txt", "README.md")
-REQUIRED_ASSETS = ("manifest.json", "__init__.py", "shared/rules-v1.json")
+REQUIRED_ASSETS = ("manifest.json", "__init__.py", "shared/rules-v1.json",
+                   "fonts/PressStart2P-Regular.ttf", "textures/stone.png",
+                   "evolved/ui/theme.py", "evolved/ui/shell.py")
 
 SECRET_PATTERNS = (
     # Concrete privileged material only - bare words like "service role" in
@@ -128,6 +132,16 @@ def main() -> int:
         for hit in hits:
             print(f"  {hit}", file=sys.stderr)
         return 1
+    # prod_config.py is generated at build time (public anon key only) and
+    # gitignored: refuse a stale/absent file silently becoming a dev build
+    # when the builder meant production, and vice versa. The build stamps
+    # which flavor it is into the manifest record below.
+    prod_config_path = os.path.join(ROOT, "evolved", "prod_config.py")
+    prod_baked = os.path.isfile(prod_config_path)
+    if prod_baked and "evolved/prod_config.py" not in members:
+        print("build: ERROR: evolved/prod_config.py exists but was not "
+              "collected; check the allowlist", file=sys.stderr)
+        return 1
     os.makedirs(DIST, exist_ok=True)
     # Source hash over member bytes (deterministic order).
     sha = hashlib.sha256()
@@ -149,6 +163,7 @@ def main() -> int:
     record = {"archive": os.path.basename(ARCHIVE), "version": VERSION,
               "package": PACKAGE_ID, "members": len(members),
               "source_hash": source_hash, "artifact_sha256": artifact_hash,
+              "prod_endpoint_baked": prod_baked,
               "member_list": members}
     with open(os.path.join(DIST, "manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(record, fh, indent=2)

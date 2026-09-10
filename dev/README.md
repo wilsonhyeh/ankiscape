@@ -31,6 +31,19 @@ python3 dev.py verify --release
 python3 dev.py verify-evidence --matrix dev/matrix.json
 ```
 
+Journeys: `--journey fresh|upgrade|undo|catchup` (real-Anki Qt),
+`--journey sync` (live local-stack service sync, no mocks),
+`--journey dialogs` (live Qt menu + account screens).
+
+Prod release-candidate path (publication gate; Wilson authorizes):
+```bash
+python3 scripts/make_prod_config.py --url https://<ref>.supabase.co \
+  --anon-key <sb_publishable_...>   # public key only; refuses privileged
+python3 scripts/build_addon.py      # stamps prod_endpoint_baked: true
+ANKISCAPE_PROD_URL=... ANKISCAPE_PROD_ANON_KEY=... \
+  SUPABASE_SERVICE_ROLE_KEY=... python3 dev/prod_e2e.py  # hosted stack, no real email
+```
+
 `launch` seeds a synthetic base at `.dev/anki/<scenario>` (marker-checked)
 and opens managed Anki with `-b <base> -p dev-<scenario>`. A visible DEV label
 shows the scenario and backend. No hosted links, real SMTP, or AnkiWeb login.

@@ -95,7 +95,7 @@ def _seed_cards(col, count):
         return
     deck_id = col.decks.id("Dev Deck")
     col.decks.select(deck_id)
-    have = len(col.find_cards("deck:'Dev Deck'"))
+    have = len(col.find_cards('deck:"Dev Deck"'))
     for i in range(max(0, count - have)):
         note = col.new_note(model)
         note["Front"] = f"Dev front {i}"

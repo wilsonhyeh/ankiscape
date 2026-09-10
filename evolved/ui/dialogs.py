@@ -13,13 +13,32 @@ def _qt():
     return QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout
 
 
+def _style(dlg) -> None:
+    try:
+        from .widgets import apply_theme
+        apply_theme(dlg)
+    except Exception:
+        pass
+
+
 def _error_label(QLabel, text: str = "") -> object:
     label = QLabel(text)
     label.setObjectName("ankiscape-error-label")
     return label
 
 
-def show_register_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict]) -> Optional[Dict]:
+def _accepted(dlg) -> bool:
+    """One modal round; True on Accept. Factored so the E2E driver's popup
+    watchdog and automators can observe/close each round uniformly."""
+    from aqt.qt import QDialog as _QD
+    try:
+        return dlg.exec() == _QD.DialogCode.Accepted
+    except RuntimeError:
+        return False
+
+
+def show_register_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict],
+                         *, _test_hooks: Optional[Dict] = None) -> Optional[Dict]:
     QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout = _qt()
     dlg = QDialog(parent)
     try:
@@ -29,6 +48,7 @@ def show_register_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict]) ->
         pass
     dlg.setWindowTitle("AnkiScape — Create account")
     dlg.setObjectName("ankiscape-register-dialog")
+    _style(dlg)
     layout = QVBoxLayout(dlg)
     form = QFormLayout()
     username = QLineEdit()
@@ -52,13 +72,31 @@ def show_register_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict]) ->
     layout.addWidget(buttons)
     buttons.accepted.connect(dlg.accept)
     buttons.rejected.connect(dlg.reject)
-    if dlg.exec() != QDialog.DialogCode.Accepted:
+    if _test_hooks is not None:
+        # E2E/automation escape hatch (dev only): expose the live widgets +
+        # the submit closure so the driver can fill fields and invoke the
+        # exact on_submit path without fighting nested exec() modal loops.
+        # Production callers never pass this (dialogs stay purely modal).
+        _test_hooks.update({"dialog": dlg, "username": username,
+                            "email": email, "password": password,
+                            "error": error, "submit": lambda: on_submit(
+                                {"username": username.text(),
+                                 "email": email.text(),
+                                 "password": password.text()})})
+    if not _accepted(dlg):
         return None
-    result = on_submit({"username": username.text(), "email": email.text(),
-                        "password": password.text()})
-    if not result.get("ok"):
-        error.setText(result.get("error", "invalid username or password"))
-        if dlg.exec() != QDialog.DialogCode.Accepted:  # let them read the error
+    try:
+        fields = {"username": username.text(), "email": email.text(),
+                  "password": password.text()}
+    except RuntimeError:
+        return None
+    result = on_submit(fields)
+    if not isinstance(result, dict) or not result.get("ok"):
+        try:
+            error.setText((result or {}).get("error", "invalid username or password"))
+        except RuntimeError:
+            pass
+        if not _accepted(dlg):  # let them read the error
             return None
         return None
     return result
@@ -75,6 +113,7 @@ def show_code_dialog(parent, *, title: str, object_name: str,
         pass
     dlg.setWindowTitle(title)
     dlg.setObjectName(object_name)
+    _style(dlg)
     layout = QVBoxLayout(dlg)
     form = QFormLayout()
     code = QLineEdit()
@@ -90,16 +129,24 @@ def show_code_dialog(parent, *, title: str, object_name: str,
     layout.addWidget(buttons)
     buttons.accepted.connect(dlg.accept)
     buttons.rejected.connect(dlg.reject)
-    if dlg.exec() != QDialog.DialogCode.Accepted:
+    if not _accepted(dlg):
         return None
-    result = on_submit(code.text())
-    if not result.get("ok"):
-        error.setText(result.get("error", "invalid or expired code"))
+    try:
+        typed_code = code.text()
+    except RuntimeError:
+        return None
+    result = on_submit(typed_code)
+    if not isinstance(result, dict) or not result.get("ok"):
+        try:
+            error.setText((result or {}).get("error", "invalid or expired code"))
+        except RuntimeError:
+            pass
         return None
     return result
 
 
-def show_login_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict]) -> Optional[Dict]:
+def show_login_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict],
+                        *, _test_hooks: Optional[Dict] = None) -> Optional[Dict]:
     QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout = _qt()
     dlg = QDialog(parent)
     try:
@@ -109,6 +156,7 @@ def show_login_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict]) -> Op
         pass
     dlg.setWindowTitle("AnkiScape — Log in")
     dlg.setObjectName("ankiscape-login-dialog")
+    _style(dlg)
     layout = QVBoxLayout(dlg)
     form = QFormLayout()
     identity = QLineEdit()
@@ -133,17 +181,31 @@ def show_login_dialog(parent, on_submit: Callable[[Dict[str, str]], Dict]) -> Op
     layout.addWidget(buttons)
     buttons.accepted.connect(dlg.accept)
     buttons.rejected.connect(dlg.reject)
-    if dlg.exec() != QDialog.DialogCode.Accepted:
+    if _test_hooks is not None:
+        _test_hooks.update({"dialog": dlg, "identity": identity,
+                            "password": password, "error": error,
+                            "submit": lambda: on_submit(
+                                {"identity": identity.text(),
+                                 "password": password.text()})})
+    if not _accepted(dlg):
         return None
-    result = on_submit({"identity": identity.text(), "password": password.text()})
-    if not result.get("ok"):
-        error.setText(result.get("error", "invalid username or password"))
+    try:
+        fields = {"identity": identity.text(), "password": password.text()}
+    except RuntimeError:
+        return None
+    result = on_submit(fields)
+    if not isinstance(result, dict) or not result.get("ok"):
+        try:
+            error.setText((result or {}).get("error", "invalid username or password"))
+        except RuntimeError:
+            pass
         return None
     return result
 
 
 def show_recovery_dialog(parent, on_request: Callable[[str], Dict],
-                         on_confirm: Callable[[Dict[str, str]], Dict]) -> Optional[Dict]:
+                         on_confirm: Callable[[Dict[str, str]], Dict],
+                         *, _test_hooks: Optional[Dict] = None) -> Optional[Dict]:
     QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout = _qt()
     dlg = QDialog(parent)
     try:
@@ -153,6 +215,7 @@ def show_recovery_dialog(parent, on_request: Callable[[str], Dict],
         pass
     dlg.setWindowTitle("AnkiScape — Recover account")
     dlg.setObjectName("ankiscape-recovery-dialog")
+    _style(dlg)
     layout = QVBoxLayout(dlg)
     form = QFormLayout()
     email = QLineEdit()
@@ -176,11 +239,32 @@ def show_recovery_dialog(parent, on_request: Callable[[str], Dict],
     layout.addWidget(buttons)
     buttons.accepted.connect(dlg.accept)
     buttons.rejected.connect(dlg.reject)
-    if dlg.exec() != QDialog.DialogCode.Accepted:
+    if _test_hooks is not None:
+        def _recovery_submit():
+            try:
+                typed = {"email": email.text(), "code": code.text(),
+                         "new_password": new_password.text()}
+            except RuntimeError:
+                return {"ok": False, "error": "dialog closed"}
+            req = on_request(typed["email"])
+            if not req.get("ok"):
+                return req
+            return on_confirm(typed)
+        _test_hooks.update({"dialog": dlg, "email": email, "code": code,
+                            "new_password": new_password, "error": error,
+                            "submit": _recovery_submit})
+    if not _accepted(dlg):
         return None
-    req = on_request(email.text())
+    try:
+        typed = {"email": email.text(), "code": code.text(),
+                 "new_password": new_password.text()}
+    except RuntimeError:
+        return None
+    req = on_request(typed["email"])
     if not req.get("ok"):
-        error.setText(req.get("error", "network error; try again shortly"))
+        try:
+            error.setText(req.get("error", "network error; try again shortly"))
+        except RuntimeError:
+            pass
         return None
-    return on_confirm({"email": email.text(), "code": code.text(),
-                       "new_password": new_password.text()})
+    return on_confirm(typed)

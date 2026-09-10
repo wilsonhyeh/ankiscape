@@ -680,12 +680,20 @@ def show_achievement_dialog(achievement: str, data: dict):
     dialog.exec()
 
 
-def create_menu(on_main_menu):
-    """Create a single AnkiScape > Menu entry that opens the consolidated window."""
+def create_menu(on_main_menu, on_try_evolved=None):
+    """Create the AnkiScape menu.
+
+    Classic gets its consolidated menu plus a persistent Try Evolved
+    invitation; Evolved routes before this menu is ever shown.
+    """
     menu = QMenu("AnkiScape", mw)
     mw.form.menubar.addMenu(menu)
     main_action = menu.addAction("Menu")
     main_action.triggered.connect(on_main_menu)
+    if callable(on_try_evolved):
+        try_evolved = menu.addAction("Try AnkiScape Evolved…")
+        try_evolved.setObjectName("ankiscape-try-evolved-action")
+        try_evolved.triggered.connect(on_try_evolved)
 
 
 def update_menu_visibility(current_skill: str):

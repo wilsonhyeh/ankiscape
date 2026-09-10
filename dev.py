@@ -163,6 +163,24 @@ def _refuse_running_anki(context: str) -> bool:
     return False
 
 
+# Parent-interpreter locators that must never reach Anki's bundled Python.
+# Leaking these into the child has produced
+# "Unable to initialize Python interpreter: can't initialize sys standard
+# streams" on macOS in the past. Locale (LANG/LC_*) is preserved.
+_SCRUB_ENV_KEYS = ("PYTHONHOME", "PYTHONPATH", "__PYVENV_LAUNCHER__",
+                   "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV",
+                   "CONDA_PYTHON_EXE")
+
+
+def _anki_env(extra: dict) -> dict:
+    """Child env for launching the bundled Anki interpreter."""
+    env = dict(os.environ)
+    for key in _SCRUB_ENV_KEYS:
+        env.pop(key, None)
+    env.update(extra)
+    return env
+
+
 def _install_addon(addons_dir: str, *, symlink: bool) -> str:
     """Install the packaged add-on (zip, like a user) or a source symlink
     (manual dev loop only). Returns 'zip' or 'symlink'."""
@@ -191,10 +209,16 @@ def _install_addon(addons_dir: str, *, symlink: bool) -> str:
 
 def cmd_launch(args) -> int:
     scenario = args.scenario
-    if scenario not in SCENARIOS:
-        return _fail(f"unknown scenario {scenario!r}", f"choose from {SCENARIOS}")
+    if scenario not in SCENARIOS and scenario != "prod-smoke":
+        return _fail(f"unknown scenario {scenario!r}", f"choose from {SCENARIOS + ('prod-smoke',)}")
     if _refuse_running_anki(f"launch --scenario {scenario}"):
         return 1
+    _app, anki_bin, installed = _pick_app(getattr(args, "anki", ""))
+    if not anki_bin:
+        return _fail(f"no installed Anki.app matches {getattr(args, 'anki', '')!r}",
+                     "install the target first")
+    if scenario == "prod-smoke":
+        return cmd_prod_smoke(args, anki_bin, installed)
     _app, anki_bin, installed = _pick_app(getattr(args, "anki", ""))
     if not anki_bin:
         return _fail(f"no installed Anki.app matches {getattr(args, 'anki', '')!r}",
@@ -231,8 +255,8 @@ def cmd_launch(args) -> int:
         print(f"dev: scenario '{scenario}' prepared at {sdir} (Anki launch skipped)")
         _print_scenario_summary(seed_payload)
         return 0
-    env = dict(os.environ, ANKISCAPE_DEV=scenario,
-               ANKISCAPE_DEV_BACKEND=os.environ.get("ANKISCAPE_DEV_BACKEND", "local"))
+    env = _anki_env({"ANKISCAPE_DEV": scenario,
+                     "ANKISCAPE_DEV_BACKEND": os.environ.get("ANKISCAPE_DEV_BACKEND", "local")})
     print(f"dev: [DEV {scenario}] Anki {installed} ({installed_kind}) -b {sdir} -p {profile}")
     _print_scenario_summary(seed_payload)
     print("dev: synthetic data only; personal Anki untouched. Close Anki before reset.")
@@ -240,6 +264,81 @@ def cmd_launch(args) -> int:
         proc = subprocess.Popen([anki_bin, "-b", sdir, "-p", profile], env=env)
     except Exception as exc:
         return _fail(f"could not launch Anki: {exc!r}")
+    # Surface instant child death (e.g. bundled-interpreter init failure)
+    # instead of detaching silently; a healthy Anki stays alive past this.
+    try:
+        rc = proc.wait(timeout=6)
+    except subprocess.TimeoutExpired:
+        rc = None
+    if rc is not None and rc != 0:
+        return _fail(f"Anki exited immediately with code {rc}",
+                      "any Anki output is above; re-run from a clean shell, "
+                      "or reinstall the .app bundle if it persists")
+    print(f"dev: Anki pid={proc.pid}")
+    return 0
+
+
+def cmd_prod_smoke(args, anki_bin: str, installed: str) -> int:
+    """Isolated Anki pointed at the PROD backend for Wilson's inbox test.
+
+    Base: .dev/anki/prod-smoke, profile dev-prod-smoke (marker-guarded like
+    every other scenario; never the personal profile). Installs the CURRENT
+    packaged artifact (which must have the prod endpoint baked —
+    dist/manifest.json prod_endpoint_baked must be true, else refuse).
+    No seeder addon, no synthetic cards: Wilson reviews/registers for real.
+    Crucially, ANKISCAPE_DEV is NOT set, so _evolved_endpoint() resolves the
+    baked prod config instead of the local stack.
+    """
+    import json as _json
+
+    try:
+        with open(os.path.join(ROOT, "dist", "manifest.json"), encoding="utf-8") as fh:
+            record = _json.load(fh)
+    except (OSError, ValueError):
+        return _fail("no dist/manifest.json; build the prod artifact first",
+                      "scripts/make_prod_config.py + scripts/build_addon.py")
+    if not record.get("prod_endpoint_baked"):
+        return _fail("current dist/ artifact is a DEV build (no prod endpoint)",
+                      "bake + rebuild before the inbox test")
+    if not record.get("artifact_sha256"):
+        return _fail("dist/manifest.json has no artifact hash; rebuild")
+    sdir = os.path.join(ANKI_BASE, "prod-smoke")
+    if _reject_personal_paths(sdir):
+        return _fail(f"refusing to use path outside .dev: {sdir}")
+    if getattr(args, "fresh", False):
+        shutil.rmtree(sdir, ignore_errors=True)
+        if os.path.exists(sdir):
+            return _fail(f"could not wipe {sdir}; a process still holds it")
+    os.makedirs(sdir, exist_ok=True)
+    _write_marker(sdir, "prod-smoke")
+    profile = "dev-prod-smoke"
+    _ensure_e2e_profile(sdir, profile)
+    addons = os.path.join(sdir, "addons21")
+    os.makedirs(addons, exist_ok=True)
+    try:
+        installed_kind = _install_addon(addons, symlink=False)
+    except RuntimeError as exc:
+        return _fail(str(exc))
+    # No seed addon, no seed.json: this is a real-user walkthrough, not a
+    # synthetic fixture. The chooser appears on first load; Wilson picks
+    # Evolved and registers with his real email.
+    env = _anki_env({})
+    print(f"dev: [PROD SMOKE] Anki {installed} ({installed_kind}) -b {sdir} -p {profile}")
+    print(f"dev: artifact {record['artifact_sha256'][:16]}... (prod endpoint baked)")
+    print("dev: isolated profile; personal Anki untouched. Steps:")
+    print("dev:   1. Pick Evolved at the chooser. 2. Evolved menu -> Account ->")
+    print("dev:   register with your real email -> OTP from ankiscape@ankiscape.xyz")
+    print("dev:   -> enter code -> answer cards -> Sync -> hiscores. 3. Test recovery.")
+    try:
+        proc = subprocess.Popen([anki_bin, "-b", sdir, "-p", profile], env=env)
+    except Exception as exc:
+        return _fail(f"could not launch Anki: {exc!r}")
+    try:
+        rc = proc.wait(timeout=6)
+    except subprocess.TimeoutExpired:
+        rc = None
+    if rc is not None and rc != 0:
+        return _fail(f"Anki exited immediately with code {rc}")
     print(f"dev: Anki pid={proc.pid}")
     return 0
 
@@ -444,6 +543,28 @@ def _ensure_e2e_profile(base: str, profile: str) -> None:
         conn.close()
 
 
+def _reap_mpv(base: str) -> None:
+    """Reap orphaned Anki audio (mpv) children for one dev base.
+
+    mpv helpers outlive Anki and hold base files; on macOS they can also spin
+    and drive system load until every later Anki launch fails. Normal Anki
+    exits (SIGTERM is ignored; assertions then quit) leave them behind, so
+    every journey must reap its own before and after running.
+    """
+    try:
+        ps = subprocess.run(["pgrep", "-af", "anki_audio/mpv"], capture_output=True,
+                            text=True, timeout=10)
+        for line in (ps.stdout or "").splitlines():
+            if base in line:
+                try:
+                    pid = int(line.split()[0])
+                    os.kill(pid, 9)
+                except (ValueError, OSError):
+                    pass
+    except (FileNotFoundError, OSError):
+        pass
+
+
 def _kill_owned_child(child, base: str) -> None:
     """Stop the Anki process THIS invocation launched. Anki ignores SIGTERM,
     so escalate to SIGKILL and verify death. Also reaps its orphaned mpv
@@ -467,27 +588,22 @@ def _kill_owned_child(child, base: str) -> None:
                       f"base {base} may be locked", file=sys.stderr)
     except OSError:
         pass
-    try:
-        ps = subprocess.run(["pgrep", "-af", "mpv --idle"], capture_output=True,
-                            text=True, timeout=10)
-        for line in (ps.stdout or "").splitlines():
-            if base in line:
-                try:
-                    pid = int(line.split()[0])
-                    os.kill(pid, 9)
-                except (ValueError, OSError):
-                    pass
-    except (FileNotFoundError, OSError):
-        pass
+    _reap_mpv(base)
 
 
 def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
     import zipfile
 
-    journeys = ("fresh", "upgrade", "undo", "catchup")
+    journeys = ("fresh", "upgrade", "undo", "catchup", "sync", "dialogs",
+                "ui-onboarding", "ui-training", "ui-settings", "ui-review",
+                "ui-lifecycle")
     if journey not in journeys:
         return _fail(f"unknown journey {journey!r}", f"choose from {journeys}")
     print(f"dev: (e2e) journey={journey} target Anki={anki or '?'} Qt={qt or '?'}")
+    if journey == "sync":
+        # Live local-stack journey (needs Docker + Supabase): serviced sync
+        # against the real local Auth/RPCs through the new service layer.
+        return _e2e_sync_suite(anki)
     _app, anki_bin, installed = _pick_app(anki)
     if not anki_bin:
         if anki:
@@ -524,6 +640,7 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
     except FileNotFoundError:
         pass
     run_id = f"{journey}-{int(time.time())}"
+    _reap_mpv(base)  # stale audio helpers from a previous run hold the base
     shutil.rmtree(base, ignore_errors=True)
     if os.path.exists(base):
         return _fail(f"could not wipe {base}; a process still holds it")
@@ -555,7 +672,7 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
             json.dump({"player_data": fixtures.classic_player_data(),
                        "current_skill": "Mining"}, fh)
     log_path = os.path.join(base, "anki-stdout.log")
-    env = dict(os.environ, ANKISCAPE_DEBUG="1")
+    env = _anki_env({"ANKISCAPE_DEBUG": "1"})
 
     phase = 1
     last_result = None
@@ -578,6 +695,11 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
                 return _fail("relaunch requested but relaunch.json unreadable")
             if request.get("run_id") != run_id:
                 return _fail("stale relaunch.json (wrong run_id)")
+            if request.get("ok") is False:
+                failed = request.get("failed_steps") or ["(unrecorded)"]
+                print("dev: (e2e) intermediate phase failed steps: "
+                      f"{failed}", file=sys.stderr)
+                return 1
             try:
                 os.unlink(os.path.join(base, "relaunch.json"))
             except OSError:
@@ -591,12 +713,14 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
             last_result = _json.load(fh)
         break
     if last_result is None:
+        _reap_mpv(base)
         return _fail("e2e ended with no final assertions")
     try:
         child.wait(timeout=30)
     except subprocess.TimeoutExpired:
         _kill_owned_child(child, base)
         return _fail("e2e wrote assertions but Anki did not exit")
+    _reap_mpv(base)
     steps = last_result.get("steps", [])
     failed = [s for s in steps if not s.get("ok")]
     print(f"dev: (e2e) journey={last_result.get('journey')} steps={len(steps)} "
@@ -650,6 +774,42 @@ def _wait_e2e_phase(child, base: str, run_id: str, log_path: str) -> str:
     print("dev: ERROR: e2e produced no phase output (crash, forwarding, or hang)",
           file=sys.stderr)
     return "timeout"
+
+
+def _e2e_sync_suite(anki: str) -> int:
+    """Online/recovery journey against the REAL local stack (no mocks).
+
+    Exercises the new service layer end to end through SyncJob.run_once:
+    signup -> verify -> link -> offline credit -> upload -> second-device
+    download/merge -> conflict quarantine -> lost-ack retry. Uses the real
+    local Supabase Auth/RPCs on the alternate-port stack; never touches
+    production, real email, or personal Anki data.
+    """
+    import importlib.util as _ilu
+    import uuid as _uuid
+
+    info = subprocess.run(["docker", "info"], capture_output=True,
+                          text=True, timeout=30)
+    if info.returncode != 0:
+        return _fail("Docker daemon unavailable; sync journey cannot run",
+                      "start Docker Desktop safely (no factory reset) and retry")
+    path = os.path.join(ROOT, "dev", "sync_e2e.py")
+    spec = _ilu.spec_from_file_location("ankiscape_sync_e2e", path)
+    module = _ilu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        return _fail(f"could not load dev/sync_e2e.py: {exc!r}")
+    try:
+        rc = module.main()
+    except Exception as exc:
+        print(f"dev: (e2e) sync journey raised {exc!r}", file=sys.stderr)
+        return 1
+    if rc != 0:
+        return 1
+    _app, _bin, installed = _pick_app(anki)
+    print(f"dev: (e2e) sync journey PASS (local stack, Anki {installed} present)")
+    return 0
 
 
 def cmd_verify(args) -> int:
@@ -735,7 +895,10 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup")
     p_launch = sub.add_parser("launch")
-    p_launch.add_argument("--scenario", required=True, choices=SCENARIOS)
+    p_launch.add_argument("--scenario", required=True,
+                          choices=SCENARIOS + ("prod-smoke",),
+                          help="prod-smoke: isolated profile on the PROD backend "
+                               "(Wilson's inbox test; needs baked prod artifact)")
     p_launch.add_argument("--anki", default="")
     p_launch.add_argument("--symlink", action="store_true",
                           help="link the repo instead of installing the zip (dev loop only)")
@@ -743,13 +906,16 @@ def main(argv=None) -> int:
                           help="wipe the scenario base first (verifies the wipe)")
     p_launch.add_argument("--no-anki", action="store_true")
     p_reset = sub.add_parser("reset")
-    p_reset.add_argument("--scenario", required=True, choices=SCENARIOS)
+    p_reset.add_argument("--scenario", required=True,
+                         choices=SCENARIOS + ("prod-smoke",))
     p_test = sub.add_parser("test")
     p_test.add_argument("--suite", required=True, choices=("python", "backend", "e2e"))
     p_test.add_argument("--anki", default="")
     p_test.add_argument("--qt", default="")
     p_test.add_argument("--journey", default="fresh",
-                        choices=("fresh", "upgrade", "undo", "catchup"))
+                        choices=("fresh", "upgrade", "undo", "catchup", "sync",
+                                 "dialogs", "ui-onboarding", "ui-training",
+                                 "ui-settings", "ui-review", "ui-lifecycle"))
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("--release", action="store_true")
     p_ev = sub.add_parser("verify-evidence")

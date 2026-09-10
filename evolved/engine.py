@@ -51,15 +51,36 @@ class EvolvedEngine:
         self.cfg = config
         self.journal = journal
         self.state = EngineState(lamport=config.lamport_start)
+        self._projection_cache: Optional[Dict[str, Any]] = None
 
     def _next_lamport(self) -> int:
         self.state.lamport += 1
         return self.state.lamport
 
+    def invalidate_projection(self) -> None:
+        """Drop the cached projection; the next read replays once."""
+        self._projection_cache = None
+
+    def projection(self) -> Dict[str, Any]:
+        """Cached canonical projection (one replay per mutation)."""
+        if self._projection_cache is None:
+            self._projection_cache = _replay(
+                self._all_ops(), self.cfg.rules, self.cfg.game_uuid)
+        return self._projection_cache
+
     def credit_direct(self, *, revlog_id: int, card_id: int, ease: int,
                       revlog_type: int, review_ts: int, skill: str,
-                      resource: str, preview=False, cancelled=False) -> Dict[str, Any]:
-        """Credit one accepted direct review. Idempotent per review identity."""
+                      resource: str, preview=False, cancelled=False,
+                      reward_policy: int = 2) -> Dict[str, Any]:
+        """Credit one accepted direct review. Idempotent per review identity.
+
+        reward_policy 2 (new operations): an invalid recipe (missing
+        materials or an unmet level) earns zero but still persists and
+        observes the review so catch-up can never re-credit it.
+        """
+        if reward_policy not in (1, 2):
+            return {"ok": False, "awarded": False,
+                    "error": f"unsupported_reward_policy:{reward_policy}"}
         eligible = _reviews.is_eligible(
             ease=ease, revlog_type=revlog_type, review_ts=review_ts,
             activated_at=self.cfg.activated_at, preview=preview, cancelled=cancelled)
@@ -71,12 +92,18 @@ class EvolvedEngine:
             review_ts=review_ts, revlog_type=revlog_type)
         if key in self.state.processed_keys:
             return {"ok": True, "awarded": False, "reason": "duplicate_delivery", "review_key": key}
+        before_levels = {}
+        try:
+            before_levels = dict((self.projection().get("levels") or {}))
+        except Exception:
+            before_levels = {}
         op = {"op_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.cfg.game_uuid}:{key}:direct")),
               "game_uuid": self.cfg.game_uuid, "device_id": self.cfg.device_id,
               "device_seq": self.journal.allocate_seq(self.cfg.device_id),
               "lamport": self._next_lamport(), "kind": "review_award",
               "payload": {"review_key": key, "review_ts": int(review_ts), "rating": int(ease),
                           "review_kind": "review", "provenance": "direct",
+                          "reward_policy": int(reward_policy),
                           "skill": str(skill).lower(), "resource": str(resource)}}
         try:
             self.journal.append_operation(op)
@@ -86,8 +113,58 @@ class EvolvedEngine:
         self.journal.observe_review(key, revlog_id, card_id, fp)
         self.state.processed_keys.add(key)
         self._track_recent(key, revlog_id, card_id)
-        projection = _replay(self._all_ops(), self.cfg.rules, self.cfg.game_uuid)
-        return {"ok": True, "awarded": True, "review_key": key, "projection": projection}
+        self.invalidate_projection()
+        projection = self.projection()
+        outcome = _reward_outcome(projection, key)
+        awarded = bool(outcome.get("rewarded"))
+        try:
+            level_up = int((projection.get("levels") or {}).get(
+                str(skill).lower(), 1)) > int(before_levels.get(
+                    str(skill).lower(), 1))
+        except Exception:
+            level_up = False
+        return {"ok": True, "awarded": awarded, "review_key": key,
+                "outcome": outcome.get("outcome", ""),
+                "paused": outcome.get("paused", ""),
+                "level_up": level_up,
+                "projection": projection}
+
+    def skip_direct(self, *, revlog_id: int, card_id: int, ease: int,
+                    revlog_type: int, review_ts: int,
+                    reason: str = "classic_mode") -> Dict[str, Any]:
+        """Record a durable no-reward claim for a review taken in Classic.
+
+        Syncs as a `review_skip` operation: replay precedence (direct > skip >
+        catch-up) prevents any desktop from later catch-up-crediting it.
+        """
+        eligible = _reviews.is_eligible(
+            ease=ease, revlog_type=revlog_type, review_ts=review_ts,
+            activated_at=self.cfg.activated_at)
+        if not eligible:
+            return {"ok": True, "recorded": False, "reason": "ineligible"}
+        key = _reviews.make_review_key(self.cfg.game_uuid, revlog_id, card_id)
+        if key in self.state.processed_keys:
+            return {"ok": True, "recorded": False, "reason": "duplicate"}
+        op = {"op_id": str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                      f"{self.cfg.game_uuid}:{key}:skip")),
+              "game_uuid": self.cfg.game_uuid, "device_id": self.cfg.device_id,
+              "device_seq": self.journal.allocate_seq(self.cfg.device_id),
+              "lamport": self._next_lamport(), "kind": "review_skip",
+              "payload": {"review_key": key, "review_ts": int(review_ts),
+                          "reason": str(reason), "provenance": "skip"}}
+        try:
+            self.journal.append_operation(op)
+        except Exception:
+            return {"ok": False, "recorded": False}
+        self.journal.observe_review(
+            key, revlog_id, card_id,
+            _reviews.immutable_fingerprint(
+                revlog_id=revlog_id, card_id=card_id, ease=ease,
+                review_ts=review_ts, revlog_type=revlog_type))
+        self.state.processed_keys.add(key)
+        self._track_recent(key, revlog_id, card_id)
+        self.invalidate_projection()
+        return {"ok": True, "recorded": True, "review_key": key}
 
     def scan_catchup(self, history: List[Dict[str, Any]], *, chunk: int = 500,
                      preset_skill: str = "mining") -> Dict[str, Any]:
@@ -106,7 +183,7 @@ class EvolvedEngine:
                   "lamport": self._next_lamport(), "kind": "review_award",
                   "payload": {"review_key": key, "review_ts": int(row.get("ts", 0)),
                               "rating": int(row.get("ease", 3)), "review_kind": "review",
-                              "provenance": "catchup"}}
+                              "provenance": "catchup", "reward_policy": 2}}
             try:
                 self.journal.append_operation(op)
             except Exception:
@@ -121,6 +198,8 @@ class EvolvedEngine:
             self.state.processed_keys.add(key)
             self._track_recent(key, int(row["revlog_id"]), int(row["card_id"]))
             made += 1
+        if made:
+            self.invalidate_projection()
         return {"made": made, "stats": stats}
 
     def _track_recent(self, key: str, revlog_id: int, card_id: int) -> None:
@@ -150,6 +229,7 @@ class EvolvedEngine:
                     int(row["revlog_id"]), int(row["card_id"]))
             except (KeyError, ValueError, TypeError):
                 continue
+        self.invalidate_projection()
         return len(rows)
 
     def reconcile_undo(self, row_exists) -> Dict[str, Any]:
@@ -209,6 +289,7 @@ class EvolvedEngine:
               "lamport": self._next_lamport(), "kind": "review_retract",
               "payload": {"target_review_key": review_key, "reason": reason}}
         self.journal.append_operation(op)
+        self.invalidate_projection()
         return {"ok": True, "review_key": review_key}
 
     def restore(self, *, review_key: str, reason: str = "anki_redo") -> Dict[str, Any]:
@@ -221,6 +302,7 @@ class EvolvedEngine:
               "lamport": self._next_lamport(), "kind": "review_restore",
               "payload": {"target_review_key": review_key, "reason": reason}}
         self.journal.append_operation(op)
+        self.invalidate_projection()
         return {"ok": True, "review_key": review_key}
 
     def _all_ops(self) -> List[Dict[str, Any]]:
@@ -237,3 +319,9 @@ class EvolvedEngine:
                         "lamport": r["lamport"], "kind": r["kind"],
                         "payload": json.loads(r["payload_json"])})
         return ops
+
+
+def _reward_outcome(projection: Dict[str, Any], review_key: str) -> Dict[str, Any]:
+    """What replay actually granted this review (policy-aware)."""
+    outcomes = (projection or {}).get("review_outcomes", {}) or {}
+    return dict(outcomes.get(review_key, {}))

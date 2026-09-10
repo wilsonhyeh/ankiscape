@@ -53,7 +53,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def post_json(endpoint: Endpoint, path: str, payload: Dict[str, Any],
-              *, access_token: Optional[str] = None) -> Dict[str, Any]:
+              *, access_token: Optional[str] = None,
+              headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     url = _check_url(endpoint, path)
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
@@ -61,6 +62,8 @@ def post_json(endpoint: Endpoint, path: str, payload: Dict[str, Any],
                                           "apikey": endpoint.project_key})
     if access_token:
         req.add_header("Authorization", f"Bearer {access_token}")
+    for name, value in (headers or {}).items():
+        req.add_header(str(name), str(value))
     opener = urllib.request.build_opener(_NoRedirect)
     try:
         with opener.open(req, timeout=REQUEST_TIMEOUT_S) as resp:

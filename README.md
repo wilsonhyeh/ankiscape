@@ -1,23 +1,89 @@
-# AnkiScape (Development)
+# AnkiScape: Evolved (3.0)
 
-AnkiScape adds a lightweight, game-like experience layer to Anki:
-- Experience HUD during review (skill icon + level + progress bar).
-- Floating XP toasts when you earn XP.
-- Achievement and level-up popups.
-- A small floating widget you can position on screen.
+AnkiScape layers OSRS-style skill grinding onto Anki card reviews: correct
+answers earn XP in six skills (Mining, Woodcutting, Smithing, Crafting,
+Fishing, Cooking), with items, achievements, level-ups, and an XP HUD.
+Classic mode (2.0.2 gameplay) stays frozen and switchable; Evolved starts
+fresh at level 1/0 XP (no transfer — hiscore fairness).
 
-This branch contains the in-progress development version with a refined Settings experience and improved tests.
+Same AnkiWeb listing `1808450369`, single 3.0.0 release. Anki 23.10+,
+Qt5/Qt6, macOS/Linux/Windows.
 
-## Install (from source)
+## Install
 
-Pick one of the following:
-- Zip install:
-  1) Create a zip of this folder (excluding `.venv/`, `tests/`, `.pytest_cache/`, `.vscode/`, and log files).
-  2) In Anki, Tools → Add-ons → Install from file, select the zip.
-- Dev checkout (advanced):
-  - Place/clone this folder into Anki’s add-ons directory (e.g. `~/Library/Application Support/Anki2/addons21/ankiscape`). Restart Anki.
+1. Download `ankiscape-3.0.0.ankiaddon` from the release.
+2. In Anki: Tools -> Add-ons -> Install from file -> select the file.
+3. Restart Anki. New installs enter guided Evolved setup (pick a gathering
+   skill and starting resource). Existing Classic users get an explicit
+   Try Evolved / Continue Classic choice; nothing restarts, and both games
+   keep their own progress. Switch modes any time from the deck list or
+   Settings -> Advanced (leave the reviewer first).
 
-Note: Paths differ by OS/profile; see Anki docs for the add-ons directory location.
+## Offline / sync / recovery
+
+- Offline single-desktop play needs no account. Everything is stored in a
+  local journal next to your Anki profile (never in Anki's own tables).
+- Phone reviews (AnkiMobile/AnkiDroid) earn catch-up rewards after their
+  history syncs to desktop, under your desktop gathering preset
+  (Mining/Woodcutting/Fishing, default Mining; Settings -> preset).
+- A free account syncs one Evolved game across desktops (one account links
+  to one game; synced copies share it). All legitimate progress — including
+  play before registration, while logged out, or offline — uploads later.
+  Offline results are provisional until reconciliation; concurrent
+  ingredient conflicts resolve to zero reward for the losing action (policy
+  2), and reconciliation says so.
+- Login is forgotten on restart (deliberate — tokens stay memory-only).
+  Your game stays on the computer either way.
+- Undo retracts its review's rewards; Redo restores them; a replacement
+  answer earns once. Scores and levels can decrease after Undo/sync.
+- Production training pauses automatically when materials run out or Undo
+  drops the level below the recipe: reviews still count for Anki, earn no
+  XP/items, and show the exact missing ingredients. Resumes on the next
+  eligible review once materials return; switching to gathering never
+  switches back automatically.
+- Settings -> Export/Restore Game Backup covers corrupt journals. An
+  anonymous game NEEDS its backup file; a linked account can also rebuild
+  from the server plus its preserved outbox backup.
+
+## Interface
+
+- One nonmodal game window with an icon rail: Training, Skills, Bank,
+  Achievements, Hiscores, plus a Settings cog. It can stay open beside Anki
+  and live-updates during reviews.
+- Training Home leads with your current skill/resource, level progress,
+  reward expectations, material readiness, and a Change training action.
+- Skills shows every resource tier (locked tiers stay visible with required
+  levels); Train commits the skill + resource, and Train (starts paused)
+  labels a recipe whose materials are missing.
+- The review HUD is anchored in reserved space above or below the card
+  area (default below) — never floating over card content. Reward flashes
+  are brief; level-ups/unlocks get a short celebration. Sound is off by
+  default.
+- Settings is grouped: Appearance & HUD (UI scale, HUD position,
+  celebrations, reduced motion, sound), Training & Catch-up, Account &
+  Sync, and Advanced (backups, diagnostics, mode switch).
+
+## Privacy
+
+- Reviews upload as opaque review identities + skill/resource selections —
+  never card text, deck names, note fields, raw card IDs, or collection
+  contents.
+- Email is required for verification/recovery and is never shown on
+  hiscores. Tokens/passwords never enter collection config, journals, or
+  logs.
+- Hiscores (in-add-on, per-skill) show username + XP only. No friends,
+  clans, comparison UI, or public site.
+- Free-backend note: the sync backend runs on Supabase Free (pauses after
+  a week idle; finite storage). At capacity the add-on stops online writes
+  safely and keeps local pending operations — no paid upgrade, no
+  keep-alive evasion.
+
+## Compatibility
+
+- Anki 23.10+ (Qt5/Qt6 via `aqt.qt`); verified on 26.08.1 + 23.10.1 Qt6 macOS.
+- Network: stdlib only, 10 s timeouts, background threads. Sync triggers:
+  login, Anki-sync finish, 200 new reviews, 20 min activity, manual Sync.
+- Classic mode frozen (routing/lifecycle/switching only).
 
 ## Settings overview
 
@@ -64,8 +130,28 @@ Set an environment variable before launching Anki or running tests to enable deb
 
 Logs are written next to the package as `ankiscape_debug.log` and rotate automatically. They’re git-ignored.
 
-## Packaging notes
-When preparing a release zip for Anki users, exclude development artifacts:
-- `.venv/`, `.pytest_cache/`, `.vscode/`, `__pycache__/`, test files, and log files.
+## Development
 
-The add-on will work out-of-the-box with the defaults above, and all new settings are backward-compatible via the migration step.
+### Dev playground
+```
+python3 dev.py setup
+python3 dev.py launch --scenario fresh        # chooser + 20 cards
+python3 dev.py test --suite e2e --journey sync     # live local-stack sync
+python3 dev.py test --suite e2e --journey dialogs  # live Qt menu + dialogs
+python3 dev.py verify --release
+```
+All state under gitignored `.dev/`; reports under `artifacts/`. Never touches
+personal collections or production. Double-click `Launch AnkiScape Dev.command`
+for a scenario picker.
+
+## Packaging notes
+Deterministic build from an explicit allowlist:
+```
+python3 scripts/build_addon.py   # -> dist/ankiscape-3.0.0.ankiaddon + manifest
+```
+Excludes tests/dev/server/artifacts/dist/.dev/.git/.venv, credentials, journals,
+logs, caches, editor files. Secret-content scan fails the build on privileged
+patterns (public anon keys are distinguished). A code/rules/asset change after
+packaging invalidates that artifact's tests — rebuild and reverify.
+Production endpoint is baked per release with `scripts/make_prod_config.py`
+(public anon key only; never service-role/SMTP keys).

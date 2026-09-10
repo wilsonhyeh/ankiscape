@@ -48,7 +48,8 @@ def _req(method, path, body=None, token=None, anon=None, base=API):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method,
                                  headers={"Content-Type": "application/json",
-                                          "apikey": anon})
+                                          "apikey": anon,
+                                          "X-AnkiScape-Protocol": "2"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:

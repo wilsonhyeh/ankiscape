@@ -2,7 +2,7 @@
   "baseline": {
     "branch": "main",
     "commit": "e65cae5",
-    "remote": "https://github.com/wilson-taiwan/AnkiScape-Development",
+    "remote": "https://github.com/wilsonhyeh/ankiscape",
     "legacy_tests": "PYTHONDONTWRITEBYTECODE=1 python3 run_tests.py -> 74 passed (2026-09-09)",
     "addon_human_version": "2.0.1",
     "note": "Do not label an arbitrary checkout as the published 2.0.2 package. Establish 2.0.2 archive provenance separately (baseline task)."

@@ -39,3 +39,8 @@ artifacts/
 # Supabase CLI local state (may embed local dev keys)
 server/supabase/.branches/
 server/supabase/.temp/
+**/supabase/.temp/
+
+# Build-time prod endpoint (public anon key only, but per-release generated;
+# never committed — rebuild with scripts/make_prod_config.py per release)
+evolved/prod_config.py

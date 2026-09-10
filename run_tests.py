@@ -1,4 +1,5 @@
 import compileall
+import glob
 import os
 import sys
 import unittest
@@ -12,12 +13,18 @@ def main() -> int:
 
     # Compile check over shipped + dev Python first: unittest discovery only
     # imports tests/, so a syntax error anywhere else would slip through.
-    for subdir in (".", "dev", "evolved", "scripts", "server", "tests"):
-        target = os.path.join(root, subdir) if subdir != "." else root
+    # NEVER walk "." recursively: .dev/, artifacts/ and dist/ contain
+    # extracted add-on copies and would make this check walk forever.
+    for subdir in ("dev", "evolved", "scripts", "server", "tests"):
+        target = os.path.join(root, subdir)
         if not os.path.isdir(target):
             continue
         if not compileall.compile_dir(target, maxlevels=12, quiet=1):
             print(f"run_tests: compile failed under {subdir}", file=sys.stderr)
+            return 1
+    for path in sorted(glob.glob(os.path.join(root, "*.py"))):
+        if not compileall.compile_file(path, quiet=1):
+            print(f"run_tests: compile failed: {path}", file=sys.stderr)
             return 1
 
     # Discover and run tests under tests/

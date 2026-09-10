@@ -1,0 +1,54 @@
+{
+  "note": "Bundled asset provenance and licenses. Everything here ships inside the add-on; nothing is downloaded at runtime.",
+  "fonts": [
+    {
+      "file": "fonts/PressStart2P-Regular.ttf",
+      "name": "Press Start 2P",
+      "license": "SIL Open Font License 1.1",
+      "license_file": "fonts/OFL.txt",
+      "source": "https://github.com/google/fonts/tree/main/ofl/pressstart2p",
+      "redistributable": true
+    }
+  ],
+  "sounds": [
+    {
+      "file": "sounds/level_up.wav",
+      "origin": "Original square-wave arpeggio generated locally by scripts/make_ui_assets.py",
+      "license": "original work (AnkiScape)"
+    },
+    {
+      "file": "sounds/unlock.wav",
+      "origin": "Original square-wave arpeggio generated locally by scripts/make_ui_assets.py",
+      "license": "original work (AnkiScape)"
+    }
+  ],
+  "textures": [
+    {
+      "file": "textures/stone.png",
+      "origin": "Deterministic procedural stone-noise tile generated locally by scripts/make_ui_assets.py",
+      "license": "original work (AnkiScape)"
+    }
+  ],
+  "icons": [
+    {
+      "pattern": "icon/training_icon.png, icon/skills_icon.png, icon/bank_icon.png, icon/hiscores_icon.png, icon/fishing_icon.png, icon/cooking_icon.png, icon/arrow_*.png",
+      "origin": "Original pixel art generated locally by scripts/make_ui_assets.py",
+      "license": "original work (AnkiScape)"
+    },
+    {
+      "pattern": "icon/settings_icon.png, icon/achievement_icon.png, icon/mining_icon.png, icon/woodcutting_icon.png, icon/smithing_icon.png, icon/crafting_icon.png, icon/stats_icon.png",
+      "origin": "Pre-existing AnkiScape icon set, regenerated in the same style where applicable",
+      "license": "original work (AnkiScape)"
+    },
+    {
+      "pattern": "ores/*.png, trees/*.png, bars/*.png, gems/*.png, crafteditems/*.png",
+      "origin": "Pre-existing AnkiScape item art (see repository history)",
+      "license": "original/legacy project assets"
+    },
+    {
+      "pattern": "fish/*.png",
+      "origin": "Pre-existing AnkiScape fish art",
+      "license": "see fish/ATTRIBUTION.md"
+    }
+  ]
+}

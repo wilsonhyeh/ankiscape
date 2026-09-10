@@ -3,11 +3,21 @@
 op_id), independent of network arrival. Python and Postgres implement the same
 specified rules + golden vectors. Each action checks reconstructed level and
 inventory before consuming. Never sums per-device balances.
+
+Reward-policy versions (per payload):
+  1 (historical; absent marker) - missing materials or an unmet level award a
+     small practice XP and produce nothing.
+  2 (all new operations) - an invalid recipe awards ZERO XP, consumes
+     nothing, and produces nothing; still recorded so catch-up cannot
+     re-credit it later.
+
+Claim precedence per review_key: direct > skip (Classic-mode no-reward claim)
+> catch-up. A retract disables all claims until an explicit restore.
 """
 from __future__ import annotations
 
 from fractions import Fraction
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .draws import draw_r, frac_hits
 from .logic_pure import (
@@ -17,10 +27,21 @@ from .logic_pure import (
 
 CATCHUP_SKILLS = ("mining", "woodcutting", "fishing")
 _DIRECT_SKILLS = ("mining", "woodcutting", "fishing", "cooking", "smithing", "crafting")
+SUPPORTED_POLICIES = (1, 2)
 
 
 def canonical_order_key(op: Dict[str, Any]):
     return (int(op["lamport"]), str(op["device_id"]), int(op["device_seq"]), str(op["op_id"]))
+
+
+def reward_policy_of(payload: Dict[str, Any]) -> int:
+    """Absent marker means historical policy 1; unknown values are returned
+    as-is so replay can reject them explicitly."""
+    value = (payload or {}).get("reward_policy", 1)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
 
 
 def _first_unlocked(entries, level: int):
@@ -52,11 +73,12 @@ def _gem_pick(r: int, gems) -> Dict | None:
     return None
 
 
-def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any], game_uuid: str) -> Dict[str, Any]:
+def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any],
+           game_uuid: str) -> Dict[str, Any]:
     """Replay operation set to a revisioned state. Pure + deterministic.
 
     Returns {xp_micro, levels, inventory, achievements, counters,
-    revision, adjustments, diagnostics, conflicts}.
+    revision, adjustments, diagnostics, conflicts, review_outcomes, skipped}.
     """
     diagnostics: List[str] = []
     conflicts: List[Dict[str, Any]] = []
@@ -119,9 +141,10 @@ def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any], game_uuid: s
                 break
         return skill
 
-    # Group review awards + retractions by review_key.
+    # Group review awards + retractions + skips by review_key.
     awards_by_key: Dict[str, List[Tuple[int, Dict]]] = {}
     retract_by_key: Dict[str, List[Tuple[int, Dict]]] = {}
+    skip_by_key: Dict[str, Tuple[int, Dict]] = {}
     for pos, op in enumerate(ops):
         kind = op.get("kind")
         payload = op.get("payload", {}) or {}
@@ -130,6 +153,10 @@ def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any], game_uuid: s
             if not rk:
                 conflicts.append({"type": "missing_review_key", "op_id": op.get("op_id")})
                 continue
+            policy = reward_policy_of(payload)
+            if policy not in SUPPORTED_POLICIES:
+                diagnostics.append(f"unsupported_policy:{rk}:{policy}")
+                continue
             awards_by_key.setdefault(rk, []).append((pos, op))
         elif kind in ("review_retract", "review_restore"):
             rk = str(payload.get("target_review_key", ""))
@@ -137,10 +164,18 @@ def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any], game_uuid: s
                 conflicts.append({"type": "missing_target_key", "op_id": op.get("op_id")})
                 continue
             retract_by_key.setdefault(rk, []).append((pos, op))
+        elif kind == "review_skip":
+            rk = str(payload.get("review_key", ""))
+            if not rk:
+                conflicts.append({"type": "missing_review_key", "op_id": op.get("op_id")})
+                continue
+            existing = skip_by_key.get(rk)
+            if existing is None or pos < existing[0]:
+                skip_by_key[rk] = (pos, op)
 
-    # Winning award per key: direct beats catchup; earliest canonical within provenance.
-    # Retraction: last canonical retract/restore decides; retract disables all.
-    winners: List[Tuple[int, str, Dict]] = []  # (pos, review_key, op)
+    # Winning claim per key: direct beats skip beats catch-up; earliest
+    # canonical within a provenance. Retraction: last retract/restore decides.
+    winners: List[Tuple[int, str, Dict]] = []
     for rk, lst in awards_by_key.items():
         # Last retract/restore in canonical order decides.
         retracts = sorted(retract_by_key.get(rk, []), key=lambda t: t[0])
@@ -155,6 +190,9 @@ def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any], game_uuid: s
             if len(directs) > 1:
                 diagnostics.append(f"duplicate_direct_ignored:{rk}")
             winners.append((pos, rk, op))
+        elif rk in skip_by_key:
+            # Classic-mode no-reward claim suppresses catch-up credit.
+            diagnostics.append(f"claim_skipped:{rk}")
         elif catches:
             pos, op = sorted(catches, key=lambda t: t[0])[0]
             if len(catches) > 1:
@@ -169,6 +207,7 @@ def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any], game_uuid: s
                                 "first_catch": 0, "first_cook": 0}
     per_skill_success: Dict[str, int] = {s: 0 for s in SKILLS}
     adjustments: List[str] = []
+    review_outcomes: Dict[str, Dict[str, Any]] = {}
     rules_version = int(rules.get("rules_version", 1))
     thresholds = rules.get("thresholds", [])
 
@@ -184,28 +223,28 @@ def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any], game_uuid: s
         if inv[name] < 0:
             raise AssertionError("negative inventory - replay bug")
 
-    def use_items(req: Dict[str, int]) -> bool:
-        for name, qty in req.items():
-            if inv.get(name, 0) < qty:
-                return False
-        for name, qty in req.items():
-            inv[name] -= qty
-        return True
-
     for pos, rk, op in winners:
         payload = op.get("payload", {}) or {}
         prov = payload.get("provenance", "catchup")
+        policy = reward_policy_of(payload)
         levels = {s: level_from_xp_micro(xp[s], thresholds) for s in SKILLS}
         if prov == "direct":
             skill = str(payload.get("skill", "")).lower()
             resource = str(payload.get("resource", ""))
             if skill not in _DIRECT_SKILLS:
                 diagnostics.append(f"unknown_skill:{rk}")
-                xp["mining"] += MICRO  # practice fallback never breaks replay
+                outcomes = {"skill": skill or "mining", "xp_micro": 0,
+                            "outcome": "invalid", "rewarded": False,
+                            "items": {}, "consumed": {}}
+                if policy != 2:
+                    xp["mining"] += MICRO
+                    outcomes["xp_micro"] = MICRO
+                    outcomes["outcome"] = "practice"
+                review_outcomes[rk] = outcomes
                 continue
             res = _apply_direct(skill, resource, levels, inv, rules, rules_version,
                                 game_uuid, rk, gems, ores, trees, fish, bars, crafts,
-                                diagnostics)
+                                diagnostics, reward_policy=policy)
         else:
             try:
                 review_ts = int(payload.get("review_ts", 0))
@@ -213,25 +252,53 @@ def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any], game_uuid: s
                 review_ts = 0
             skill = preset_for(review_ts)
             res = _apply_catchup(skill, levels, inv, rules, rules_version, game_uuid,
-                                 rk, gems, ores, trees, fish, diagnostics)
+                                 rk, gems, ores, trees, fish, diagnostics,
+                                 reward_policy=policy)
         # Apply result to state.
         if res is None:
             continue
-        xp[res["skill"]] += res["xp_micro"]
-        for name, qty in res.get("consumed", {}).items():
+        consumed = res.get("consumed", {})
+        conflicted = False
+        for name, qty in consumed.items():
             if inv.get(name, 0) < qty:
-                # Stale provisional outcome: shared-ingredient conflict ->
-                # practice XP, no consumption (stable replay gives item to first).
+                # Stale provisional outcome: shared-ingredient conflict. The
+                # stable replay gives the item to the first canonical claim.
                 adjustments.append(f"material_conflict:{rk}:{name}")
-                xp[res["skill"]] -= res["xp_micro"]
-                xp[res["skill"]] += MICRO
-                res = None
+                if policy == 2:
+                    res = {"skill": res["skill"], "xp_micro": 0, "consumed": {},
+                           "counters": {}, "outcome": "paused_materials"}
+                    review_outcomes[rk] = {
+                        "skill": res["skill"], "xp_micro": 0,
+                        "outcome": "paused_materials", "rewarded": False,
+                        "items": {}, "consumed": {},
+                        "adjustment": f"material_conflict:{name}"}
+                else:
+                    xp[res["skill"]] += MICRO
+                    res = {"skill": res["skill"], "xp_micro": MICRO,
+                           "consumed": {}, "counters": {}, "outcome": "practice"}
+                    review_outcomes[rk] = {
+                        "skill": res["skill"], "xp_micro": MICRO,
+                        "outcome": "practice", "rewarded": True,
+                        "items": {}, "consumed": {},
+                        "adjustment": f"material_conflict:{name}"}
+                conflicted = True
                 break
-            inv[name] -= qty
         if res is None:
             continue
-        if res.get("item_out"):
-            add_item(res["item_out"], res.get("item_qty", 1))
+        if not conflicted:
+            xp[res["skill"]] += res["xp_micro"]
+            for name, qty in res.get("consumed", {}).items():
+                inv[name] = inv.get(name, 0) - qty
+            items = {}
+            if res.get("item_out"):
+                add_item(res["item_out"], res.get("item_qty", 1))
+                items[res["item_out"]] = res.get("item_qty", 1)
+            review_outcomes[rk] = {
+                "skill": res["skill"], "xp_micro": int(res.get("xp_micro", 0)),
+                "outcome": res.get("outcome", ""),
+                "rewarded": bool(int(res.get("xp_micro", 0)) > 0),
+                "items": items, "consumed": dict(res.get("consumed", {})),
+                "adjustment": ""}
         counters["successful_actions"] += res.get("counters", {}).get("successful_actions", 0)
         per_skill_success[res["skill"]] += res.get("counters", {}).get("successful_actions", 0)
         for key in ("cooking_attempts", "successful_cooks", "gems"):
@@ -256,18 +323,35 @@ def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any], game_uuid: s
         "adjustments": adjustments,
         "diagnostics": diagnostics,
         "conflicts": conflicts,
+        "review_outcomes": review_outcomes,
+        "skipped": sorted(skip_by_key.keys()),
     }
 
 
+def _zero(skill: str, outcome: str, diagnostics=None, reason: str = ""):
+    if reason and diagnostics is not None:
+        diagnostics.append(reason)
+    return {"skill": skill, "xp_micro": 0, "consumed": {}, "counters": {},
+            "outcome": outcome}
+
+
 def _apply_direct(skill, resource, levels, inv, rules, rules_version, game_uuid,
-                  rk, gems, ores, trees, fish, bars, crafts, diagnostics):
+                  rk, gems, ores, trees, fish, bars, crafts, diagnostics,
+                  reward_policy: int = 1):
+    policy2 = reward_policy == 2
     if skill == "mining":
         spec = ores.get(resource)
         if spec is None:
+            if policy2:
+                return _zero("mining", "invalid",
+                             diagnostics, f"unknown_resource:{rk}:{resource}")
             diagnostics.append(f"unknown_resource:{rk}:{resource}")
             return {"skill": "mining", "xp_micro": MICRO, "consumed": {}, "counters": {},
                     "outcome": "practice"}
         if levels["mining"] < int(spec["level"]):
+            if policy2:
+                return _zero("mining", "paused_level", diagnostics,
+                             f"level_blocked:{rk}:{resource}")
             fb = _first_unlocked(list(ores.values()), levels["mining"])
             diagnostics.append(f"level_fallback:{rk}:{resource}->{fb['display']}")
             spec = fb
@@ -296,7 +380,17 @@ def _apply_direct(skill, resource, levels, inv, rules, rules_version, game_uuid,
         return out
     if skill == "woodcutting":
         spec = trees.get(resource)
-        if spec is None or levels["woodcutting"] < int(spec["level"]):
+        if spec is None:
+            if policy2:
+                return _zero("woodcutting", "invalid", diagnostics,
+                             f"unknown_resource:{rk}:{resource}")
+            fb = _first_unlocked(list(trees.values()), levels["woodcutting"])
+            diagnostics.append(f"level_fallback:{rk}:{resource}->{fb['display']}")
+            spec = fb
+        elif levels["woodcutting"] < int(spec["level"]):
+            if policy2:
+                return _zero("woodcutting", "paused_level", diagnostics,
+                             f"level_blocked:{rk}:{resource}")
             fb = _first_unlocked(list(trees.values()), levels["woodcutting"])
             diagnostics.append(f"level_fallback:{rk}:{resource}->{fb['display']}")
             spec = fb
@@ -315,7 +409,21 @@ def _apply_direct(skill, resource, levels, inv, rules, rules_version, game_uuid,
         return out
     if skill == "fishing":
         spec = fish.get(resource)
-        if spec is None or levels["fishing"] < int(spec["fishing_level"]):
+        if spec is None:
+            if policy2:
+                return _zero("fishing", "invalid", diagnostics,
+                             f"unknown_resource:{rk}:{resource}")
+            shim = _first_unlocked(
+                [{"display": f["display"], "level": f["fishing_level"], "tier": f["tier"],
+                  "probability": f["probability"], "base_xp": f["fishing_base_xp"]}
+                 for f in fish.values()],
+                levels["fishing"])
+            diagnostics.append(f"level_fallback:{rk}:{resource}->{shim['display']}")
+            spec = fish.get(shim["display"], shim)
+        elif levels["fishing"] < int(spec["fishing_level"]):
+            if policy2:
+                return _zero("fishing", "paused_level", diagnostics,
+                             f"level_blocked:{rk}:{resource}")
             shim = _first_unlocked(
                 [{"display": f["display"], "level": f["fishing_level"], "tier": f["tier"],
                   "probability": f["probability"], "base_xp": f["fishing_base_xp"]}
@@ -343,10 +451,16 @@ def _apply_direct(skill, resource, levels, inv, rules, rules_version, game_uuid,
         # resource is a fish display to cook.
         spec = fish.get(resource)
         if spec is None:
+            if policy2:
+                return _zero("cooking", "invalid", diagnostics,
+                             f"unknown_resource:{rk}:{resource}")
             diagnostics.append(f"unknown_resource:{rk}:{resource}")
             return {"skill": "cooking", "xp_micro": MICRO, "consumed": {}, "counters": {},
                     "outcome": "practice"}
         has = inv.get(spec["display"], 0) >= 1
+        if policy2 and not has:
+            return _zero("cooking", "paused_materials", diagnostics,
+                         f"materials_blocked:{rk}:{resource}")
         r_burn = draw_r(rules_version, game_uuid, rk, "burn")
         burned = frac_hits(r_burn, burn_probability(levels["cooking"]))
         res = eval_cook(fish_display=spec["display"], fish_tier=int(spec["tier"]),
@@ -362,12 +476,21 @@ def _apply_direct(skill, resource, levels, inv, rules, rules_version, game_uuid,
         table = bars if skill == "smithing" else crafts
         spec = table.get(resource)
         if spec is None:
+            if policy2:
+                return _zero(skill, "invalid", diagnostics,
+                             f"unknown_resource:{rk}:{resource}")
             diagnostics.append(f"unknown_resource:{rk}:{resource}")
             return {"skill": skill, "xp_micro": MICRO, "consumed": {}, "counters": {},
                     "outcome": "practice"}
         req = spec.get("ore_required", spec.get("requirements", {}))
         level_ok = levels[skill] >= int(spec["level"])
         mats_ok = all(inv.get(n, 0) >= q for n, q in req.items())
+        if policy2 and not level_ok:
+            return _zero(skill, "paused_level", diagnostics,
+                         f"level_blocked:{rk}:{resource}")
+        if policy2 and not mats_ok:
+            return _zero(skill, "paused_materials", diagnostics,
+                         f"materials_blocked:{rk}:{resource}")
         res = eval_production(skill=skill, output_display=spec["display"],
                               output_tier=int(spec["tier"]), base_xp=spec["base_xp"],
                               level_ok=level_ok, materials_ok=mats_ok, requirements=req)
@@ -378,19 +501,22 @@ def _apply_direct(skill, resource, levels, inv, rules, rules_version, game_uuid,
             out["item_qty"] = 1
         return out
     diagnostics.append(f"unknown_skill:{rk}:{skill}")
+    if policy2:
+        return _zero("mining", "invalid")
     return {"skill": "mining", "xp_micro": MICRO, "consumed": {}, "counters": {},
             "outcome": "practice"}
 
 
 def _apply_catchup(skill, levels, inv, rules, rules_version, game_uuid, rk, gems,
-                   ores, trees, fish, diagnostics):
+                   ores, trees, fish, diagnostics, reward_policy: int = 1):
     if skill == "mining":
         entries = list(ores.values())
         top = _highest_unlocked(entries, levels["mining"])
         if top is None:
             top = entries[0]
         return _apply_direct("mining", top["display"], levels, inv, rules, rules_version,
-                             game_uuid, rk, gems, ores, trees, fish, {}, {}, diagnostics)
+                             game_uuid, rk, gems, ores, trees, fish, {}, {}, diagnostics,
+                             reward_policy=reward_policy)
     if skill == "woodcutting":
         entries = list(trees.values())
         top = _highest_unlocked(entries, levels["woodcutting"])
@@ -398,13 +524,14 @@ def _apply_catchup(skill, levels, inv, rules, rules_version, game_uuid, rk, gems
             top = entries[0]
         return _apply_direct("woodcutting", top["display"], levels, inv, rules,
                              rules_version, game_uuid, rk, gems, ores, trees, fish,
-                             {}, {}, diagnostics)
+                             {}, {}, diagnostics, reward_policy=reward_policy)
     # fishing
     rows = list(fish.values())
     unlocked = [f for f in rows if levels["fishing"] >= int(f["fishing_level"])]
     top = sorted(unlocked, key=lambda f: int(f["tier"]))[-1] if unlocked else rows[0]
     return _apply_direct("fishing", top["display"], levels, inv, rules, rules_version,
-                         game_uuid, rk, gems, ores, trees, fish, {}, {}, diagnostics)
+                         game_uuid, rk, gems, ores, trees, fish, {}, {}, diagnostics,
+                         reward_policy=reward_policy)
 
 
 def _achievements(levels, counters) -> List[str]:
