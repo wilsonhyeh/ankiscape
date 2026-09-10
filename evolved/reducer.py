@@ -293,6 +293,11 @@ def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any],
             if res.get("item_out"):
                 add_item(res["item_out"], res.get("item_qty", 1))
                 items[res["item_out"]] = res.get("item_qty", 1)
+            if res.get("gem_out"):
+                # Gems are extra loot alongside the ore (guide: cut them
+                # through Crafting); the XP was already added by _apply_direct.
+                add_item(res["gem_out"], 1)
+                items[res["gem_out"]] = 1
             review_outcomes[rk] = {
                 "skill": res["skill"], "xp_micro": int(res.get("xp_micro", 0)),
                 "outcome": res.get("outcome", ""),
@@ -457,6 +462,15 @@ def _apply_direct(skill, resource, levels, inv, rules, rules_version, game_uuid,
             diagnostics.append(f"unknown_resource:{rk}:{resource}")
             return {"skill": "cooking", "xp_micro": MICRO, "consumed": {}, "counters": {},
                     "outcome": "practice"}
+        level_ok = levels["cooking"] >= int(spec["cooking_level"])
+        if not level_ok:
+            if policy2:
+                return _zero("cooking", "paused_level", diagnostics,
+                             f"level_blocked:{rk}:{resource}")
+            # Legacy policy: like other production skills, an unmet level
+            # earns practice XP and consumes nothing.
+            return {"skill": "cooking", "xp_micro": MICRO, "consumed": {},
+                    "counters": {}, "outcome": "practice"}
         has = inv.get(spec["display"], 0) >= 1
         if policy2 and not has:
             return _zero("cooking", "paused_materials", diagnostics,

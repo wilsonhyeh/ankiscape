@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -35,6 +36,9 @@ from evolved.reducer import replay as py_replay          # noqa: E402
 
 MIGRATION = os.path.join(ROOT, "server", "supabase", "migrations",
                          "0004_authoritative_scoring.sql")
+MIGRATIONS = (MIGRATION,
+              os.path.join(ROOT, "server", "supabase", "migrations",
+                           "0005_gem_inventory_grant.sql"))
 API_URL = "http://127.0.0.1:55321"
 NS = uuid.NAMESPACE_URL
 PW = "parity-pass-1"
@@ -73,8 +77,13 @@ def psql(container: str, sql: str, *, check: bool = True) -> str:
 
 
 def apply_migration(container: str) -> None:
-    with open(MIGRATION, encoding="utf-8") as fh:
-        psql(container, fh.read())
+    """Apply every replay-affecting migration in order (idempotent)."""
+    for path in MIGRATIONS:
+        with open(path, encoding="utf-8") as fh:
+            try:
+                psql(container, fh.read())
+            except ParityError as exc:
+                raise ParityError(f"{os.path.basename(path)}: {exc}") from exc
 
 
 def api_anon_key() -> str:
@@ -291,6 +300,25 @@ def build_vectors() -> list:
         _direct(g, "dev-g", 5, 11, 703, "fishing", "Shrimp", policy=2),
     ]
     out.append({"name": "catchup_skip_precedence", "game": g, "ops": ops})
+
+    # 8. Guaranteed gem drop on a tier-2 ore (rid 3807 of parity-gem draws a
+    # sapphire). Proves the gem bonus XP uses the selected ore's multiplier
+    # on both sides: Clay 5 * 1.05 = 5.25 plus Uncut sapphire 50 * 1.05 = 52.5.
+    g = str(uuid.uuid5(NS, "parity-gem"))
+    ops = [
+        _direct(g, "dev-h", 1, 1, 3807, "mining", "Clay", policy=2),
+        _direct(g, "dev-h", 2, 2, 4701, "mining", "Clay", policy=2),
+    ]
+    out.append({"name": "gem_bonus_multiplier", "game": g, "ops": ops})
+
+    # 9. Cooking level gate: a locked fish pauses under policy 2 even with
+    # no materials, and legacy policy 1 earns practice XP consuming nothing.
+    g = str(uuid.uuid5(NS, "parity-cookgate"))
+    ops = [
+        _direct(g, "dev-i", 1, 1, 9001, "cooking", "Trout", policy=2),
+        _direct(g, "dev-i", 2, 2, 9002, "cooking", "Trout", policy=1),
+    ]
+    out.append({"name": "cooking_level_gate", "game": g, "ops": ops})
     return out
 
 
@@ -498,6 +526,106 @@ def api_case(container: str, anon: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Rules snapshot + tier-multiplier parity (every resource, every tier)
+# --------------------------------------------------------------------------
+
+_TABLES = (("mining", "base_xp", "ores"),
+           ("woodcutting", "base_xp", "trees"),
+           ("fishing", "fishing_base_xp", "fish"),
+           ("cooking", "cooking_base_xp", "fish"),
+           ("smithing", "base_xp", "bars"),
+           ("crafting", "base_xp", "crafting"))
+
+
+def rules_snapshot_parity() -> list:
+    """The embedded evolved_rules() literal must equal shared/rules-v1.json.
+
+    Any drift silently changes server XP versus the client's expectations.
+    Pure file check: works even when the database is unavailable.
+    """
+    from evolved.logic_pure import multiplied_base_micro
+
+    problems = []
+    with open(MIGRATION, encoding="utf-8") as fh:
+        sql_text = fh.read()
+    match = re.search(r"\$rules\$(.*?)\$rules\$", sql_text, re.S)
+    if not match:
+        return ["embedded $rules$ literal not found in migration 0004"]
+    try:
+        embedded = json.loads(match.group(1))
+    except ValueError as exc:
+        return [f"embedded rules literal is not valid JSON: {exc!r}"]
+    file_rules = load_rules()
+    if embedded != file_rules:
+        problems.append("embedded evolved_rules() != shared/rules-v1.json")
+    rules = file_rules
+    for skill, xp_key, table in _TABLES:
+        for entry in rules.get(table, []):
+            base, tier = entry.get(xp_key), entry.get("tier")
+            try:
+                multiplied_base_micro(base, int(tier))
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"{skill}/{entry.get('display')}: "
+                                f"multiplier raises {exc!r}")
+    return problems
+
+
+def sql_multiplier_parity(container: str) -> list:
+    """Every resource row's multiplied and 25% (fail/burn) XP, SQL vs Python.
+
+    Exercises all tiers including the 2.0 cap (tiers 21+), the Decimal
+    base-XP conversion and the half-up rounding in one comparison.
+    """
+    from evolved.logic_pure import multiplied_base_micro, quarter_half_up
+
+    query = """
+with tables(skill, xp_key, table_name) as (
+  values ('mining','base_xp','ores'),
+         ('woodcutting','base_xp','trees'),
+         ('fishing','fishing_base_xp','fish'),
+         ('cooking','cooking_base_xp','fish'),
+         ('smithing','base_xp','bars'),
+         ('crafting','base_xp','crafting')
+)
+select t.skill || '|' || (v->>'display') || '|' || (v->>'tier') || '|' ||
+       public._evolved_mult_micro(
+         public._evolved_base_micro(v->t.xp_key), (v->>'tier')::int) || '|' ||
+       public._evolved_mul_half_up(
+         public._evolved_mult_micro(
+           public._evolved_base_micro(v->t.xp_key),
+           (v->>'tier')::int), 1, 4)
+from tables t
+cross join lateral (select public.evolved_rules() as r) rr
+cross join lateral jsonb_array_elements(rr.r->t.table_name) v
+order by t.skill, (v->>'tier')::int;
+"""
+    sql_rows = {}
+    for line in psql(container, query).splitlines():
+        if not line.strip():
+            continue
+        skill, display, tier, micro, quarter = line.split("|")
+        sql_rows[(skill, display, int(tier))] = (int(micro), int(quarter))
+    rules = load_rules()
+    problems = []
+    seen = set()
+    for skill, xp_key, table in _TABLES:
+        for entry in rules.get(table, []):
+            display, tier = str(entry.get("display")), int(entry["tier"])
+            key = (skill, display, tier)
+            seen.add(key)
+            want_micro = multiplied_base_micro(entry.get(xp_key), tier)
+            want_quarter = quarter_half_up(want_micro)
+            got = sql_rows.get(key)
+            if got != (want_micro, want_quarter):
+                problems.append(
+                    f"{skill}/{display} tier {tier}: sql={got} "
+                    f"python={(want_micro, want_quarter)}")
+    for key in set(sql_rows) - seen:
+        problems.append(f"sql returned unknown row {key}")
+    return problems
+
+
+# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 
@@ -520,10 +648,36 @@ def main(argv=None) -> int:
     try:
         apply_migration(container)
     except ParityError as exc:
-        print(f"scoring_parity: ERROR applying 0004: {exc}", file=sys.stderr)
+        print(f"scoring_parity: ERROR applying migrations: {exc}", file=sys.stderr)
         return 1
 
     failures = []
+    try:
+        problems = rules_snapshot_parity()
+        if problems:
+            failures.extend(problems)
+            print("scoring_parity: rules_snapshot: MISMATCH")
+        else:
+            rows = sum(len(load_rules().get(t, []))
+                       for _, _, t in _TABLES)
+            print(f"scoring_parity: rules_snapshot: ok (file == embedded, "
+                  f"{rows} resource rows)")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"rules_snapshot: {exc!r}")
+        print(f"scoring_parity: rules_snapshot: ERROR {exc!r}")
+    try:
+        problems = sql_multiplier_parity(container)
+        if problems:
+            failures.extend(problems)
+            print("scoring_parity: multiplier: MISMATCH")
+        else:
+            rows = sum(len(load_rules().get(t, []))
+                       for _, _, t in _TABLES)
+            print(f"scoring_parity: multiplier: ok (all {rows} rows, "
+                  f"tiers incl. 2x cap)")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"multiplier: {exc!r}")
+        print(f"scoring_parity: multiplier: ERROR {exc!r}")
     for vector in build_vectors():
         game, ops = vector["game"], vector["ops"]
         user = uid_for(f"sqltest{vector['name']}")

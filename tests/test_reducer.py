@@ -156,6 +156,55 @@ class TestReducer(unittest.TestCase):
         # One review yields at most one direct-size reward, not two summed.
         self.assertLessEqual(state["xp_micro"]["mining"], 200 * MICRO)
 
+    def test_cooking_level_gate_pauses_and_legacy_practice(self):
+        # Cooking is production-gated like Smithing/Crafting: Trout requires
+        # cooking level 20 and the fresh game has level 1 (and no trout).
+        # Policy 2 must pause for level (checked before materials); legacy
+        # policy 1 earns 1 XP practice and consumes nothing.
+        def cook(op_id, seq, key, policy):
+            return {"op_id": op_id, "game_uuid": "game-1",
+                    "device_id": "dev-a", "device_seq": seq, "lamport": seq,
+                    "kind": "review_award",
+                    "payload": {"review_key": key, "review_ts": 2000 + seq,
+                                "rating": 3, "review_kind": "review",
+                                "provenance": "direct", "reward_policy": policy,
+                                "skill": "cooking", "resource": "Trout"}}
+        state = replay([cook("op-ct2", 1, "rk-ct2", 2),
+                        cook("op-ct1", 2, "rk-ct1", 1)],
+                       self.rules, "game-1")
+        outcomes = sorted(state["review_outcomes"].values(),
+                          key=lambda o: o["outcome"])
+        # The policy-2 claim pauses for level; the policy-1 claim practices.
+        self.assertEqual([o["outcome"] for o in outcomes],
+                         ["paused_level", "practice"])
+        self.assertEqual(outcomes[0]["xp_micro"], 0)
+        self.assertEqual(outcomes[1]["xp_micro"], MICRO)
+        self.assertEqual(state["xp_micro"]["cooking"], MICRO)
+        self.assertEqual(state["inventory"].get("Trout", 0), 0)
+
+    def test_gem_drop_grants_item_and_bonus_xp(self):
+        # Deterministic drop: review_key below hits the Clay action roll, the
+        # 1/256 gem roll and the first (sapphire) pick bracket. Found by
+        # searching make_review_key("test-gem-inventory", rid, rid + 1000).
+        key = ("6dc859e8a122c510eb5d132330389487" 
+               "416fe601d89efb802cf118e85193c8c9")
+        ops = [{
+            "op_id": "op-gem", "game_uuid": "test-gem-inventory",
+            "device_id": "dev-a", "device_seq": 1, "lamport": 1,
+            "kind": "review_award",
+            "payload": {"review_key": key, "review_ts": 2000, "rating": 3,
+                        "review_kind": "review", "provenance": "direct",
+                        "reward_policy": 2,
+                        "skill": "mining", "resource": "Clay"}}]
+        state = replay(ops, self.rules, "test-gem-inventory")
+        # Ore 5 x 1.05 + sapphire 50 x 1.05 = 57.75 XP.
+        self.assertEqual(state["xp_micro"]["mining"], 57_750_000)
+        # The gem is real loot: it must reach the Bank for Crafting.
+        self.assertEqual(state["inventory"].get("Uncut sapphire"), 1)
+        self.assertEqual(state["counters"]["gems"], 1)
+        outcome = next(iter(state["review_outcomes"].values()))
+        self.assertIn("Uncut sapphire", outcome["items"])
+
 
 if __name__ == "__main__":
     unittest.main()
