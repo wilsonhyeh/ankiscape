@@ -55,7 +55,7 @@ dead local service.
 
 ## UI/UX verification (2026-09-10, macOS, packaged artifact)
 
-Artifact: `ankiscape-3.0.0.ankiaddon`, sha256 `3cde9bc657675eed...`, 155
+Artifact: `ankiscape-3.0.0.ankiaddon`, sha256 `5c7575ac85652f0b...`, 155
 members, prod endpoint baked. Commands and results:
 
 - `python3 dev/ui_ux_verify.py --anki 26.08.1 --qt 6` -> PASS (11/11
@@ -71,15 +71,35 @@ members, prod endpoint baked. Commands and results:
 Report with inspected findings: `artifacts/ui-ux/report.md`; screenshots per
 scenario under `artifacts/ui-ux/<anki>-qt<qt>-<stamp>/`.
 
-### Hosted step NOT performed
+### Hosted deployment (PERFORMED 2026-09-10)
 
-Server-authoritative scoring ships as local migration
-`0004_authoritative_scoring.sql`. Deploying it to the hosted Supabase project
-(`supabase db push` for the `ankiscape` project, then smoke) is intentionally
-NOT done here and requires separate authorization. Until then a hosted
-submit rejects new-protocol payloads with `client_update_required` /
-`Server update required`, local pending progress is preserved, and no hosted
-scoring claim is made.
+- Pre-migration backup: schema + data dumps taken to `/tmp/ankiscape-deploy/`
+  before applying.
+- `supabase db push` applied only `0004_authoritative_scoring.sql` to the
+  hosted `ankiscape` project (`vjqzamuogcughdvzskmf`); `supabase migration
+  list` shows 0004 on both sides.
+- Hosted capabilities now answer `protocol_version: 2`,
+  `authoritative_scoring: true`; `hiscores` still serves anonymously.
+- `dev/prod_e2e.py` against the hosted project: ALL PASS (22 checks) on the
+  real stack, including authoritative XP written from stored operations,
+  retraction reversing it, exact-retry stability, id-conflict reporting,
+  lost-ack convergence, username login +/- , and the old-client gate
+  (`client_update_required` for a submission without the protocol header).
+  Test users/games cleaned up by the script.
+- Net effect: hosted scoring is live. An older add-on build without the
+  protocol header can no longer submit; it reports `Server update required`
+  and keeps local pending progress until it updates. The new artifact
+  (`5c7575ac...`) sends the header and is the compatible client.
+
+### Remaining manual release steps
+
+- Wilson's real-inbox delivery smoke (register with a real email, OTP from
+  `ankiscape@ankiscape.xyz`) — pre-confirmed test users skip delivery, so
+  Resend-to-inbox remains unproven by design.
+- AnkiWeb upload of `dist/ankiscape-3.0.0.ankiaddon` (no API; manual).
+- Tag / GitHub Release publication (no workflow publishes automatically).
+- Mobile (AnkiMobile/AnkiDroid) checklist below, and Linux/Windows/Qt5
+  platform evidence — deferred, not claimed.
 
 ## Wilson-operated mobile sync checklist (before claiming interop)
 
