@@ -2,6 +2,8 @@
 # Client HTTP remains stdlib urllib. Install: pip3 install -r dev/requirements.lock
 # Versions recorded 2026-09-09; update with reason if a demonstrated
 # incompatibility requires a replacement.
-supabase==2.115.0  # CLI installed separately; this row records the pin
+# Supabase CLI 2.115.0 is NOT a pip package: install it separately
+# (npm i -g supabase@2.115.0 or brew install supabase/tap/supabase);
+# the pin is recorded in dev/toolchains.json.
 hypothesis==6.112.1  # generated operation sequences (tests only; optional locally)
 
