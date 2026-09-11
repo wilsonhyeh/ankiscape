@@ -109,10 +109,17 @@ GENERATED_MEMBERS = ("evolved/prod_config.py",)
 
 
 def _source_hash(members: list) -> str:
+    """Hash member contents with line endings normalized.
+
+    Windows checkouts may convert text files to CRLF (core.autocrlf), which
+    would otherwise make the same commit on a Windows consumer hash
+    differently from the Linux-built candidate and trip the consumer guard.
+    The canonical bytes of the artifact remain the archive hash's concern;
+    this hash only answers "same logical source?"."""
     sha = hashlib.sha256()
     for member in members:
         with open(os.path.join(ROOT, member), "rb") as fh:
-            sha.update(fh.read())
+            sha.update(fh.read().replace(b"\r\n", b"\n"))
     return sha.hexdigest()
 
 
