@@ -73,6 +73,7 @@ def run(minutes: float, answers_per_second: float,
     tmp = tempfile.TemporaryDirectory(prefix="ankiscape-endurance-")
     samples: List[Dict[str, Any]] = []
     answers = 0
+    busy_retries = 0
     start = time.monotonic()
     journal = Journal(os.path.join(tmp.name, "game.sqlite3"))
     worker = None
@@ -94,10 +95,16 @@ def run(minutes: float, answers_per_second: float,
         while time.monotonic() < deadline:
             t0 = time.monotonic()
             revlog = 9000000 + answers
-            result = engine.credit_direct(
-                revlog_id=revlog, card_id=revlog, ease=3, revlog_type=1,
-                review_ts=1900000000 + answers, skill="mining",
-                resource="Rune essence", reward_policy=2)
+            result = None
+            for _attempt in range(40):
+                result = engine.credit_direct(
+                    revlog_id=revlog, card_id=revlog, ease=3, revlog_type=1,
+                    review_ts=1900000000 + answers, skill="mining",
+                    resource="Rune essence", reward_policy=2)
+                if result.get("ok") or not result.get("needs_recovery"):
+                    break
+                busy_retries += 1
+                time.sleep(0.05)
             if not result.get("ok"):
                 raise RuntimeError(f"credit failed: {result}")
             answers += 1
@@ -153,7 +160,8 @@ def run(minutes: float, answers_per_second: float,
         failures.append(f"settled increase {settled:.1f} MiB exceeds budget")
     summary = {
         "minutes": minutes, "answers_per_second": answers_per_second,
-        "answers": answers, "fixed_history": FIXED_HISTORY,
+        "answers": answers, "busy_retries": busy_retries,
+        "fixed_history": FIXED_HISTORY,
         "layers": ["journal", "engine", "projection_worker"],
         "native_ui_cycles": "platform lane journeys (ui-lifecycle)",
         "slope_mib_per_min": round(slope, 3),
