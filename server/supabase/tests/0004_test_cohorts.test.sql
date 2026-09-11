@@ -213,7 +213,7 @@ select throws_ok(
 select throws_like(
   $$ update public.players set is_test = true
       where username_norm = 'bob' $$,
-  '42501', '%permission denied%',
+  '%permission denied%',
   'authenticated cannot flip cohort flags');
 reset role;
 

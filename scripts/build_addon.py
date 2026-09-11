@@ -70,12 +70,14 @@ def _collect() -> list:
                 if fn in (".DS_Store",):
                     continue
                 full = os.path.join(base, fn)
-                rel = os.path.relpath(full, ROOT)
+                # POSIX-relative archive names on every OS: backslash
+                # members break Windows zips and required-asset checks.
+                rel = os.path.relpath(full, ROOT).replace(os.sep, "/")
                 members.append(rel)
     # Deterministic order; reject traversal entries.
     members = sorted(set(members))
     for member in members:
-        if member.startswith("/") or ".." in member.split(os.sep):
+        if member.startswith("/") or ".." in member.split("/"):
             raise SystemExit(f"unsafe member: {member!r}")
     return members
 
