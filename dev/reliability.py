@@ -1250,9 +1250,11 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
                 pass
     # Keep the launched Anki's own stdout/stderr tail so a pre-driver
     # launch failure (e.g. Linux 23.10 Qt5) is diagnosable from evidence.
+    # Include the journey name: a scenario running several journeys must not
+    # have each tail overwrite the previous one.
     extra_names = []
     log_src = os.path.join(base, "anki-stdout.log")
-    tail_name = f"{scenario_id or journey}-anki-stdout-tail.log"
+    tail_name = f"{scenario_id + '-' if scenario_id else ''}{journey}-anki-stdout-tail.log"
     if os.path.isfile(log_src) and _copy_log_tail(
             log_src, os.path.join(out_dir, tail_name)):
         extra_names.append(tail_name)
