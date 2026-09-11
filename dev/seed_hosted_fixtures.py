@@ -88,7 +88,10 @@ class Transport:
             url += "?" + urllib.parse.urlencode(params)
         payload = None
         headers = {"apikey": self.service_key if service else self.anon_key,
-                   "Accept": "application/json"}
+                   "Accept": "application/json",
+                   # Same protocol marker the shipped client sends; servers
+                   # with authoritative scoring reject old-protocol uploads.
+                   "X-AnkiScape-Protocol": "2"}
         if service:
             headers["Authorization"] = f"Bearer {self.service_key}"
         elif token:
@@ -200,12 +203,14 @@ def _registry(transport: Transport) -> List[Dict[str, Any]]:
     return rows or []
 
 
-def _reserve(transport: Transport, norm: str, trace_hash: str) -> None:
+def _reserve(transport: Transport, norm: str, trace_hash: str,
+             reserved_email: str) -> None:
     transport.request(
         "POST", "/rest/v1/fixture_registry",
         body={"suite_id": traces_mod.SUITE_ID,
               "suite_version": traces_mod.SUITE_VERSION,
-              "username_norm": norm, "expected_trace_hash": trace_hash},
+              "username_norm": norm, "expected_trace_hash": trace_hash,
+              "reserved_email": reserved_email},
         service=True, expect=(200, 201, 204, 409))
 
 
@@ -272,7 +277,8 @@ def _provision_one(transport: Transport, name: str, trace: Dict[str, Any],
                 norm = traces_mod.username_norm(candidate)
                 if norm in reserved:
                     continue
-                _reserve(transport, norm, trace["trace_hash"])
+                email = traces_mod.email_for(candidate)
+                _reserve(transport, norm, trace["trace_hash"], email)
                 try:
                     created = _create_user(transport, candidate, norm, secret)
                 except SeedError as exc2:
@@ -281,7 +287,8 @@ def _provision_one(transport: Transport, name: str, trace: Dict[str, Any],
                     raise
                 user_id = str((created.get("id") or created.get("user", {}).get("id")))
                 reserved[norm] = {"username_norm": norm, "user_id": user_id,
-                                  "expected_trace_hash": trace["trace_hash"]}
+                                  "expected_trace_hash": trace["trace_hash"],
+                                  "reserved_email": email}
                 break
         if not user_id:
             raise SeedError(f"could not provision a free name for {name}")
@@ -395,9 +402,10 @@ def cmd_apply(args) -> int:
         trace = traces[name]
         norm = traces_mod.username_norm(name)
         if norm not in reserved:
-            _reserve(transport, norm, trace["trace_hash"])
+            _reserve(transport, norm, trace["trace_hash"], trace["email"])
             reserved[norm] = {"username_norm": norm, "user_id": None,
-                              "expected_trace_hash": trace["trace_hash"]}
+                              "expected_trace_hash": trace["trace_hash"],
+                              "reserved_email": trace["email"]}
         provisioned = _provision_one(transport, name, trace, secret, reserved)
         created += 1 if not reserved.get(
             provisioned["username_norm"], {}).get("user_id") else 0

@@ -4,17 +4,22 @@
 -- authorization, ties/limits/banned, safe profile allowlist, grants and
 -- direct-write denial.
 begin;
-select plan(31);
+select plan(33);
 
 -- ---------------------------------------------------------------------------
 -- Fixtures: reservations exist BEFORE any account (born classified).
 -- ---------------------------------------------------------------------------
 insert into public.fixture_registry
-  (suite_id, suite_version, username_norm, expected_trace_hash)
+  (suite_id, suite_version, username_norm, expected_trace_hash, reserved_email)
 values
-  ('hosted-v1', 1, 'testtom', 'trace-hash-tom'),
-  ('hosted-v1', 1, 'testtina', 'trace-hash-tina'),
-  ('hosted-v1', 1, 'unclaimed', 'trace-hash-unclaimed');
+  ('hosted-v1', 1, 'testtom', 'trace-hash-tom',
+   'testtom@hosted-v1.example.invalid'),
+  ('hosted-v1', 1, 'testtina', 'trace-hash-tina',
+   'testtina@hosted-v1.example.invalid'),
+  ('hosted-v1', 1, 'unclaimed', 'trace-hash-unclaimed',
+   'unclaimed@hosted-v1.example.invalid'),
+  ('hosted-v1', 1, 'reservedok', 'trace-hash-reservedok',
+   'reservedok@hosted-v1.example.invalid');
 
 insert into auth.users(id, aud, role, email, encrypted_password,
                        email_confirmed_at, created_at, updated_at,
@@ -53,6 +58,31 @@ select throws_ok(
              '{"username_norm":"unclaimed","username_display":"Thief"}') $$,
   '23505', 'username_taken', 'reserved fixture names cannot be taken over');
 
+-- A reservation is claimable only by its suite-owned address.
+select throws_ok(
+  $$ insert into auth.users(id, aud, role, email, encrypted_password,
+                            email_confirmed_at, created_at, updated_at,
+                            raw_user_meta_data)
+     values ('30000000-0000-4000-8000-000000000002', '', 'authenticated',
+             'wrong@example.com', crypt('pw123456', gen_salt('bf')),
+             now(), now(), now(),
+             '{"username_norm":"reservedok","username_display":"ReservedOk"}') $$,
+  '23505', 'username_taken',
+  'reserved names reject non-suite email addresses');
+select is(
+  (select count(*)::int from public.players
+    where username_norm = 'reservedok'),
+  0, 'rejected reservation left no player row');
+insert into auth.users(id, aud, role, email, encrypted_password,
+                       email_confirmed_at, created_at, updated_at,
+                       raw_user_meta_data)
+values ('30000000-0000-4000-8000-000000000003', '', 'authenticated',
+        'reservedok@hosted-v1.example.invalid',
+        crypt('pw123456', gen_salt('bf')), now(), now(), now(),
+        '{"username_norm":"reservedok","username_display":"ReservedOk"}');
+select is(
+  (select is_test from public.players where username_norm = 'reservedok'),
+  true, 'the suite-owned address claims its reservation as test-classified');
 select is(
   (select count(*)::int from public.players
     where username_norm in ('testtom','testtina') and is_test),
