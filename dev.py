@@ -239,7 +239,14 @@ def _resolve_runtime(anki: str, anki_bin: str = ""):
     spec = _ilu.spec_from_file_location(
         "ankiscape_runtime_adapter", os.path.join(ROOT, "dev", "runtime_adapter.py"))
     adapter = _ilu.module_from_spec(spec)
-    spec.loader.exec_module(adapter)
+    # Register before exec: Python 3.11 dataclasses resolve the defining
+    # module through sys.modules (TypeError otherwise on @dataclass).
+    sys.modules[spec.name] = adapter
+    try:
+        spec.loader.exec_module(adapter)
+    except Exception:
+        sys.modules.pop(spec.name, None)
+        raise
     if anki_bin:
         info = adapter.resolve_anki(anki, anki_bin)
         if info is None:
