@@ -187,16 +187,16 @@ class ProjectionWorkerTests(unittest.TestCase):
         worker.notify_dirty()
         self.assertTrue(_wait_for(lambda: worker.latest() is not None))
         good = worker.latest()
-        # Break the fast path AND the rebuild source by pointing at a
-        # missing game file: simulate by closing the worker's reader through
-        # a path that disappears. Use a copied journal instead.
         worker.stop(timeout=2.0)
-        moved = os.path.join(self.tmp.name, "moved.sqlite3")
-        os.rename(self.path, moved)
-        worker2 = ProjectionWorker(self.path, self.cfg)
+        # A deterministic open failure: the journal path lives under a
+        # regular file, so the worker can never read a rebuild source.
+        blocker = os.path.join(self.tmp.name, "blocking-file")
+        with open(blocker, "w", encoding="utf-8") as fh:
+            fh.write("not a directory")
+        worker2 = ProjectionWorker(os.path.join(blocker, "game.sqlite3"),
+                                   self.cfg)
         self.workers.append(worker2)
         worker2._latest = good  # last good publication survives
-        worker2.notify_dirty()
         worker2.start()
         worker2.notify_dirty()
         self.assertTrue(_wait_for(lambda: worker2.status()["failed"] != ""))
