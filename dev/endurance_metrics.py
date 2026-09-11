@@ -18,6 +18,13 @@ SETTLED_LIMIT_MIB = 50.0
 RELEASE_WARMUP_MIN = 30.0
 RELEASE_WINDOW_MIN = 30.0
 SAMPLE_INTERVAL_S = 30.0
+# Native runs carry two phases: a paced growing history and a fixed-history
+# lifecycle. Leak verdicts only apply to the fixed phase; a growing-history
+# slope is expected growth, never a leak. A trend check needs at least this
+# much fixed-history time and discards this much as cache warm-up before
+# measuring (release uses its full 30-minute warm-up instead).
+TREND_MIN_FIXED_MIN = 10.0
+TREND_WARMUP_MIN = 5.0
 
 
 def _finite(value: Any) -> bool:
@@ -101,14 +108,39 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
             "pass": False, "failures": failures,
         }
     valid.sort(key=lambda s: float(s["at_s"]))
+    # Native runs sample two phases. Evaluate the fixed-history lifecycle;
+    # the paced growing history is informational (its slope is expected).
+    fixed = [s for s in valid if isinstance(s, dict)
+             and str(s.get("phase", "")) == "fixed"]
+    growing = [s for s in valid if isinstance(s, dict)
+               and str(s.get("phase", "")) == "growing"]
+    series = fixed if len(fixed) >= 2 else valid
+    fixed_span_min = None
+    trend_warmup_dropped = 0
+    if len(fixed) >= 2:
+        fixed_span_min = (float(fixed[-1]["at_s"])
+                          - float(fixed[0]["at_s"])) / 60.0
+        if trend and not release and fixed_span_min < TREND_MIN_FIXED_MIN:
+            failures.append(
+                f"trend_fixed_span:{round(fixed_span_min, 1)}"
+                f"<{TREND_MIN_FIXED_MIN}")
+        if trend and not release:
+            # Discard the cache warm-up ramp; the nightly verdict is about
+            # the settled trend, not the first minutes of a fresh profile.
+            warm_cut = float(fixed[0]["at_s"]) + TREND_WARMUP_MIN * 60.0
+            trimmed = [s for s in series
+                       if float(s["at_s"]) >= warm_cut]
+            if len(trimmed) >= 2:
+                trend_warmup_dropped = len(series) - len(trimmed)
+                series = trimmed
     if trend:
-        duration_s = max(float(valid[-1]["at_s"]), duration_min * 60.0)
+        duration_s = max(float(series[-1]["at_s"]), duration_min * 60.0)
         window_start_s = max(0.0, duration_s - window_min * 60.0)
     else:
-        cut = max(1, int(len(valid) * 0.3))
-        window_start_s = float(valid[min(cut, len(valid) - 1)]["at_s"])
-    window = [s for s in valid if float(s["at_s"]) >= window_start_s]
-    before = [s for s in valid if float(s["at_s"]) < window_start_s]
+        cut = max(1, int(len(series) * 0.3))
+        window_start_s = float(series[min(cut, len(series) - 1)]["at_s"])
+    window = [s for s in series if float(s["at_s"]) >= window_start_s]
+    before = [s for s in series if float(s["at_s"]) < window_start_s]
     baseline = float(before[-1]["rss_mib"]) if before \
         else float(window[0]["rss_mib"])
     if len(window) < 2:
@@ -134,11 +166,23 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
     if settled > settled_limit:
         failures.append(f"settled:{round(settled, 1)}>{settled_limit}")
 
-    eligible = release and duration_min >= warmup_min + window_min
+    eligible = (release and duration_min >= warmup_min + window_min
+                and (fixed_span_min is None
+                     or fixed_span_min >= warmup_min + window_min))
+    growing_change = None
+    if len(growing) >= 2:
+        growing_change = round(
+            float(growing[-1]["rss_mib"]) - float(growing[0]["rss_mib"]), 1)
     return {
         "profile": profile, "duration_min": duration_min,
         "sample_count": len(valid), "window_min": window_min,
         "window_samples": len(window),
+        "evaluated_phase": "fixed" if len(fixed) >= 2 else "all",
+        "fixed_samples": len(fixed), "fixed_span_min":
+            round(fixed_span_min, 1) if fixed_span_min is not None else None,
+        "trend_warmup_dropped": trend_warmup_dropped,
+        "growing_samples": len(growing),
+        "growing_rss_change_mib": growing_change,
         "slope_mib_per_min": round(slope, 3),
         "settled_increase_mib": round(settled, 1),
         "baseline_rss_mib": round(baseline, 1),

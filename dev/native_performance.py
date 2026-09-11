@@ -274,6 +274,13 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
                 "samples": endurance_report.get("sample_count"),
                 "window_samples": endurance_report.get("window_samples"),
                 "sample_cadence_s": endurance_report.get("sample_cadence_s"),
+                "evaluated_phase": endurance_report.get("evaluated_phase"),
+                "fixed_span_min": endurance_report.get("fixed_span_min"),
+                "trend_warmup_dropped":
+                    endurance_report.get("trend_warmup_dropped"),
+                "growing_samples": endurance_report.get("growing_samples", 0),
+                "growing_rss_change_mib":
+                    endurance_report.get("growing_rss_change_mib"),
                 "eligible_for_release":
                     endurance_report.get("eligible_for_release"),
                 "pass": endurance_report.get("pass"),

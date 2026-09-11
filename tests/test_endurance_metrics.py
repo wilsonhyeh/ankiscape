@@ -131,6 +131,70 @@ class EnduranceMetricsTests(unittest.TestCase):
         self.assertTrue(report["pass"], report["failures"])
         self.assertFalse(report["eligible_for_release"])
 
+    def test_growing_phase_is_not_a_leak(self):
+        # The fixed-history lifecycle is flat; the paced growing history
+        # climbs 200 MiB. Only the fixed phase may decide the verdict.
+        samples = []
+        for t in range(0, 900, 30):
+            samples.append({"at_s": float(t), "rss_mib": 100.0 + t / 900.0 * 200,
+                            "phase": "growing"})
+        for t in range(900, 1800 + 1, 30):
+            samples.append({"at_s": float(t), "rss_mib": 320.0,
+                            "phase": "fixed"})
+        report = END.evaluate_endurance(samples, profile="nightly",
+                                        duration_min=30.0)
+        self.assertEqual(report["evaluated_phase"], "fixed")
+        self.assertAlmostEqual(report["slope_mib_per_min"], 0.0, places=3)
+        self.assertLess(report["settled_increase_mib"], 1.0)
+        self.assertGreater(report["growing_rss_change_mib"], 100.0)
+        self.assertTrue(report["pass"], report["failures"])
+
+    def test_fixed_phase_leak_still_fails(self):
+        samples = []
+        for t in range(0, 900, 30):
+            samples.append({"at_s": float(t), "rss_mib": 100.0,
+                            "phase": "growing"})
+        for t in range(900, 1800 + 1, 30):
+            samples.append({"at_s": float(t),
+                            "rss_mib": 200.0 + (t - 900) / 60.0 * 2.0,
+                            "phase": "fixed"})
+        report = END.evaluate_endurance(samples, profile="nightly",
+                                        duration_min=30.0)
+        self.assertFalse(report["pass"])
+        self.assertTrue(any("slope" in f for f in report["failures"]),
+                        report["failures"])
+
+    def test_trend_discards_cache_warmup_ramp(self):
+        # Real shape from nightly 34641447537 (Linux 26.8.1): the fixed
+        # phase ramps ~57 MiB in the first minutes, then plateaus. The
+        # nightly trend must judge the plateau, not the ramp.
+        samples = []
+        for t in range(0, 900, 30):
+            samples.append({"at_s": float(t), "rss_mib": 600.0,
+                            "phase": "growing"})
+        for t in range(900, 1800 + 1, 30):
+            ramp = min(1.0, max(0.0, (t - 900) / 240.0))
+            samples.append({"at_s": float(t), "rss_mib": 643.0 + ramp * 57.5,
+                            "phase": "fixed"})
+        report = END.evaluate_endurance(samples, profile="nightly",
+                                        duration_min=30.0)
+        self.assertEqual(report["evaluated_phase"], "fixed")
+        self.assertGreater(report["trend_warmup_dropped"], 0)
+        self.assertTrue(report["pass"], report["failures"])
+
+    def test_short_fixed_trend_fails(self):
+        samples = []
+        for t in range(0, 840, 30):
+            samples.append({"at_s": float(t), "rss_mib": 100.0,
+                            "phase": "growing"})
+        for t in range(840, 1200 + 1, 30):
+            samples.append({"at_s": float(t), "rss_mib": 100.0,
+                            "phase": "fixed"})
+        report = END.evaluate_endurance(samples, profile="nightly",
+                                        duration_min=30.0)
+        self.assertTrue(any("trend_fixed_span" in f
+                            for f in report["failures"]), report["failures"])
+
     def test_engine_smoke_labels_ineligible(self):
         report = END.evaluate_endurance(_series(1), profile="engine-smoke",
                                         duration_min=1.0)
