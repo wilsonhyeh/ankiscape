@@ -83,3 +83,21 @@ processes owned by the invocation and detects single-instance forwarding.
 
 macOS double-click: `Launch AnkiScape.command` — production rehearsal picker
 (opens Terminal into the repo and runs the documented entry point).
+
+## Reliability tooling (dev only, never shipped)
+
+| Tool | Purpose |
+|---|---|
+| `reliability.py` | Orchestrates stages, writes/validates evidence records, budget checks |
+| `perf_runtime.py` | Engine/worker latency, rebuild and memory measurements |
+| `endurance.py` | Paced active run with RSS/object/thread bounds |
+| `generated_traces.py` | Deterministic operation-sequence property checks |
+| `mutation_gate.py` | Injects defects into temp copies; owning tests must fail |
+| `runtime_adapter.py` | Platform runtime resolution, owned-process policy, path normalization |
+| `fetch_runtimes.py` | Verified official runtime downloads (fails closed on unpinned targets) |
+| `fixture_traces.py` | Deterministic hosted fixture traces (24 players) |
+| `seed_hosted_fixtures.py` | Provision/seed/verify the permanent test cohort |
+| `hosted_fixture_e2e.py` | Hosted leaderboards, lookup, retry stability |
+| `ui_ux_verify.py` | Runs every UI scenario on a managed runtime |
+
+See `docs/RELIABILITY.md` for commands, prerequisites and triage.

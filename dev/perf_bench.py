@@ -13,8 +13,8 @@ covers model construction, which dominates menu build (Qt shell is thin).
 from __future__ import annotations
 
 import json
+import math
 import os
-import statistics
 import sys
 import tempfile
 import time
@@ -34,7 +34,15 @@ BARS = {"menu_model_p95_ms": 300.0, "replay200_p95_ms": 2000.0,
 
 
 def _p95(samples):
-    return statistics.quantiles(samples, n=100)[94] if len(samples) >= 2 else max(samples)
+    """Nearest-rank p95: sorted x[ceil(0.95 * n)], no interpolation.
+
+    The returned value is always an observed sample, so it can never exceed
+    the observed maximum (the old statistics.quantiles approach could with
+    small n). Requires an adequate sample count; callers below use >=100.
+    """
+    xs = sorted(float(s) for s in samples)
+    rank = max(1, math.ceil(0.95 * len(xs)))
+    return xs[min(rank, len(xs)) - 1]
 
 
 def _menu_model_bar(rules):
@@ -46,7 +54,7 @@ def _menu_model_bar(rules):
            "smithing": "Rune bar", "crafting": "Gold ring",
            "fishing": "Shark", "cooking": "Shark"}
     samples = []
-    for _ in range(20):
+    for _ in range(100):
         t0 = time.perf_counter()
         rows = skill_rows(rules, levels, xp, inv, sel)
         assert len(rows) == 6
@@ -71,7 +79,7 @@ def _replay200_bar(rules, game_uuid):
         journal.append_operation(op)
         ops.append(op)
     samples = []
-    for _ in range(5):
+    for _ in range(100):
         t0 = time.perf_counter()
         state = replay(ops, rules, game_uuid)
         samples.append((time.perf_counter() - t0) * 1000)

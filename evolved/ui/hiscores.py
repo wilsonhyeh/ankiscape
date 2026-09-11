@@ -10,12 +10,15 @@ from typing import Any, Dict, Optional
 
 
 def build_hiscores_screen(shell, deps: Dict[str, Any]):
-    from aqt.qt import (QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                        QListWidgetItem, QPushButton, QVBoxLayout, QWidget)
+    from aqt.qt import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit,
+                        QListWidget, QListWidgetItem, QPushButton, QVBoxLayout,
+                        QWidget)
+    from .stale import response_is_stale
     from . import OBJECT_NAMES
     from .theme import DEFAULT_SCALE
-    from .widgets import (StonePanel, body_label, display_label, muted_label,
-                          error_label, success_label)
+    from .widgets import (StonePanel, body_label, display_label, icon_pixmap,
+                          muted_label, error_label, success_label)
+    from ..assets import slot_icon_path
 
     root = QWidget(shell)
     root.setObjectName(OBJECT_NAMES["hiscores_screen"])
@@ -24,11 +27,21 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
     layout.setSpacing(8)
 
     state: Dict[str, Any] = {"loading": False, "result": None, "lookup": None,
-                             "req": 0, "closed": False, "account": None}
+                             "req": 0, "closed": False, "account": None,
+                             "cohort": False}
 
     # Logged-out panel
     logged_out = StonePanel()
-    logged_out.body.addWidget(display_label("Compete on the Hiscores"))
+    logged_out_head = QHBoxLayout()
+    logged_out_icon = QLabel()
+    logged_out_icon.setFixedSize(24, 24)
+    account_pix = icon_pixmap(slot_icon_path("hiscores.account"), 24)
+    if account_pix is not None:
+        logged_out_icon.setPixmap(account_pix)
+        logged_out_icon.setAccessibleName("Account")
+    logged_out_head.addWidget(logged_out_icon)
+    logged_out_head.addWidget(display_label("Compete on the Hiscores"), 1)
+    logged_out.body.addLayout(logged_out_head)
     logged_out.body.addWidget(body_label(
         "Create a free account to back up this game and appear on the online "
         "leaderboards. Your reviews always earn XP locally — an account adds "
@@ -49,12 +62,34 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
     # Logged-in panel
     panel = StonePanel()
     header = QHBoxLayout()
+    rank_icon = QLabel()
+    rank_icon.setFixedSize(24, 24)
+    rank_pix = icon_pixmap(slot_icon_path("hiscores.rank"), 24)
+    if rank_pix is not None:
+        rank_icon.setPixmap(rank_pix)
+        rank_icon.setAccessibleName("Hiscores rank")
+    header.addWidget(rank_icon)
     header.addWidget(display_label("Hiscores"))
     header.addStretch(1)
+    test_toggle = QCheckBox("Test leaderboard")
+    test_toggle.setObjectName(OBJECT_NAMES.get("hiscores_test_toggle",
+                                               "ankiscape-hiscores-test-toggle"))
+    test_toggle.setToolTip(
+        "Synthetic fixture accounts on a separate test leaderboard; "
+        "real player ranks are unaffected")
+    test_toggle.setAccessibleName("Test leaderboard")
+    test_toggle.setVisible(False)
+    header.addWidget(test_toggle)
     panel.body.addLayout(header)
+    status_row = QHBoxLayout()
+    status_icon = QLabel()
+    status_icon.setFixedSize(20, 20)
+    status_icon.setVisible(False)
+    status_row.addWidget(status_icon)
     status = body_label("")
     status.setObjectName(OBJECT_NAMES["hiscores_status"])
-    panel.body.addWidget(status)
+    status_row.addWidget(status, 1)
+    panel.body.addLayout(status_row)
     controls = QHBoxLayout()
     skill = QComboBox()
     skill.setObjectName(OBJECT_NAMES["hiscores_skill"])
@@ -85,8 +120,20 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         except Exception:
             return {}
 
-    def _set_status(text: str, kind: str = "muted"):
+    def _set_status(text: str, kind: str = "muted", icon_slot: str = ""):
         status.setText(text)
+        try:
+            status.setAccessibleName(text)
+        except Exception:
+            pass
+        pix = icon_pixmap(slot_icon_path(icon_slot), 20) if icon_slot else None
+        if pix is not None:
+            status_icon.setPixmap(pix)
+            status_icon.setAccessibleName(
+                "Pending" if icon_slot == "hiscores.pending" else "Offline")
+            status_icon.setVisible(True)
+        else:
+            status_icon.setVisible(False)
         try:
             status.setObjectName("ankiscape-error" if kind == "error"
                                  else ("ankiscape-success" if kind == "ok"
@@ -99,7 +146,8 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
     def _refresh():
         account = _account()
         key = (str(account.get("username") or ""),
-               bool(account.get("logged_in")))
+               bool(account.get("logged_in")),
+               bool(account.get("is_test")))
         if state["account"] is not None and state["account"] != key:
             # Profile/identity changed: discard any in-flight callback so a
             # late result cannot render into the new context.
@@ -107,13 +155,24 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
             state["result"] = None
             state["lookup"] = None
             state["loading"] = False
+            state["cohort"] = False
         state["account"] = key
         logged_in = bool(account.get("logged_in"))
+        is_test = bool(account.get("is_test"))
         logged_out.setVisible(not logged_in)
         panel.setVisible(logged_in)
+        # Only server-reported test accounts ever see the test toggle.
+        test_toggle.setVisible(logged_in and is_test)
+        if not is_test and test_toggle.isChecked():
+            test_toggle.blockSignals(True)
+            test_toggle.setChecked(False)
+            test_toggle.blockSignals(False)
+            state["cohort"] = False
         if not logged_in:
+            _set_status("", "muted")
             return
-        cached = shell.call("get_hiscores_cache", skill.currentText(),
+        cohort = bool(state["cohort"])
+        cached = shell.call("get_hiscores_cache", skill.currentText(), cohort,
                             default=None)
         if cached:
             _render(cached, stale=True)
@@ -127,13 +186,17 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         req = state["req"]
         state["loading"] = True
         state["lookup"] = None
-        _set_status("Loading rankings…")
+        cohort = bool(state["cohort"])
+        _set_status(
+            "Loading test rankings…" if cohort else "Loading rankings…",
+            "muted", "hiscores.pending")
         # Cached rows stay visible while the refresh runs; a successful
         # result or an error replaces them below.
         requested = skill.currentText()
 
         def _done(result):
-            if state["closed"] or req != state["req"]:
+            if response_is_stale(closed=state["closed"], request_id=req,
+                                 current_request_id=state["req"]):
                 return  # superseded by a newer request or profile change
             if skill.currentText() != requested:
                 return  # the user moved to another skill mid-flight
@@ -149,7 +212,7 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         async_fn = shell.deps.get("query_hiscores_async")
         if callable(async_fn):
             try:
-                async_fn(requested, 50, _done)
+                async_fn(requested, 50, _done, cohort)
                 return
             except Exception as exc:
                 _done({"ok": False, "error": repr(exc)})
@@ -157,7 +220,7 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         sync_fn = shell.deps.get("query_hiscores")
         if callable(sync_fn):
             try:
-                rows = sync_fn(requested, 50)
+                rows = sync_fn(requested, 50, cohort)
                 _done({"ok": True, "rows": rows, "fetched_at": time.time()})
             except Exception as exc:
                 _done({"ok": False, "error": str(exc)})
@@ -169,14 +232,18 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         listing.clear()
         account = _account()
         me = str(account.get("username", "") or "")
+        cohort = bool(state["cohort"])
         if not rows:
-            _set_status("No rankings yet — finish some reviews, then Sync now.",
+            _set_status(("No test rankings yet." if cohort else
+                         "No rankings yet — finish some reviews, then Sync now."),
                         "muted")
         else:
             when = _fmt_time(result.get("fetched_at"))
             prefix = "Offline — showing cached rankings" if stale else "Updated"
-            _set_status(f"{prefix} {when}. Competition ranks; ties share a rank.",
-                        "muted" if stale else "ok")
+            scope = "Test leaderboard — synthetic test accounts only. " if cohort else ""
+            _set_status(f"{scope}{prefix} {when}. Competition ranks; ties share a rank.",
+                        "muted" if stale else "ok",
+                        "hiscores.offline" if stale else "")
         for row in rows:
             rank = row.get("rank")
             rank_text = f"#{rank}" if rank else "unranked"
@@ -202,18 +269,20 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
 
     def _render_error(result: Dict[str, Any]):
         error = str(result.get("error") or "unknown error")
-        cached = shell.call("get_hiscores_cache", skill.currentText(),
+        cohort = bool(state["cohort"])
+        cached = shell.call("get_hiscores_cache", skill.currentText(), cohort,
                             default=None)
         if cached:
             _render(dict(cached, cached=True), stale=True)
             _set_status(f"Couldn't refresh ({error[:60]}). Showing cached "
                         f"rankings from {_fmt_time(cached.get('fetched_at'))}.",
-                        "error")
+                        "error", "hiscores.offline")
             return
         listing.clear()
         if "offline" in error or "logged" in error.lower():
             _set_status("You are signed out or offline. Log in to view "
-                        "Hiscores — your local progress is safe.", "error")
+                        "Hiscores — your local progress is safe.", "error",
+                        "hiscores.offline")
         elif "jwt" in error.lower() or "401" in error or "expired" in error.lower():
             _set_status("Your session expired. Log in again to view Hiscores.",
                         "error")
@@ -227,12 +296,14 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         state["req"] += 1
         req = state["req"]
         selected = skill.currentText()
+        cohort = bool(state["cohort"])
         state["lookup"] = {"text": name}
         listing.clear()
         _set_status(f"Looking up {name}…")
 
         def _done(result):
-            if state["closed"] or req != state["req"]:
+            if response_is_stale(closed=state["closed"], request_id=req,
+                                 current_request_id=state["req"]):
                 return  # superseded by a refresh, skill switch or close
             if not isinstance(result, dict) or not result.get("ok"):
                 not_found = bool((result or {}).get("not_found"))
@@ -260,7 +331,7 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         async_fn = shell.deps.get("lookup_player_async")
         if callable(async_fn):
             try:
-                async_fn(name, selected, _done)
+                async_fn(name, selected, _done, cohort)
                 return
             except Exception as exc:
                 _done({"ok": False, "error": repr(exc)})
@@ -275,8 +346,17 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
 
     login_btn.clicked.connect(_open_login)
     register_btn.clicked.connect(_open_register)
+    def _toggle_cohort(checked):
+        state["cohort"] = bool(checked)
+        state["req"] += 1
+        state["result"] = None
+        state["lookup"] = None
+        state["loading"] = False
+        _load()
+
     refresh.clicked.connect(_load)
     sync_btn.clicked.connect(lambda: shell.call("on_sync"))
+    test_toggle.toggled.connect(_toggle_cohort)
     skill.currentTextChanged.connect(lambda _t: _load())
     lookup.returnPressed.connect(_lookup)
     lookup.textEdited.connect(lambda _t: state.update(lookup=None))

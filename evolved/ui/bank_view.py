@@ -1,8 +1,9 @@
 # evolved/ui/bank_view.py - RuneScape-style Bank grid (read-only).
 """Item slots with quantity overlays, search + skill filters, and a
-selected-item detail panel showing name and producing/consuming skills.
+selected-item detail panel showing name, icon and producing/consuming skills.
 No list-view toggle. Empty bank explains how to gather; an empty search result
-offers Clear filters.
+offers Clear filters. Slots update by item identity: quantities and selection
+change in place, never by recreating the grid.
 """
 from __future__ import annotations
 
@@ -15,8 +16,8 @@ def build_bank_screen(shell, deps: Dict[str, Any]):
     from . import OBJECT_NAMES
     from .menu_model import bank_entries, bank_skills_for
     from .theme import DEFAULT_SCALE
-    from .widgets import (ItemSlot, StonePanel, body_label, clear_layout,
-                          display_label, muted_label)
+    from .widgets import (ItemSlot, StonePanel, body_label, display_label,
+                          icon_pixmap, muted_label)
 
     root = QWidget(shell)
     root.setObjectName(OBJECT_NAMES["bank_screen"])
@@ -55,9 +56,14 @@ def build_bank_screen(shell, deps: Dict[str, Any]):
     body.addWidget(grid_panel, 3)
 
     detail = StonePanel(raised=True)
+    detail_head = QHBoxLayout()
+    detail_icon = QLabel()
+    detail_icon.setFixedSize(40, 40)
+    detail_head.addWidget(detail_icon)
     detail_name = display_label("")
     detail_name.setObjectName("ankiscape-bank-item-name")
-    detail.body.addWidget(detail_name)
+    detail_head.addWidget(detail_name, 1)
+    detail.body.addLayout(detail_head)
     detail_qty = body_label("")
     detail_qty.setObjectName("ankiscape-bank-item-qty")
     detail.body.addWidget(detail_qty)
@@ -67,6 +73,10 @@ def build_bank_screen(shell, deps: Dict[str, Any]):
     detail_note = muted_label("Items are collectibles here — the Bank is "
                               "read-only.", wrap=True)
     detail.body.addWidget(detail_note)
+    empty_art = QLabel()
+    empty_art.setFixedSize(48, 48)
+    empty_art.setVisible(False)
+    detail.body.addWidget(empty_art)
     empty_hint = body_label("", wrap=True)
     empty_hint.setObjectName("ankiscape-bank-empty")
     detail.body.addWidget(empty_hint)
@@ -74,7 +84,17 @@ def build_bank_screen(shell, deps: Dict[str, Any]):
     body.addWidget(detail, 2)
     layout.addLayout(body, 1)
 
-    state: Dict[str, Any] = {"selected": ""}
+    state: Dict[str, Any] = {"selected": "", "dirty": True}
+    slots_by_display: Dict[str, Any] = {}
+    columns = 6
+
+    def _empty_art_pixmap():
+        from ..assets import slot_icon_path
+        return icon_pixmap(slot_icon_path("bank.empty"), 48)
+
+    def _detail_icon(display: str):
+        from ..assets import display_icon
+        return icon_pixmap(display_icon(display), 40)
 
     def _refresh():
         rules = shell.call("get_rules", default={}) or {}
@@ -83,14 +103,24 @@ def build_bank_screen(shell, deps: Dict[str, Any]):
         skill = skill_filter.currentText()
         rows = bank_entries(rules, inventory, query=search.text(),
                             skill="" if skill == "all" else skill)
-        clear_layout(grid)
-        columns = 6
+        order = [str(r["display"]) for r in rows]
         for index, row in enumerate(rows):
-            slot = ItemSlot(scale=DEFAULT_SCALE)
-            slot.set_item(row["display"], row["qty"],
-                          selected=(row["display"] == state["selected"]))
-            slot.clicked = _select
+            display = str(row["display"])
+            slot = slots_by_display.get(display)
+            if slot is None:
+                slot = ItemSlot(scale=DEFAULT_SCALE)
+                slot.clicked = _select
+                slots_by_display[display] = slot
+            slot.set_item(display, row["qty"],
+                          selected=(display == state["selected"]))
+            grid.removeWidget(slot)
             grid.addWidget(slot, index // columns, index % columns)
+        for display in list(slots_by_display.keys()):
+            if display not in order:
+                slot = slots_by_display.pop(display)
+                grid.removeWidget(slot)
+                slot.hide()
+                slot.deleteLater()
         has_any = any(int(v) > 0 for v in inventory.values())
         if not rows:
             if not has_any:
@@ -102,18 +132,38 @@ def build_bank_screen(shell, deps: Dict[str, Any]):
             detail_name.setText("Nothing selected")
             detail_qty.setText("")
             detail_rel.setText("")
+            empty_pix = _empty_art_pixmap()
+            if empty_pix is not None:
+                detail_icon.setPixmap(empty_pix)
+                detail_icon.setAccessibleName("Empty bank")
+            else:
+                detail_icon.clear()
+            empty_art.setVisible(True)
+            if empty_pix is not None:
+                empty_art.setPixmap(empty_pix)
+            else:
+                empty_art.clear()
+            empty_art.setAccessibleName("Empty bank")
             clear.setVisible(has_any)
         else:
             empty_hint.setText("")
+            empty_art.setVisible(False)
             clear.setVisible(bool(search.text()) or skill != "all")
-            if state["selected"] not in {r["display"] for r in rows}:
-                state["selected"] = rows[0]["display"]
+            if state["selected"] not in order:
+                state["selected"] = order[0]
             _refresh_detail(rules, inventory)
+        state["dirty"] = False
 
     def _refresh_detail(rules, inventory):
         display = state["selected"]
         rel = bank_skills_for(rules, display)
         detail_name.setText(display)
+        pix = _detail_icon(display)
+        if pix is not None:
+            detail_icon.setPixmap(pix)
+            detail_icon.setAccessibleName(f"{display} icon")
+        else:
+            detail_icon.clear()
         detail_qty.setText(f"Quantity: {int(inventory.get(display, 0)):,}")
         produced = ", ".join(s.title() for s in rel["produced_by"]) or "Unknown source"
         consumed = ", ".join(s.title() for s in rel["consumed_by"]) or "Not used by a recipe"
@@ -128,15 +178,19 @@ def build_bank_screen(shell, deps: Dict[str, Any]):
         skill_filter.setCurrentIndex(0)
         _refresh()
 
+    def _invalidate():
+        state["dirty"] = True
+
     search.textChanged.connect(lambda _t: _refresh())
     skill_filter.currentTextChanged.connect(lambda _t: _refresh())
     clear.clicked.connect(_clear_filters)
 
     root.refresh = _refresh
     root.on_show = _refresh
-    root.invalidate = lambda: None
+    root.invalidate = _invalidate
     root.release = lambda: None
     root.deps = deps
+    root.row_count = lambda: len(slots_by_display)
     _refresh()
     return root
 

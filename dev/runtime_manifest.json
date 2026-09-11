@@ -1,0 +1,57 @@
+{
+  "schema": "ankiscape-runtime-manifest",
+  "version": 1,
+  "note": "Official Anki runtime distributions for the seven matrix targets. URLs and SHA-256 pins must be resolved and recorded (url_verified + sha256) before CI executes; dev/fetch_runtimes.py fails closed on unrecorded pins. Never install a different version silently.",
+  "source": "https://github.com/ankitects/anki/releases",
+  "targets": [
+    {
+      "os": "macos", "anki": "23.10", "qt": "6", "arch": "universal",
+      "kind": "dmg",
+      "url": "https://github.com/ankitects/anki/releases/download/23.10/anki-23.10-mac-universal.dmg",
+      "url_verified": false, "sha256": "",
+      "install_hint": "mount dmg; use Contents/MacOS/Anki"
+    },
+    {
+      "os": "macos", "anki": "26.8.1", "qt": "6", "arch": "universal",
+      "kind": "dmg",
+      "url": "https://github.com/ankitects/anki/releases/download/26.08.1/anki-26.08.1-mac-universal.dmg",
+      "url_verified": false, "sha256": "",
+      "install_hint": "mount dmg; use Contents/MacOS/Anki"
+    },
+    {
+      "os": "windows", "anki": "23.10", "qt": "6", "arch": "x64",
+      "kind": "exe",
+      "url": "https://github.com/ankitects/anki/releases/download/23.10/anki-23.10-windows-qt6.exe",
+      "url_verified": false, "sha256": "",
+      "install_hint": "silent install to a temp dir; run anki.exe"
+    },
+    {
+      "os": "windows", "anki": "26.8.1", "qt": "6", "arch": "x64",
+      "kind": "exe",
+      "url": "https://github.com/ankitects/anki/releases/download/26.08.1/anki-26.08.1-windows-qt6.exe",
+      "url_verified": false, "sha256": "",
+      "install_hint": "silent install to a temp dir; run anki.exe"
+    },
+    {
+      "os": "linux", "anki": "23.10", "qt": "5", "arch": "x86_64",
+      "kind": "tar.zst",
+      "url": "https://github.com/ankitects/anki/releases/download/23.10/anki-23.10-linux-qt5.tar.zst",
+      "url_verified": false, "sha256": "",
+      "install_hint": "extract; run ./anki with Qt5 libs"
+    },
+    {
+      "os": "linux", "anki": "23.10", "qt": "6", "arch": "x86_64",
+      "kind": "tar.zst",
+      "url": "https://github.com/ankitects/anki/releases/download/23.10/anki-23.10-linux-qt6.tar.zst",
+      "url_verified": false, "sha256": "",
+      "install_hint": "extract; run ./anki with Qt6 libs"
+    },
+    {
+      "os": "linux", "anki": "26.8.1", "qt": "6", "arch": "x86_64",
+      "kind": "tar.zst",
+      "url": "https://github.com/ankitects/anki/releases/download/26.08.1/anki-26.08.1-linux-qt6.tar.zst",
+      "url_verified": false, "sha256": "",
+      "install_hint": "extract; run ./anki"
+    }
+  ]
+}

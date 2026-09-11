@@ -18,20 +18,14 @@ FAST_PATH_CHUNK = 2000
 
 def _frontier(journal) -> int:
     try:
-        row = journal._conn.execute(
-            "SELECT value FROM metadata WHERE key='catchup_frontier'").fetchone()
-        return int(row["value"]) if row else 0
+        return int(journal.get_metadata("catchup_frontier", "0") or 0)
     except Exception:
         return 0
 
 
 def _save_frontier(journal, revlog_id: int) -> None:
     try:
-        journal._conn.execute(
-            "INSERT INTO metadata(key, value) VALUES('catchup_frontier', ?)"
-            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(int(revlog_id)),))
-        journal._conn.commit()
+        journal.set_metadata("catchup_frontier", str(int(revlog_id)))
     except Exception:
         pass
 

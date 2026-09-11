@@ -77,6 +77,90 @@ COOKED_FISH_FILES = {f"Cooked {name}": f"cooked_{path}"
 ITEM_FILES = (ORE_FILES | TREE_FILES | BAR_FILES | GEM_FILES | CRAFT_FILES
               | FISH_FILES | COOKED_FISH_FILES)
 
+# Reviewed icon-slot map: every logical slot the UI renders resolves through
+# here. Static slots point at bundled art (original generated icons or audited
+# Wiki art); dynamic slots resolve display/skill art through the existing
+# mappings. Slots never invent unseen files and are never downloaded at
+# runtime. Dynamic slots (documented, resolved by argument):
+#   training.material, training.result, training.gather, unlock.resource,
+#   recap.item, bank.item, achievement.skill
+SLOT_ICONS = {
+    "training.pause": "icon/pause_icon.png",
+    "bank.empty": "icon/bank_icon.png",
+    "achievement.first_catch": "icon/fishing_icon.png",
+    "achievement.first_cook": "icon/cooking_icon.png",
+    "achievement.cooks": "icon/cooking_icon.png",
+    "hiscores.rank": "icon/hiscores_icon.png",
+    "hiscores.account": "icon/settings_icon.png",
+    "hiscores.pending": "icon/pending_icon.png",
+    "hiscores.offline": "icon/offline_icon.png",
+    "support.report": "icon/report_icon.png",
+}
+
+_MANIFEST_REVISION = {"stamp": None, "hash": ""}
+
+
+def manifest_revision() -> str:
+    """Content hash of assets/manifest.json, cached by (mtime, size).
+
+    The icon cache keys include this: an asset audit/replace invalidates
+    every decoded pixmap without any UI event."""
+    import hashlib
+    import json
+
+    path = os.path.join(repo_root(), "assets", "manifest.json")
+    try:
+        stat = os.stat(path)
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        if _MANIFEST_REVISION["stamp"] == stamp:
+            return str(_MANIFEST_REVISION["hash"])
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        digest = hashlib.sha256(raw).hexdigest()[:16]
+        _MANIFEST_REVISION.update({"stamp": stamp, "hash": digest})
+        return digest
+    except OSError:
+        return "unknown"
+
+
+def slot_icon_path(slot: str, *, skill: str = "", display: str = "") -> str:
+    """Resolve one reviewed icon slot to an existing bundled asset.
+
+    Unknown slots and missing files fall back to the single shipped fallback
+    (never a crash, never a runtime download)."""
+    key = str(slot)
+    if key in SLOT_ICONS:
+        rel = SLOT_ICONS[key]
+        return icon_path(rel) if _exists(rel) else resolve_icon(
+            kind="slot", display=key, mapping={})
+    if key == "training.gather" or key == "achievement.skill":
+        return skill_icon_path(skill) if skill else resolve_icon(
+            kind="slot", display=key, mapping={})
+    if key in ("training.material", "training.result", "unlock.resource",
+               "recap.item", "bank.item"):
+        return display_icon(display) if display else resolve_icon(
+            kind="slot", display=key, mapping={})
+    return resolve_icon(kind="slot", display=key, mapping={})
+
+
+def achievement_icon_path(achievement_id: str) -> Optional[str]:
+    """Explicit icon per achievement category/id.
+
+    Skill gates use their skill icon; fishing/cooking achievements use their
+    own art. Unknown ids return None so the UI hides the icon instead of
+    showing an unrelated (cooking) fallback."""
+    aid = str(achievement_id or "")
+    if aid.startswith("skill_"):
+        parts = aid.split("_")
+        if len(parts) == 3 and parts[2] in SKILL_ICONS:
+            return skill_icon_path(parts[2])
+        return None
+    if aid == "first_catch":
+        return slot_icon_path("achievement.first_catch")
+    if aid in ("first_cook", "cooks_100", "cooks_1000"):
+        return slot_icon_path("achievement.cooks")
+    return None
+
 
 def _exists(rel: str) -> bool:
     return os.path.isfile(os.path.join(repo_root(), rel))

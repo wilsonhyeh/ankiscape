@@ -1,0 +1,95 @@
+# Fast PR checks. Contents read-only. Actions pinned by reviewed tag; replace
+# tags with commit SHAs before enabling hosted runs (review requirement).
+name: pr
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pure:
+    name: Pure tests, generated traces, asset/package audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dev dependencies
+        run: pip install -r dev/requirements.lock
+      - name: Python suite
+        run: python3 run_tests.py
+      - name: Generated traces (PR scale)
+        run: python3 -m unittest tests.test_generated_sequences -v
+      - name: Asset audit
+        run: python3 scripts/audit_assets.py --check
+      - name: Package build + archive audit
+        run: |
+          python3 scripts/build_addon.py
+          python3 scripts/audit_assets.py --archive dist/ankiscape-3.0.0.ankiaddon
+      - name: Performance smoke (PR budgets, no sample floor)
+        run: python3 dev/perf_runtime.py --profile nightly --no-gate
+      - name: Evidence contract self-check
+        run: python3 -m unittest tests.test_reliability_evidence -v
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-pure-failure
+          path: artifacts/
+          retention-days: 30
+
+  linux-native:
+    name: Linux backend + one native smoke
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dev dependencies and tooling
+        run: |
+          pip install -r dev/requirements.lock
+          sudo apt-get update
+          sudo apt-get install -y zstd xvfb libfuse2
+      - name: Docker + Supabase CLI
+        run: |
+          docker info
+          npm install -g supabase@2.115.0
+      - name: Local backend suite (reset x2 + pgTAP + live smoke)
+        working-directory: server
+        run: |
+          supabase start
+          python3 ../dev.py test --suite backend
+      - name: Fetch pinned Anki runtime
+        run: |
+          python3 dev/fetch_runtimes.py --download linux/26.8.1 --dest .dev/runtimes --extract
+          echo "ANKI_BIN=$(find .dev/runtimes -type f -name anki | head -n1)" >> "$GITHUB_ENV"
+      - name: Native packaged smoke (Xvfb)
+        run: |
+          xvfb-run -a python3 dev.py test --suite e2e --anki 26.8.1 --qt 6 \
+            --anki-bin "$ANKI_BIN" --journey fresh
+      - name: Record lane evidence
+        if: always()
+        run: |
+          RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+          python3 dev/reliability.py run-lane --stage pr --os linux \
+            --anki 26.8.1 --qt 6 --anki-bin "${ANKI_BIN:-}" \
+            --out "artifacts/reliability/${RUN_ID}/linux-pr" || true
+      - name: Upload PR evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-pr-linux
+          path: artifacts/reliability/
+          retention-days: 30

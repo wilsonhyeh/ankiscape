@@ -46,6 +46,7 @@ OBJECT_NAMES = {
     "achievement_list": "ankiscape-achievement-list",
     "hiscores_list": "ankiscape-hiscores-list",
     "hiscores_status": "ankiscape-hiscores-status",
+    "hiscores_test_toggle": "ankiscape-hiscores-test-toggle",
     "hiscores_skill": "ankiscape-hiscores-skill",
     "hiscores_lookup": "ankiscape-hiscores-lookup",
     "hiscores_refresh": "ankiscape-hiscores-refresh",

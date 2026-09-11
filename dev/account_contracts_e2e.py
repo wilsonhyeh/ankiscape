@@ -252,8 +252,7 @@ def main(argv=None) -> int:
         journals.append(journal_b)
         out_b = _svc(game, journal_b, transport, session, generation=2) \
             .force_sync()
-        count_b = journal_b._conn.execute(
-            "select count(*) from operations").fetchone()[0]
+        count_b = journal_b.operation_count()
         check("second device downloads and merges", out_b.get("ok") is True
               and count_b == 1, f"ok={out_b.get('ok')} ops={count_b}")
 

@@ -226,10 +226,14 @@ def _validated_hiscores_row(row: Any) -> Dict[str, Any]:
 
 
 def _fetch_hiscores_rows(post: PostFn, endpoint: Endpoint, session, *,
-                         skill: str, limit: int) -> List[Dict[str, Any]]:
+                         skill: str, limit: int,
+                         cohort: bool = False) -> List[Dict[str, Any]]:
     """Array-mode Hiscores RPC + per-row validation (shared by Ranks and
-    player lookup). Empty list is a successful empty state."""
-    data = post(endpoint, "/rest/v1/rpc/hiscores",
+    player lookup). Empty list is a successful empty state. `cohort=True`
+    selects the authenticated Test leaderboard RPC; the server authorizes it
+    from the caller's own player row, never from this flag."""
+    rpc = "test_hiscores" if cohort else "hiscores"
+    data = post(endpoint, f"/rest/v1/rpc/{rpc}",
                 {"p_skill": str(skill), "p_limit": int(limit)},
                 access_token=_session_token(session), response_shape="array")
     if not isinstance(data, list):
@@ -237,19 +241,37 @@ def _fetch_hiscores_rows(post: PostFn, endpoint: Endpoint, session, *,
     return [_validated_hiscores_row(row) for row in data]
 
 
+def fetch_self_context(post: PostFn, endpoint: Endpoint, session) -> Optional[Dict[str, Any]]:
+    """Server-reported caller context (username + cohort). None when the
+    session is absent, the server is older, or the request fails: callers
+    treat unknown as the public cohort and never trust a client flag."""
+    if session is None or not _session_token(session):
+        return None
+    try:
+        data = post(endpoint, "/rest/v1/rpc/self_context", {},
+                    access_token=_session_token(session))
+    except NetError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
 def query_hiscores(post: PostFn, endpoint: Endpoint, session, *,
-                   skill: str, limit: int = 50) -> List[Dict[str, Any]]:
+                   skill: str, limit: int = 50,
+                   cohort: bool = False) -> List[Dict[str, Any]]:
     """Hiscores query over real transport. Raises NetError on failure; the
     Qt caller converts to a problem line (never a modal)."""
     from .ui.menu_model import format_hiscores_rows
 
     return format_hiscores_rows(_fetch_hiscores_rows(
-        post, endpoint, session, skill=skill, limit=limit))
+        post, endpoint, session, skill=skill, limit=limit, cohort=cohort))
 
 
 def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
                          username: str, skill: str,
-                         limit: int = 50) -> Dict[str, Any]:
+                         limit: int = 50,
+                         cohort: bool = False) -> Dict[str, Any]:
     """Player lookup: normalize, fetch the public profile, then match the
     player in the selected-skill Hiscores list for a rank.
 
@@ -268,7 +290,8 @@ def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
         return {"ok": False, "not_found": True}
     skill = str(skill or "").lower()
     try:
-        data = post(endpoint, "/rest/v1/rpc/public_profile",
+        rpc = "test_public_profile" if cohort else "public_profile"
+        data = post(endpoint, f"/rest/v1/rpc/{rpc}",
                     {"p_username_norm": norm},
                     access_token=_session_token(session))
     except NetError as exc:
@@ -281,6 +304,13 @@ def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
     if not isinstance(name, str) or not name.strip():
         raise NetError("malformed_response", "public_profile missing username")
     state = data.get("state")
+    if not isinstance(state, dict) and cohort:
+        # Test profile returns the safe allowlist: {username, skills, is_test}.
+        skills = data.get("skills")
+        if not isinstance(skills, dict):
+            raise NetError("malformed_response", "test profile missing skills")
+        state = {"xp": {key: (value or {}).get("xp", 0)
+                        for key, value in skills.items() if isinstance(value, dict)}}
     if not isinstance(state, dict):
         raise NetError("malformed_response", "public_profile missing state")
     xp_table = state.get("xp")
@@ -298,7 +328,8 @@ def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
     rank: Optional[int] = None
     try:
         for row in _fetch_hiscores_rows(post, endpoint, session,
-                                        skill=skill, limit=limit):
+                                        skill=skill, limit=limit,
+                                        cohort=cohort):
             if row["username"].casefold() == name.casefold():
                 rank = row["rank"]
                 break

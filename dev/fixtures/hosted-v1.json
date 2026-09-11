@@ -1,0 +1,70 @@
+{
+  "suite_id": "hosted-v1",
+  "suite_version": 1,
+  "note": "Permanent hosted test cohort for AnkiScape reliability evidence. Names are natural but every identity is labeled as a test account in the test UI. No credentials are stored here: fixture passwords derive from ANKISCAPE_FIXTURE_SECRET kept in approved secret storage.",
+  "display_names": [
+    "WillowMere",
+    "FlintHarbor",
+    "Mosswarden",
+    "RowanVale",
+    "CopperFinch",
+    "AlderTrail",
+    "PebbleFox",
+    "EmberBrook",
+    "BirchRook",
+    "HazelForge",
+    "FernVoyager",
+    "AshenPike",
+    "MapleStrider",
+    "ReedRunner",
+    "OakLantern",
+    "SlateOtter",
+    "QuietAnvil",
+    "BrambleWren",
+    "SilverNettle",
+    "CedarTern",
+    "RiverKestrel",
+    "DawnThistle",
+    "MistBadger",
+    "DuskHeron"
+  ],
+  "trace": {
+    "version": 1,
+    "device_id": "fixture-v1",
+    "max_ops_per_player": 3000,
+    "max_total_ops": 24000,
+    "batch_size": 200,
+    "bounds": {
+      "one_run_at_a_time": true,
+      "max_requests_per_second": 2,
+      "max_concurrent_requests": 2,
+      "request_timeout_s": 30,
+      "max_retries": 3,
+      "abort_on_429_or_5xx_after": 3
+    }
+  },
+  "coverage": [
+    "zero scores",
+    "ties",
+    "mixed skills",
+    "material pauses",
+    "recipe success/failure",
+    "gems",
+    "undo/restore",
+    "deterministic final standings"
+  ],
+  "lanes": {
+    "macos": [
+      "WillowMere", "FlintHarbor", "Mosswarden", "RowanVale",
+      "CopperFinch", "AlderTrail", "PebbleFox", "EmberBrook"
+    ],
+    "windows": [
+      "BirchRook", "HazelForge", "FernVoyager", "AshenPike",
+      "MapleStrider", "ReedRunner", "OakLantern", "SlateOtter"
+    ],
+    "linux": [
+      "QuietAnvil", "BrambleWren", "SilverNettle", "CedarTern",
+      "RiverKestrel", "DawnThistle", "MistBadger", "DuskHeron"
+    ]
+  }
+}

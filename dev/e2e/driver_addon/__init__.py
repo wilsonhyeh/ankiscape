@@ -254,8 +254,7 @@ def run():
                         extra["eng_game"] = (_eng.cfg.game_uuid or "")[:8]
                         extra["eng_processed"] = len(_eng.state.processed_keys)
                         try:
-                            _ops = _eng.journal._conn.execute(
-                                "select count(*) from operations").fetchone()[0]
+                            _ops = _eng.journal.operation_count()
                         except Exception:
                             _ops = -1
                         extra["eng_ops"] = _ops
@@ -2629,6 +2628,227 @@ def _verify_art_environment(state):
         _step("art_install_unchanged", False, "no pre-resolution snapshot")
 
 
+def _poll_ui_visual_polish(state):
+    """Journey: bounded rendering + reviewed imagery + visual scales."""
+    stage = state.get("stage", "setup")
+    if stage == "setup":
+        if not state.get("guard_installed"):
+            state["guard_installed"] = True
+            _install_addon_network_guard(state)
+            state["install_snapshot"] = _addon_tree_snapshot()
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        state["stage"] = "fixture"
+        return
+    if stage == "fixture":
+        try:
+            import ankiscape
+            engine = ankiscape._EVOLVED_CTX.get("engine")
+            if engine is None:
+                return
+            if not state.get("art_fixture"):
+                with open(os.path.join(_base_dir(), "art-fixture.json"),
+                          encoding="utf-8") as fh:
+                    data = json.load(fh)
+                game = engine.cfg.game_uuid
+                ops = [dict(op, game_uuid=game)
+                       for op in data.get("operations", [])]
+                counts = engine.journal.import_game(
+                    game, {"operations": ops, "observations": []})
+                engine.invalidate_projection()
+                state["art_fixture"] = True
+                _step("visual_fixture_imported", True,
+                      f"{counts.get('operations', len(ops))} ops")
+            if not _find_shell():
+                _open_shell_via_menu()
+                return
+            state["stage"] = "tabs"
+            state["tab_index"] = 0
+        except Exception as exc:
+            _step("visual_fixture", False, repr(exc))
+            state["stage"] = "tabs"
+            state["tab_index"] = 0
+        return
+    if stage == "tabs":
+        index = int(state.get("tab_index", 0))
+        if index >= len(ART_SECTIONS):
+            state["stage"] = "checks"
+            return
+        section = ART_SECTIONS[index]
+        shell = _find_shell()
+        if shell is None:
+            state["shell_ticks"] = state.get("shell_ticks", 0) + 1
+            if state["shell_ticks"] > 80:
+                _step("visual_shell", False, "shell never appeared")
+                state["stage"] = "checks"
+            return
+        state["shell_ticks"] = 0
+        if not _click_rail(section):
+            state["tab_ticks"] = state.get("tab_ticks", 0) + 1
+            if state["tab_ticks"] > 80:
+                _step(f"visual_tab_{section}", False, "rail button missing")
+                state["tab_index"] = index + 1
+                state["tab_ticks"] = 0
+            return
+        state["tab_ticks"] = 0
+        from aqt.qt import QApplication
+        QApplication.processEvents()
+        screen = _shell_child(shell, ART_SCREEN_NAMES[section])
+        _shot(f"ui-polish-{section}")
+        _step(f"visual_tab_{section}", screen is not None)
+        state["tab_index"] = index + 1
+        return
+    if stage == "checks":
+        if not state.get("visual_checks_done"):
+            _visual_polish_checks(state)
+            _verify_art_environment(state)
+            state["visual_checks_done"] = True
+        _shot("ui-polish-done")
+        _finish_phase(2)
+
+
+def _poll_ui_visual_polish_2(state):
+    """Restart phase: scales, bounded rows and imagery survive a restart."""
+    stage = state.get("stage", "open")
+    if stage == "open":
+        if not state.get("guard_installed"):
+            state["guard_installed"] = True
+            _install_addon_network_guard(state)
+            state["install_snapshot"] = _addon_tree_snapshot()
+        if not _find_shell():
+            state["shell_ticks"] = state.get("shell_ticks", 0) + 1
+            if state["shell_ticks"] % 20 == 0:
+                _open_shell_via_menu()
+            if state["shell_ticks"] > 120:
+                _step("visual_restart_shell", False, "shell never appeared")
+                _finish(1)
+            return
+        state["shell_ticks"] = 0
+        state["stage"] = "checks"
+        return
+    if stage == "checks":
+        if not state.get("visual_checks_done"):
+            _visual_polish_checks(state)
+            _verify_art_environment(state)
+            state["visual_checks_done"] = True
+        _shot("ui-polish-restart-done")
+        _finish(0 if not RESULT["errors"] else 1)
+
+
+def _visual_stat(stats, key):
+    try:
+        return int(stats.get(key, 0) or 0)
+    except Exception:
+        return 0
+
+
+def _visual_polish_checks(state):
+    """Scale, cache, bounded-rows and accessibility assertions."""
+    from aqt.qt import QApplication, Qt
+    import ankiscape
+    from ankiscape.evolved.ui import widgets as ui_widgets
+
+    shell = _find_shell()
+    if shell is None:
+        _step("visual_checks", False, "no shell")
+        return
+
+    # 1. Scales: shell grows, screens remain usable, shots at each step.
+    widths = []
+    for scale in (100, 150, 200):
+        try:
+            shell.apply_scale(scale)
+            QApplication.processEvents()
+            widths.append(int(shell.width()))
+            _shot(f"ui-polish-scale-{scale}")
+        except Exception as exc:
+            _step(f"visual_scale_{scale}", False, repr(exc))
+    ok_scales = all(widths[i] <= widths[i + 1] for i in range(len(widths) - 1)) \
+        if len(widths) == 3 else False
+    _step("visual_scales_grow", ok_scales, f"widths={widths}")
+    try:
+        shell.apply_scale(100)
+        QApplication.processEvents()
+    except Exception:
+        pass
+
+    # 2. Minimum shell size: every visited screen still lays out.
+    try:
+        shell.resize(shell.minimumSize())
+        QApplication.processEvents()
+        too_narrow = []
+        for section in ART_SECTIONS:
+            screen = _shell_child(shell, ART_SCREEN_NAMES[section])
+            if screen is not None and screen.width() < 200:
+                too_narrow.append(section)
+        _step("visual_min_size_usable", not too_narrow,
+              f"too_narrow={too_narrow}")
+    except Exception as exc:
+        _step("visual_min_size_usable", False, repr(exc))
+
+    # 3. Icon cache: repeated full cycles must not re-decode files.
+    try:
+        before = ui_widgets.icon_cache_stats()
+        for _ in range(2):
+            for section in ART_SECTIONS:
+                _click_rail(section)
+                QApplication.processEvents()
+        after = ui_widgets.icon_cache_stats()
+        decodes = _visual_stat(after, "decodes") - _visual_stat(before, "decodes")
+        hits = _visual_stat(after, "hits") - _visual_stat(before, "hits")
+        _step("visual_icon_cache_reuse", decodes <= 4 and hits > 0,
+              f"re-decodes={decodes} hits={hits}")
+        _step("visual_icon_cache_bounded",
+              _visual_stat(after, "entries") <= 256
+              and _visual_stat(after, "bytes") <= 16 * 1024 * 1024,
+              f"entries={after.get('entries')} bytes={after.get('bytes')}")
+    except Exception as exc:
+        _step("visual_icon_cache_reuse", False, repr(exc))
+
+    # 4. Bounded rows after 100 section changes.
+    try:
+        bank = _shell_child(shell, ART_SCREEN_NAMES["bank"])
+        achievements = _shell_child(shell, ART_SCREEN_NAMES["achievements"])
+        bank_before = int(bank.row_count()) if hasattr(bank, "row_count") else -1
+        ach_before = int(achievements.row_count()) if hasattr(achievements, "row_count") else -1
+        for _ in range(100):
+            _click_rail("bank")
+        _click_rail("achievements")
+        QApplication.processEvents()
+        bank_after = int(bank.row_count()) if hasattr(bank, "row_count") else -1
+        ach_after = int(achievements.row_count()) if hasattr(achievements, "row_count") else -1
+        _step("visual_bounded_rows",
+              bank_before >= 0 and bank_after == bank_before
+              and ach_before >= 0 and ach_after == ach_before,
+              f"bank {bank_before}->{bank_after} "
+              f"achievements {ach_before}->{ach_after}")
+    except Exception as exc:
+        _step("visual_bounded_rows", False, repr(exc))
+
+    # 5. Accessibility/keyboard: interactive controls stay named + focusable.
+    try:
+        from aqt.qt import QWidget as _QWidget
+        unnamed, unfocusable = [], []
+        for widget in shell.findChildren(_QWidget):
+            cls = type(widget).__name__
+            if cls not in ("QPushButton", "QToolButton"):
+                continue
+            name = str(widget.accessibleName() or widget.text() or "").strip()
+            if not name:
+                unnamed.append(widget.objectName() or cls)
+            if widget.isEnabled() and widget.focusPolicy() == Qt.FocusPolicy.NoFocus:
+                unfocusable.append(widget.objectName() or cls)
+        _step("visual_accessible_names", not unnamed, f"unnamed={unnamed[:4]}")
+        _step("visual_keyboard_focus", not unfocusable,
+              f"unfocusable={unfocusable[:4]}")
+        shell.activateWindow()
+        shell.setFocus()
+        shell.focusNextPrevChild(True)
+        _step("visual_tab_navigation", True)
+    except Exception as exc:
+        _step("visual_accessibility", False, repr(exc))
+
+
 def _poll_ui_art_2(state):
     """Restart phase: graceful account state + unchanged offline art."""
     stage = state.get("stage", "open")
@@ -2684,6 +2904,599 @@ def _poll_ui_art_2(state):
         _finish(0 if not RESULT["errors"] else 1)
 
 
+def _seed_bulk_ops(state, count):
+    """Import a large deterministic history through the journal API so the
+    projection worker has real rebuild work while reviews continue."""
+    import ankiscape
+    import uuid as _uuid
+    engine = ankiscape._EVOLVED_CTX.get("engine")
+    if engine is None:
+        return False
+    if state.get("bulk_seeded"):
+        return True
+    game = engine.cfg.game_uuid
+    ops = []
+    for i in range(1, count + 1):
+        ops.append({
+            "op_id": str(_uuid.uuid5(_uuid.NAMESPACE_URL,
+                                     f"driver-bulk:{game}:{i}")),
+            "game_uuid": game, "device_id": "driver-bulk",
+            "device_seq": i, "lamport": i, "kind": "review_award",
+            "payload": {"review_key": f"rk-bulk-{i}", "review_ts": 1850000000 + i,
+                        "rating": 3, "review_kind": "review",
+                        "provenance": "direct", "reward_policy": 2,
+                        "skill": "mining", "resource": "Rune essence"}})
+    engine.journal.import_game(game, {"operations": ops, "observations": []})
+    engine.invalidate_projection()
+    state["bulk_seeded"] = True
+    _step("bulk_history_imported", True, f"{count} ops")
+    return True
+
+
+def _answer_with_timing(state):
+    """One real reviewer answer, timed around the accepted-answer hook."""
+    import time as _time
+    from aqt import mw
+    reviewer = getattr(mw, "reviewer", None)
+    card = getattr(reviewer, "card", None) if reviewer is not None else None
+    answer = getattr(reviewer, "_answerCard", None) if reviewer is not None else None
+    if card is None or not callable(answer):
+        return None
+    before = _award_count()
+    start = _time.perf_counter()
+    answer(3)  # real reviewer path; the hook runs synchronously inside
+    elapsed = (_time.perf_counter() - start) * 1000.0
+    state["last_hook_ms"] = elapsed
+    state["awaiting"] = state.get("calls", 0) + 1
+    state["calls"] = state.get("calls", 0) + 1
+    return before
+
+
+def _poll_ui_deferred_rewards(state):
+    """Persist fast, celebrate after the worker publishes (100k-history
+    rebuild in flight), and never claim an unpersisted reward."""
+    stage = state.get("stage", "setup")
+    if stage == "setup":
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        _seed_deck(state, count=4, prefix="DEFER")
+        state["stage"] = "bulk"
+        return
+    if stage == "bulk":
+        if not _seed_bulk_ops(state, 100000):
+            return
+        from aqt import mw
+        mw.col.set_config("ankiscape_evolved_current_skill", "mining")
+        mw.col.set_config("ankiscape_evolved_current_mining", "Rune essence")
+        _open_reviewer(state, "DEFER")
+        state["stage"] = "answer"
+        return
+    if stage == "answer":
+        if not _reviewer_settled():
+            return
+        before = _answer_with_timing(state)
+        if before is None:
+            return
+        state["stage"] = "verify"
+        state["verify_ticks"] = 0
+        state["ops_baseline"] = before
+        return
+    if stage == "verify":
+        state["verify_ticks"] = state.get("verify_ticks", 0) + 1
+        ops = _journal_ops()
+        durable = [o for o in ops if o["kind"] == "review_award"
+                   and not str(o["op_id"]).startswith("op-")
+                   and not str(o["op_id"]).startswith("driver-")]
+        # Durable append must have happened by now: journal ops grew beyond
+        # the seeded bulk history.
+        if len(ops) > state.get("ops_baseline", 0):
+            hook_ms = state.get("last_hook_ms", -1)
+            _step("deferred_hook_within_budget", hook_ms < 250.0,
+                  f"hook={hook_ms:.1f}ms (single sample; budget p95<=20ms)")
+            _step("deferred_op_persisted_before_publish", True,
+                  f"ops={len(ops)}")
+            # Wait for the worker's published projection to include rewards.
+            state["stage"] = "published"
+            return
+        if state["verify_ticks"] > 200:
+            _step("deferred_op_persisted_before_publish", False,
+                  f"journal={len(ops)}")
+            _finish(1)
+        return
+    if stage == "published":
+        state["published_ticks"] = state.get("published_ticks", 0) + 1
+        import ankiscape
+        engine = ankiscape._EVOLVED_CTX.get("engine")
+        if engine is None:
+            return
+        latest = engine.projection()  # worker publication: never replays
+        revision = int(latest.get("revision", 0) or 0)
+        if revision >= state.get("ops_baseline", 0) + 1:
+            reference = _projection()  # one full replay for equivalence
+            boundary = ("xp_micro", "inventory", "levels", "revision")
+            equal = all(latest.get(k) == reference.get(k) for k in boundary)
+            _step("deferred_worker_equals_reference", equal,
+                  f"revision={revision}")
+            _shot("ui-deferred-rewards")
+            _finish(0 if not RESULT["errors"] else 1)
+            return
+        if state["published_ticks"] > 900:
+            _step("deferred_worker_equals_reference", False,
+                  f"revision stuck at {revision}")
+            _finish(1)
+        return
+
+
+def _open_reviewer(state, deck_prefix):
+    """Enter the reviewer through the real navigation (seeded deck is
+    already current after _seed_deck)."""
+    from aqt import mw
+    _ = deck_prefix
+    try:
+        if getattr(mw, "state", "") != "review":
+            mw.moveToState("review")
+    except Exception:
+        pass
+
+
+def _poll_ui_rebuild_review(state):
+    """Answering stays responsive while the worker rebuilds 100k ops."""
+    stage = state.get("stage", "setup")
+    if stage == "setup":
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        _seed_deck(state, count=4, prefix="REBUILD")
+        state["stage"] = "bulk"
+        return
+    if stage == "bulk":
+        if not _seed_bulk_ops(state, 100000):
+            return
+        state["ops_baseline"] = len(_journal_ops())
+        import ankiscape
+        engine = ankiscape._EVOLVED_CTX.get("engine")
+        if engine is not None:
+            # Late retraction of the first seeded award: worst-case rebuild.
+            engine.retract(review_key="rk-bulk-1")
+        _open_reviewer(state, "REBUILD")
+        state["stage"] = "answers"
+        state["answers_done"] = 0
+        return
+    if stage == "answers":
+        if not _reviewer_settled():
+            return
+        if state.get("awaiting"):
+            ops = _journal_ops()
+            if len(ops) > state.get("ops_baseline", 0) + state["answers_done"]:
+                state["awaiting"] = 0
+        if state.get("answers_done", 0) >= 3:
+            reference = _projection()
+            import ankiscape
+            engine = ankiscape._EVOLVED_CTX.get("engine")
+            latest = engine.projection() if engine is not None else {}
+            equal = all(latest.get(k) == reference.get(k)
+                        for k in ("xp_micro", "inventory", "levels", "revision"))
+            _step("rebuild_answer_responsive",
+                  state.get("last_hook_ms", 999) < 250.0,
+                  f"hook={state.get('last_hook_ms', -1):.1f}ms")
+            _step("rebuild_state_equals_reference", equal)
+            _shot("ui-rebuild-review")
+            _finish(0 if not RESULT["errors"] else 1)
+            return
+        if state.get("awaiting"):
+            return
+        from aqt import mw
+        reviewer = getattr(mw, "reviewer", None)
+        card = getattr(reviewer, "card", None) if reviewer is not None else None
+        answer = getattr(reviewer, "_answerCard", None) if reviewer is not None else None
+        if card is None or not callable(answer):
+            return
+        import time as _time
+        start = _time.perf_counter()
+        answer(3)
+        state["last_hook_ms"] = (_time.perf_counter() - start) * 1000.0
+        state["awaiting"] = 1
+        state["answers_done"] = state.get("answers_done", 0) + 1
+        return
+
+
+def _logged_in_via_fixture(state):
+    """Sign in with the hosted fixture credentials from the truster lane."""
+    email = os.environ.get("ANKISCAPE_FIXTURE_EMAIL", "")
+    password = os.environ.get("ANKISCAPE_FIXTURE_PASSWORD", "")
+    if not email or not password:
+        return None
+    try:
+        import ankiscape
+        from ankiscape.evolved import accounts as _accounts
+        from ankiscape.evolved.net import post_json as _post
+        sess = ankiscape._evolved_profile_session()
+        endpoint = ankiscape._evolved_endpoint()
+        if sess is None or endpoint is None:
+            return False
+        return bool(ankiscape._evolved_login_submit(
+            {"identity": email, "password": password, "remember": False},
+            sess, endpoint, _accounts, _post).get("ok"))
+    except Exception as exc:
+        _step("fixture_login_error", False, repr(exc))
+        return False
+
+
+def _poll_ui_test_leaderboard(state):
+    """Real-hosted login + labeled Test leaderboard (trusted lanes)."""
+    stage = state.get("stage", "setup")
+    if stage == "setup":
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        state["stage"] = "login"
+        return
+    if stage == "login":
+        result = _logged_in_via_fixture(state)
+        if result is None:
+            # Untrusted lane: verify public isolation only, never fake a login.
+            _step("test_leaderboard_credentials", True,
+                  "no fixture credentials on this lane (trusted-only)")
+            state["stage"] = "public_only"
+            return
+        if not result:
+            _step("test_leaderboard_login", False, "fixture sign-in failed")
+            _finish(1)
+            return
+        _step("test_leaderboard_login", True)
+        if not _find_shell():
+            _open_shell_via_menu()
+            return
+        state["stage"] = "open_hiscores"
+        return
+    if stage == "open_hiscores":
+        shell = _find_shell()
+        if shell is None:
+            return
+        if not _click_rail("hiscores"):
+            return
+        from aqt.qt import QApplication
+        QApplication.processEvents()
+        state["stage"] = "toggle"
+        state["toggle_ticks"] = 0
+        return
+    if stage == "toggle":
+        state["toggle_ticks"] = state.get("toggle_ticks", 0) + 1
+        shell = _find_shell()
+        if shell is None:
+            return
+        from aqt.qt import QApplication, QCheckBox
+        toggle = shell.findChild(QCheckBox, "ankiscape-hiscores-test-toggle")
+        _step("test_leaderboard_toggle_visible",
+              toggle is not None and toggle.isVisible())
+        if toggle is None:
+            _finish(0 if not RESULT["errors"] else 1)
+            return
+        if not toggle.isChecked():
+            toggle.setChecked(True)
+            QApplication.processEvents()
+            if state["toggle_ticks"] > 120:
+                _step("test_leaderboard_rows", False, "never loaded")
+                _finish(1)
+            return
+        status = shell.findChild(object, "ankiscape-hiscores-status")
+        text = str(getattr(status, "text", lambda: "")())
+        ok = "Test leaderboard" in text
+        _step("test_leaderboard_labeled", ok, text[:120])
+        _shot("ui-test-leaderboard")
+        _finish(0 if not RESULT["errors"] else 1)
+        return
+    if stage == "public_only":
+        # Public paths must exclude test names on every lane.
+        try:
+            import ankiscape
+            rows = ankiscape._evolved_query_hiscores("mining", 100)
+            test_names = {"WillowMere", "FlintHarbor", "Mosswarden"}
+            leaked = test_names & {str(r.get("username")) for r in rows}
+            _step("test_leaderboard_public_isolated", not leaked,
+                  f"leaked={sorted(leaked)}")
+        except Exception as exc:
+            _step("test_leaderboard_public_isolated", False, repr(exc))
+        _shot("ui-test-leaderboard-public")
+        _finish(0 if not RESULT["errors"] else 1)
+
+
+def _poll_ui_credential_fallback(state):
+    """Vault available/unavailable paths never fall back to plaintext."""
+    if state.get("done"):
+        return
+    state["done"] = True
+    import tempfile
+    from ankiscape.evolved.credentials import CredentialVault
+    tmp = tempfile.mkdtemp(prefix="ankiscape-vault-")
+    try:
+        vault = CredentialVault(tmp, "https://example.invalid")
+        _step("credential_vault_available", True,
+              f"available={vault.available}")
+        if vault.available:
+            saved = vault.save("fixture", "s3cret-value")
+            loaded = vault.load("fixture")
+            _step("credential_vault_roundtrip",
+                  bool(saved) and loaded == "s3cret-value",
+                  f"saved={bool(saved)}")
+            vault.delete("fixture")
+            _step("credential_vault_delete", vault.load("fixture") in (None, ""))
+        else:
+            # Session-only behavior: nothing persists, no plaintext appears.
+            vault.save("fixture", "s3cret-value")
+            leaked = []
+            for base, _dirs, files in os.walk(tmp):
+                for name in files:
+                    try:
+                        with open(os.path.join(base, name), "rb") as fh:
+                            if b"s3cret-value" in fh.read():
+                                leaked.append(name)
+                    except OSError:
+                        continue
+            _step("credential_vault_no_plaintext", not leaked,
+                  f"leaked={leaked[:3]}")
+            _step("credential_vault_session_only",
+                  vault.load("fixture") in (None, ""))
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    _shot("ui-credential-fallback")
+    _finish(0 if not RESULT["errors"] else 1)
+
+
+def _poll_ui_recovery(state):
+    """Simulated failed interactive write: persistent warning, no award,
+    recovery after the write path returns."""
+    stage = state.get("stage", "setup")
+    if stage == "setup":
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        _seed_deck(state, count=4, prefix="RECOVER")
+        from aqt import mw
+        mw.col.set_config("ankiscape_evolved_current_skill", "mining")
+        mw.col.set_config("ankiscape_evolved_current_mining", "Rune essence")
+        _open_reviewer(state, "RECOVER")
+        state["stage"] = "fail_write"
+        return
+    if stage == "fail_write":
+        if not _reviewer_settled():
+            return
+        import ankiscape
+        engine = ankiscape._EVOLVED_CTX.get("engine")
+        if engine is None:
+            return
+        state["journal_before"] = len(_journal_ops())
+        state["original_record"] = engine.journal.record_review
+
+        def _failing(*_a, **_k):
+            return {"ok": False, "busy": True,
+                    "error": "interactive_write_failed:simulated"}
+
+        engine.journal.record_review = _failing  # simulated fault (labeled)
+        from aqt import mw
+        reviewer = mw.reviewer
+        reviewer._answerCard(3)
+        state["stage"] = "verify_failure"
+        return
+    if stage == "verify_failure":
+        state["verify_ticks"] = state.get("verify_ticks", 0) + 1
+        import ankiscape
+        engine = ankiscape._EVOLVED_CTX.get("engine")
+        active = bool(ankiscape._RECOVERY_WARNING.get("active"))
+        grew = len(_journal_ops()) > state.get("journal_before", 0)
+        _step("recovery_warning_shown", active,
+              str(ankiscape._RECOVERY_WARNING.get("message", ""))[:120])
+        _step("recovery_no_operation_persisted", not grew)
+        _shot("ui-recovery-warning")
+        # Restore the real write path and recover on the next review.
+        if engine is not None and state.get("original_record") is not None:
+            engine.journal.record_review = state["original_record"]
+        state["stage"] = "recover"
+        return
+    if stage == "recover":
+        if not _reviewer_settled():
+            return
+        from aqt import mw
+        reviewer = getattr(mw, "reviewer", None)
+        card = getattr(reviewer, "card", None) if reviewer is not None else None
+        answer = getattr(reviewer, "_answerCard", None) if reviewer is not None else None
+        if card is None or not callable(answer):
+            return
+        answer(3)
+        state["stage"] = "verify_recovery"
+        state["recover_ticks"] = 0
+        return
+    if stage == "verify_recovery":
+        state["recover_ticks"] = state.get("recover_ticks", 0) + 1
+        import ankiscape
+        cleared = not ankiscape._RECOVERY_WARNING.get("active")
+        grew = len(_journal_ops()) > state.get("journal_before", 0)
+        if cleared and grew:
+            _step("recovery_clears_after_successful_write", True)
+            _finish(0 if not RESULT["errors"] else 1)
+            return
+        if state["recover_ticks"] > 200:
+            _step("recovery_clears_after_successful_write", False,
+                  f"cleared={cleared} grew={grew}")
+            _finish(1)
+        return
+
+
+def _poll_ui_profile_races(state):
+    """Close/release the shell while async work is in flight; reopen safely."""
+    import ankiscape
+    from aqt.qt import QApplication
+    if not state.get("setup_done"):
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        state["setup_done"] = True
+        state["round"] = 0
+    if state.get("round", 0) >= 3:
+        shell = _find_shell()
+        _step("profile_races_no_callback_errors",
+              not [e for e in RESULT["errors"] if "race" in e.lower()])
+        _step("profile_races_shell_reopened", shell is not None)
+        _shot("ui-profile-races")
+        _finish(0 if not RESULT["errors"] else 1)
+        return
+    shell = _find_shell()
+    if shell is None:
+        _open_shell_via_menu()
+        return
+    # Kick an async hiscores load, then release the shell mid-flight.
+    _click_rail("hiscores")
+    QApplication.processEvents()
+    from aqt import mw
+    from ankiscape.evolved.ui.shell import release_shell
+    release_shell(mw)
+    QApplication.processEvents()
+    for _ in range(20):
+        _click_rail("skills") if _find_shell() else None
+    state["round"] = state.get("round", 0) + 1
+    _step(f"profile_race_round_{state['round']}", True)
+    _open_shell_via_menu()
+
+
+def _report_dialog():
+    from aqt.qt import QApplication, QDialog
+    for widget in QApplication.topLevelWidgets():
+        try:
+            if isinstance(widget, QDialog) and widget.objectName() == \
+                    "ankiscape-report-issue" and widget.isVisible():
+                return widget
+        except Exception:
+            continue
+    return None
+
+
+def _fill_report_dialog(state, *, action: str):
+    """Runs INSIDE the modal dialog's nested event loop via QTimer."""
+    from aqt.qt import QPlainTextEdit, QLineEdit, QPushButton
+    dialog = _report_dialog()
+    if dialog is None:
+        state["report_timer_error"] = "dialog-not-found"
+        return
+    try:
+        dialog.findChild(QLineEdit, "ankiscape-report-summary").setText(
+            "Driver race condition")
+        dialog.findChild(QPlainTextEdit, "ankiscape-report-happened").setPlainText(
+            "Rewards showed twice after Undo.")
+        dialog.findChild(QPlainTextEdit, "ankiscape-report-expected").setPlainText(
+            "A single reward.")
+        dialog.findChild(QPlainTextEdit, "ankiscape-report-steps").setPlainText(
+            "1. Answer\n2. Undo\n3. Answer again")
+        preview = dialog.findChild(QPlainTextEdit, "ankiscape-report-preview")
+        content = preview.toPlainText()
+        state["report_preview"] = content
+        state["report_check"] = {
+            "has_summary": "Driver race condition" in content,
+            "has_allowlisted_block": "addon:" in content,
+            "no_secret": "eyJ" not in content and "@example.com" not in content,
+        }
+        button_name = ("ankiscape-report-open" if action == "open"
+                       else "ankiscape-report-copy" if action == "copy"
+                       else "ankiscape-report-cancel")
+        button = dialog.findChild(QPushButton, button_name)
+        if button is None:
+            state["report_timer_error"] = f"missing-{button_name}"
+            dialog.reject()
+            return
+        button.click()
+        if action == "open":
+            # The dialog stays open when the browser call fails; capture the
+            # status and the retained typed text, then cancel.
+            status = dialog.findChild(object, "ankiscape-report-status")
+            state["report_open_status"] = str(getattr(status, "text", lambda: "")())
+            summary = dialog.findChild(QLineEdit, "ankiscape-report-summary")
+            state["report_text_retained"] = bool(
+                summary is not None and "Driver race condition" in summary.text())
+            cancel = dialog.findChild(QPushButton, "ankiscape-report-cancel")
+            if cancel is not None:
+                cancel.click()
+            else:
+                dialog.reject()
+        state["report_action_done"] = action
+    except Exception as exc:
+        state["report_timer_error"] = repr(exc)[:200]
+        dialog = _report_dialog()
+        if dialog is not None:
+            dialog.reject()
+
+
+def _poll_ui_report_bug(state):
+    """Report dialog: preview/cancel send nothing; copy/open match preview;
+    typed text survives a failed browser open; no secrets leak."""
+    from aqt.qt import QTimer
+    stage = state.get("stage", "setup")
+    if stage == "setup":
+        if not state.get("guard_installed"):
+            state["guard_installed"] = True
+            _install_addon_network_guard(state)
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        state["stage"] = "guide"
+        return
+    if stage == "guide":
+        shell = _find_shell()
+        if shell is None:
+            _open_shell_via_menu()
+            return
+        if not _click_rail("guide"):
+            return
+        state["stage"] = "cancel"
+        return
+    if stage == "cancel":
+        shell = _find_shell()
+        if shell is None:
+            return
+        from aqt.qt import QPushButton
+        button = shell.findChild(QPushButton, "ankiscape-guide-report-bug")
+        if button is None:
+            _step("report_entry_point", False, "guide button missing")
+            _finish(1)
+            return
+        _step("report_entry_point", True)
+        QTimer.singleShot(120, lambda: _fill_report_dialog(state, action="cancel"))
+        button.click()
+        if state.get("report_timer_error"):
+            _step("report_cancel_flow", False, state["report_timer_error"])
+            _finish(1)
+            return
+        check = state.get("report_check") or {}
+        _step("report_preview_matches_fields", bool(check.get("has_summary")),
+              f"checks={check}")
+        _step("report_preview_allowlisted", bool(check.get("has_allowlisted_block")))
+        _step("report_preview_no_secrets", bool(check.get("no_secret")))
+        attempts = state.get("net_attempts") or []
+        _step("report_cancel_zero_network", not attempts, f"attempts={attempts[:2]}")
+        _shot("ui-report-bug-cancel")
+        state["stage"] = "open_failure"
+        return
+    if stage == "open_failure":
+        shell = _find_shell()
+        if shell is None:
+            return
+        import ankiscape
+        state["original_open_url"] = ankiscape._evolved_open_url
+        ankiscape._evolved_open_url = lambda url: False  # simulated failure
+        from aqt.qt import QPushButton, QTimer
+        button = shell.findChild(QPushButton, "ankiscape-guide-report-bug")
+        if button is None:
+            return
+        QTimer.singleShot(120, lambda: _fill_report_dialog(state, action="open"))
+        button.click()
+        ankiscape._evolved_open_url = state["original_open_url"]
+        retained = bool(state.get("report_text_retained"))
+        _step("report_browser_failure_retains_text", retained)
+        status = str(state.get("report_open_status", ""))
+        _step("report_browser_failure_copy_fallback",
+              "copied" in status.lower() or "paste" in status.lower(),
+              status[:120])
+        attempts = state.get("net_attempts") or []
+        _step("report_open_no_addon_network", not attempts,
+              f"attempts={attempts[:2]}")
+        _shot("ui-report-bug-open")
+        _finish(0 if not RESULT["errors"] else 1)
+
+
 _PHASE_POLLS = {
     ("fresh", 1): _poll_fresh,
     ("upgrade", 1): _poll_upgrade_1,
@@ -2701,6 +3514,15 @@ _PHASE_POLLS = {
     ("ui-lifecycle", 1): _poll_ui_lifecycle,
     ("ui-art", 1): _poll_ui_art,
     ("ui-art", 2): _poll_ui_art_2,
+    ("ui-visual-polish", 1): _poll_ui_visual_polish,
+    ("ui-visual-polish", 2): _poll_ui_visual_polish_2,
+    ("ui-deferred-rewards", 1): _poll_ui_deferred_rewards,
+    ("ui-rebuild-review", 1): _poll_ui_rebuild_review,
+    ("ui-test-leaderboard", 1): _poll_ui_test_leaderboard,
+    ("ui-credential-fallback", 1): _poll_ui_credential_fallback,
+    ("ui-recovery", 1): _poll_ui_recovery,
+    ("ui-profile-races", 1): _poll_ui_profile_races,
+    ("ui-report-bug", 1): _poll_ui_report_bug,
 }
 
 

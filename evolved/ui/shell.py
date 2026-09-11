@@ -160,8 +160,11 @@ def status_text(status: Optional[Dict[str, Any]]) -> str:
     """
     if not status:
         return "Local progress · not signed in"
+    if status.get("recovery"):
+        return "Game recovery · a review wasn't saved — keep reviewing"
     if not status.get("logged_in"):
-        return "Local progress · not signed in"
+        text = "Local progress · not signed in"
+        return f"{text} · updating" if status.get("updating") else text
     last_error = str(status.get("last_error") or "")
     pending = int(status.get("pending", 0) or 0)
     suffix = _pending_suffix(pending)
@@ -181,8 +184,10 @@ def status_text(status: Optional[Dict[str, Any]]) -> str:
     if pending:
         return f"Signed in · {pending} review{'s' if pending != 1 else ''} pending"
     if status.get("last_success"):
-        return "Signed in · all progress synced"
-    return "Signed in · never synced yet"
+        text = "Signed in · all progress synced"
+    else:
+        text = "Signed in · never synced yet"
+    return f"{text} · updating" if status.get("updating") else text
 
 
 def sanitize_detail(text: Any, limit: int = 240) -> str:
@@ -318,6 +323,11 @@ def _shell_class():
             self._recap_label = body_label("", wrap=True)
             self._recap_label.setObjectName("ankiscape-recap")
             layout.addWidget(self._recap_label, 1)
+            report = QPushButton("Report a bug…")
+            report.setObjectName("ankiscape-recap-report-bug")
+            report.setToolTip("Open a prefilled GitHub issue you review and send")
+            report.clicked.connect(lambda: self.call("on_report_issue"))
+            layout.addWidget(report)
             dismiss = QPushButton("Dismiss")
             dismiss.setObjectName("ankiscape-recap-dismiss")
             dismiss.clicked.connect(lambda: banner.setVisible(False))
@@ -351,8 +361,17 @@ def _shell_class():
             _ = QSizePolicy
 
         def apply_scale(self, scale=None):
+            previous = self._scale
             if scale is not None:
                 self._scale = clamp_scale(scale)
+            if self._scale != previous:
+                # Theme/scale change: decoded art is size/DPI-keyed, but clear
+                # explicitly so no stale bitmap can survive a theme switch.
+                try:
+                    from .widgets import clear_icon_cache
+                    clear_icon_cache()
+                except Exception:
+                    pass
             apply_theme(self, self._scale)
             self._apply_geometry()
             self._rail.setFixedWidth(theme.scaled(theme.RAIL_WIDTH, self._scale))
@@ -471,7 +490,7 @@ def _shell_class():
                     pass
             except Exception:
                 pass
-            self._publish_recap()
+            self._publish_recap(status)
             screen = self._screens.get(self._current)
             if screen is not None:
                 self._refresh_screen(screen)
@@ -484,7 +503,14 @@ def _shell_class():
             self._recap_summary = None
             self._publish_recap()
 
-        def _publish_recap(self):
+        def _publish_recap(self, status=None):
+            if status and status.get("recovery"):
+                self._recap_label.setText(
+                    "A review wasn't saved locally. Your cards are safe — keep "
+                    "reviewing; the game reconciles from Anki's history. "
+                    "Report a bug if this repeats.")
+                self._recap.setVisible(True)
+                return
             summary = self._recap_summary
             if summary is None:
                 try:

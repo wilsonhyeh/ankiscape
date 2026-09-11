@@ -97,6 +97,17 @@ def _op(game_uuid, device_id, seq, lamport, review_key):
             "kind": "review_award", "payload": {"review_key": review_key}}
 
 
+def _registry_owned_user_ids() -> set:
+    """User ids held by the private fixture registry (never disposable)."""
+    try:
+        status, rows = _admin("GET", "/rest/v1/fixture_registry?select=user_id")
+        if status == 200 and isinstance(rows, list):
+            return {str(row.get("user_id")) for row in rows if row.get("user_id")}
+    except Exception:
+        pass
+    return set()
+
+
 def main():
     for var in ("ANKISCAPE_PROD_URL", "ANKISCAPE_PROD_ANON_KEY",
                 "SUPABASE_SERVICE_ROLE_KEY"):
@@ -111,6 +122,15 @@ def main():
     journals = []
 
     def cleanup():
+        # Registry-owned permanent fixtures are never deletable by disposable
+        # smoke cleanup: refuse and report instead of taking over or erasing
+        # the hosted test cohort.
+        protected = _registry_owned_user_ids()
+        blocked = [uid for uid in created_users if uid in protected]
+        if blocked:
+            print("prod_e2e: refusing to delete registry-owned fixture "
+                  f"accounts: {blocked}")
+            created_users[:] = [uid for uid in created_users if uid not in protected]
         for game in games:
             _admin("DELETE", f"/rest/v1/game_operations?game_uuid=eq.{game}")
             _admin("DELETE", f"/rest/v1/game_state?game_uuid=eq.{game}")
@@ -203,8 +223,7 @@ def main():
                             get_user_id=lambda: mem_a.user_id)
         out = svc_b.maybe_sync(manual=True)
         check("prod download+merge ok", out.get("ok") is True, str(out)[:200])
-        ids_b = sorted(r[0] for r in
-                       journal_b._conn.execute("SELECT op_id FROM operations"))
+        ids_b = sorted(journal_b.operation_ids())
         check("prod second device converged",
               ids_b == sorted([op_a1["op_id"], op_a2["op_id"]]),
               str(ids_b)[:150])

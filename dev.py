@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import hashlib
 import json
 import os
 import shutil
@@ -40,7 +39,7 @@ ARTIFACTS = os.path.join(ROOT, "artifacts", "verification")
 SCENARIOS = ("fresh", "midgame", "endgame", "classic-upgrade")
 # Production rehearsals: shared isolated base/profile, packaged prod artifact,
 # live backend. Wiped by user-new/user-upgrade; user-resume keeps state.
-USER_SCENARIOS = ("user-new", "user-upgrade", "user-resume")
+USER_SCENARIOS = ("user-new", "user-upgrade", "user-resume", "user-test")
 USER_BASE = os.path.join(ANKI_BASE, "user")
 USER_PROFILE = "dev-user"
 
@@ -232,6 +231,32 @@ def _install_addon(addons_dir: str, *, symlink: bool, prebuilt: bool = False) ->
     return f"zip {record['archive']} ({record['artifact_sha256'][:12]}...)"
 
 
+def _resolve_runtime(anki: str, anki_bin: str = ""):
+    """Resolve (app, binary, version) through dev/runtime_adapter.py, keeping
+    the macOS Info.plist path and honoring an explicit --anki-bin."""
+    import importlib.util as _ilu
+
+    spec = _ilu.spec_from_file_location(
+        "ankiscape_runtime_adapter", os.path.join(ROOT, "dev", "runtime_adapter.py"))
+    adapter = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(adapter)
+    if anki_bin:
+        info = adapter.resolve_anki(anki, anki_bin)
+        if info is None:
+            return "", "", "?"
+        ok, detail = adapter.verify_runtime(info, anki)
+        if not ok:
+            print(f"dev: runtime version check failed: {detail}", file=sys.stderr)
+            return info.app, info.binary, f"unverified:{info.version}"
+        return info.app or "", info.binary, info.version
+    if adapter.host_os() == "macos":
+        return _pick_app(anki)
+    info = adapter.resolve_anki(anki)
+    if info is None:
+        return "", "", "?"
+    return info.app or "", info.binary, info.version
+
+
 def cmd_launch(args) -> int:
     scenario = args.scenario
     if scenario not in SCENARIOS + USER_SCENARIOS:
@@ -239,10 +264,12 @@ def cmd_launch(args) -> int:
                      f"choose from {SCENARIOS + USER_SCENARIOS}")
     if _refuse_running_anki(f"launch --scenario {scenario}"):
         return 1
-    _app, anki_bin, installed = _pick_app(getattr(args, "anki", ""))
-    if not anki_bin:
-        return _fail(f"no installed Anki.app matches {getattr(args, 'anki', '')!r}",
-                     "install the target first")
+    _app, anki_bin, installed = _resolve_runtime(
+        getattr(args, "anki", ""), getattr(args, "anki_bin", ""))
+    if not anki_bin or str(installed).startswith("unverified:"):
+        return _fail(f"no verified Anki runtime matches "
+                     f"{getattr(args, 'anki', '')!r}",
+                     "install the target or pass --anki-bin")
     if scenario in USER_SCENARIOS:
         return cmd_user_journey(args, anki_bin, installed)
     sdir = _scenario_dir(scenario)
@@ -339,14 +366,14 @@ def _ensure_prod_artifact():
     return record
 
 
-def _user_seed(scenario: str) -> dict:
+def _user_seed(scenario: str, profile: str = USER_PROFILE) -> dict:
     """Fixture payload for the production rehearsals.
 
     Collection content only: a starter deck, plus the 2.0.2-shape Classic
     data for the upgrade journey. No Evolved journal and no local overlay,
     so the packaged add-on behaves exactly as users receive it.
     """
-    base = {"scenario": scenario, "profile": USER_PROFILE, "deck": "Sample Deck",
+    base = {"scenario": scenario, "profile": profile, "deck": "Sample Deck",
             "seeded_at": time.time(), "summary": []}
     if scenario == "user-new":
         base["cards"] = 20
@@ -393,8 +420,10 @@ def cmd_user_journey(args, anki_bin: str, installed: str) -> int:
 
     Shared marker-guarded base .dev/anki/user, profile dev-user. user-new and
     user-upgrade wipe it and seed collection fixtures; user-resume relaunches
-    it untouched. ANKISCAPE_DEV is never set, so the add-on resolves its baked
-    production endpoint exactly like an installed release.
+    it untouched. user-test uses a dedicated base/profile and a permanent
+    hosted fixture account (no credentials embedded anywhere). ANKISCAPE_DEV
+    is never set, so the add-on resolves its baked production endpoint
+    exactly like an installed release.
     """
     scenario = args.scenario
     if getattr(args, "symlink", False):
@@ -412,7 +441,12 @@ def cmd_user_journey(args, anki_bin: str, installed: str) -> int:
     if record is None:
         return 1
     wipe = scenario != "user-resume"
-    sdir = USER_BASE
+    if scenario == "user-test":
+        sdir = os.path.join(ANKI_BASE, "user-test")
+        profile = "dev-user-test"
+    else:
+        sdir = USER_BASE
+        profile = USER_PROFILE
     if _reject_personal_paths(sdir):
         return _fail(f"refusing to use path outside .dev: {sdir}")
     if wipe:
@@ -422,13 +456,13 @@ def cmd_user_journey(args, anki_bin: str, installed: str) -> int:
         if os.path.exists(sdir):
             return _fail(f"could not wipe {sdir}; close Anki first")
     elif not (os.path.isdir(sdir) and _check_marker(sdir)
-              and os.path.isfile(os.path.join(sdir, USER_PROFILE,
+              and os.path.isfile(os.path.join(sdir, profile,
                                               "collection.anki2"))):
         return _fail("no production test session to resume",
                      "pick 'New user' first (resume keeps the dev-user profile)")
     os.makedirs(sdir, exist_ok=True)
     _write_marker(sdir, scenario)
-    _ensure_e2e_profile(sdir, USER_PROFILE)
+    _ensure_e2e_profile(sdir, profile)
     addons = os.path.join(sdir, "addons21")
     os.makedirs(addons, exist_ok=True)
     try:
@@ -443,7 +477,8 @@ def cmd_user_journey(args, anki_bin: str, installed: str) -> int:
         if os.path.exists(seed_dest):
             shutil.rmtree(seed_dest)
         shutil.copytree(os.path.join(ROOT, "dev", "seed_addon"), seed_dest)
-        seed_payload = _user_seed(scenario)
+        seed_payload = _user_seed("user-new" if scenario == "user-test"
+                                  else scenario, profile)
         with open(os.path.join(sdir, "seed.json"), "w", encoding="utf-8") as fh:
             json.dump(seed_payload, fh)
         if os.path.exists(os.path.join(sdir, "seed-done.json")):
@@ -452,16 +487,18 @@ def cmd_user_journey(args, anki_bin: str, installed: str) -> int:
         seed_payload = {"summary": []}
     env = _prod_env()
     print(f"dev: [PROD {scenario}] Anki {installed} ({installed_kind}) "
-          f"-b {sdir} -p {USER_PROFILE}")
+          f"-b {sdir} -p {profile}")
     print(f"dev: artifact {record['artifact_sha256'][:12]}... "
           f"({record['members']} members, prod endpoint baked)")
     _print_scenario_summary(seed_payload)
     _print_user_steps(scenario)
+    if scenario == "user-test":
+        _print_fixture_account_steps(getattr(args, "fixture", ""))
     if getattr(args, "no_anki", False):
         print(f"dev: scenario '{scenario}' prepared at {sdir} (Anki launch skipped)")
         return 0
     try:
-        proc = subprocess.Popen([anki_bin, "-b", sdir, "-p", USER_PROFILE], env=env)
+        proc = subprocess.Popen([anki_bin, "-b", sdir, "-p", profile], env=env)
     except Exception as exc:
         return _fail(f"could not launch Anki: {exc!r}")
     try:
@@ -472,6 +509,28 @@ def cmd_user_journey(args, anki_bin: str, installed: str) -> int:
         return _fail(f"Anki exited immediately with code {rc}")
     print(f"dev: Anki pid={proc.pid}")
     return 0
+
+
+def _print_fixture_account_steps(fixture: str) -> None:
+    """Show which permanent hosted fixture account to sign in as (never a
+    credential): the password derives from ANKISCAPE_FIXTURE_SECRET."""
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "ankiscape_fixture_traces",
+            os.path.join(ROOT, "dev", "fixture_traces.py"))
+        module = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        suite = module.load_suite()
+        name = fixture or suite["display_names"][0]
+        print(f"dev:   0. Sign in with fixture account {name} "
+              f"({module.email_for(name)});")
+        print("dev:      derive its password from ANKISCAPE_FIXTURE_SECRET "
+              "with dev/fixture_traces.password_for(secret, name).")
+        print("dev:      After sign-in, Hiscores shows the labeled Test "
+              "leaderboard toggle.")
+    except Exception as exc:
+        print(f"dev:   fixture instructions unavailable: {exc!r}")
 
 
 def _print_scenario_summary(seed_payload: dict) -> None:
@@ -568,7 +627,12 @@ def _scenario_seed(scenario: str, profile: str) -> dict:
 
 def cmd_reset(args) -> int:
     scenario = args.scenario
-    sdir = USER_BASE if scenario in USER_SCENARIOS else _scenario_dir(scenario)
+    if scenario == "user-test":
+        sdir = os.path.join(ANKI_BASE, "user-test")
+    elif scenario in USER_SCENARIOS:
+        sdir = USER_BASE
+    else:
+        sdir = _scenario_dir(scenario)
     real = os.path.realpath(sdir)
     if os.path.islink(sdir) or (os.path.exists(sdir) and os.path.realpath(sdir) != os.path.abspath(sdir)
                                 and False):
@@ -589,6 +653,9 @@ def cmd_reset(args) -> int:
     except FileNotFoundError:
         pass
     shutil.rmtree(sdir, ignore_errors=False)
+    if scenario == "user-test":
+        print(f"dev: test-fixture rehearsal profile removed ({sdir})")
+        return 0
     if scenario in USER_SCENARIOS:
         print(f"dev: production rehearsal profile removed ({sdir})")
         return 0
@@ -607,7 +674,8 @@ def cmd_test(args) -> int:
         return _backend_suite()
     if suite == "e2e":
         return _e2e_suite(getattr(args, "anki", ""), getattr(args, "qt", ""),
-                          getattr(args, "journey", "fresh"))
+                          getattr(args, "journey", "fresh"),
+                          getattr(args, "anki_bin", ""))
     return _fail(f"unknown suite {suite!r}")
 
 
@@ -725,12 +793,16 @@ def _kill_owned_child(child, base: str) -> None:
     _reap_mpv(base)
 
 
-def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
+def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
+               anki_bin_override: str = "") -> int:
     import zipfile
 
     journeys = ("fresh", "upgrade", "undo", "catchup", "sync", "dialogs",
                 "ui-onboarding", "ui-training", "ui-settings", "ui-review",
-                "ui-lifecycle", "ui-art")
+                "ui-lifecycle", "ui-art", "ui-visual-polish",
+                "ui-deferred-rewards", "ui-rebuild-review",
+                "ui-test-leaderboard", "ui-credential-fallback",
+                "ui-recovery", "ui-profile-races", "ui-report-bug")
     if journey not in journeys:
         return _fail(f"unknown journey {journey!r}", f"choose from {journeys}")
     print(f"dev: (e2e) journey={journey} target Anki={anki or '?'} Qt={qt or '?'}")
@@ -738,12 +810,13 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
         # Live local-stack journey (needs Docker + Supabase): serviced sync
         # against the real local Auth/RPCs through the new service layer.
         return _e2e_sync_suite(anki)
-    _app, anki_bin, installed = _pick_app(anki)
-    if not anki_bin:
+    _app, anki_bin, installed = _resolve_runtime(anki, anki_bin_override)
+    if not anki_bin or str(installed).startswith("unverified:"):
         if anki:
-            return _fail(f"no installed Anki.app matches {anki}",
-                         "install the target (e.g. Anki 23.10 alongside) first")
-        return _fail("Anki.app not found")
+            return _fail(f"no verified Anki runtime matches {anki}",
+                         "install the target (e.g. Anki 23.10 alongside) or "
+                         "pass --anki-bin")
+        return _fail("Anki runtime not found")
     # Single-instance safety: a running Anki would swallow our launch args
     # and open the PERSONAL profile instead. Refuse outright.
     if _refuse_running_anki("e2e"):
@@ -805,7 +878,7 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh") -> int:
                   encoding="utf-8") as fh:
             json.dump({"player_data": fixtures.classic_player_data(),
                        "current_skill": "Mining"}, fh)
-    if journey == "ui-art":
+    if journey in ("ui-art", "ui-visual-polish"):
         # High-level / full-bank world for offline art rendering (same
         # generator as the synthetic endgame scenario). The driver swaps the
         # placeholder uuid for the game it created during onboarding.
@@ -989,9 +1062,16 @@ def cmd_verify(args) -> int:
     if release:
         overall |= _step("backend", _backend_suite)
         overall |= _step("e2e", lambda: _e2e_suite("", ""))
+        # Release readiness delegates to the reliability orchestrator: the
+        # seven-target evidence must validate before this returns success.
+        overall |= _step("reliability", lambda: subprocess.run(
+            [sys.executable, os.path.join(ROOT, "dev", "reliability.py"),
+             "verify", "--stage", "release", "--evidence",
+             os.path.join(ROOT, "artifacts", "reliability")]).returncode)
     results["overall"] = overall
     results["note"] = ("Quick subsets are not release readiness. "
-                       "verify --release requires all steps incl. backend/e2e/evidence.")
+                       "verify --release requires all steps incl. backend/e2e/"
+                       "evidence aggregation via dev/reliability.py.")
     with open(os.path.join(outdir, "summary.json"), "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2)
     print(f"dev: verification {'PASS' if overall == 0 else 'FAIL'}; summary at {outdir}/summary.json")
@@ -999,46 +1079,21 @@ def cmd_verify(args) -> int:
 
 
 def cmd_verify_evidence(args) -> int:
-    matrix = args.matrix
-    if not os.path.exists(matrix):
-        return _fail(f"matrix not found: {matrix}")
-    with open(matrix, encoding="utf-8") as fh:
-        data = json.load(fh)
-    errors = []
-    required = data.get("required_targets", [])
-    records = {(r.get("os"), r.get("anki"), r.get("qt")): r for r in data.get("records", [])}
-    for target in required:
-        key = (target.get("os"), target.get("anki"), target.get("qt"))
-        rec = records.get(key)
-        if rec is None:
-            errors.append(f"missing target {key}")
-            continue
-        if not rec.get("passed"):
-            errors.append(f"target {key} not passed")
-        if not rec.get("artifact_sha256"):
-            errors.append(f"target {key} missing artifact hash")
-        if not rec.get("evidence_path"):
-            errors.append(f"target {key} missing evidence path")
-    # Hash match: every record must match the built artifact if dist exists.
-    dist_hash = None
-    dist_dir = os.path.join(ROOT, "dist")
-    if os.path.isdir(dist_dir):
-        cands = [f for f in os.listdir(dist_dir) if f.endswith(".ankiaddon")]
-        if cands:
-            h = hashlib.sha256()
-            with open(os.path.join(dist_dir, cands[0]), "rb") as fh:
-                h.update(fh.read())
-            dist_hash = h.hexdigest()
-    if dist_hash:
-        for key, rec in records.items():
-            if rec.get("artifact_sha256") and rec["artifact_sha256"] != dist_hash:
-                errors.append(f"target {key} hash mismatch vs dist")
-    if errors:
-        for err in errors:
-            print(f"dev: evidence: {err}", file=sys.stderr)
-        return 1
-    print(f"dev: evidence ok ({len(required)} required targets)")
-    return 0
+    """Validate release evidence; delegates to the reliability orchestrator.
+
+    The orchestrator checks: non-empty matrix, one resolvable artifact from
+    dist/manifest.json (never a first glob), record schema/completeness,
+    interrupted runs, version/hash mismatches, stale or copied results,
+    fabricated evidence paths, file hashes and run windows, omitted or
+    skipped required scenarios, zero-test reports and budget violations.
+    """
+    evidence = getattr(args, "evidence", None) or os.path.join(ROOT, "artifacts", "reliability")
+    proc = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "dev", "reliability.py"),
+         "verify-evidence", "--matrix", args.matrix, "--evidence", evidence,
+         "--stage", getattr(args, "stage", "release")],
+        cwd=ROOT)
+    return proc.returncode
 
 
 def main(argv=None) -> int:
@@ -1052,10 +1107,15 @@ def main(argv=None) -> int:
                                "artifact on the production backend (isolated "
                                "profile; auto rebuild if source changed)")
     p_launch.add_argument("--anki", default="")
+    p_launch.add_argument("--anki-bin", default="",
+                          help="explicit runtime executable (native matrix)")
     p_launch.add_argument("--symlink", action="store_true",
                           help="link the repo instead of installing the zip (dev loop only)")
     p_launch.add_argument("--fresh", action="store_true",
                           help="wipe the scenario base first (verifies the wipe)")
+    p_launch.add_argument("--fixture", default="",
+                          help="user-test fixture display name "
+                               "(default: first hosted-v1 account)")
     p_launch.add_argument("--no-anki", action="store_true")
     p_reset = sub.add_parser("reset")
     p_reset.add_argument("--scenario", required=True,
@@ -1063,16 +1123,26 @@ def main(argv=None) -> int:
     p_test = sub.add_parser("test")
     p_test.add_argument("--suite", required=True, choices=("python", "backend", "e2e"))
     p_test.add_argument("--anki", default="")
+    p_test.add_argument("--anki-bin", default="",
+                        help="explicit runtime executable (native matrix)")
     p_test.add_argument("--qt", default="")
     p_test.add_argument("--journey", default="fresh",
                         choices=("fresh", "upgrade", "undo", "catchup", "sync",
                                  "dialogs", "ui-onboarding", "ui-training",
                                  "ui-settings", "ui-review", "ui-lifecycle",
-                                 "ui-art"))
+                                 "ui-art", "ui-visual-polish",
+                                 "ui-deferred-rewards", "ui-rebuild-review",
+                                 "ui-test-leaderboard",
+                                 "ui-credential-fallback", "ui-recovery",
+                                 "ui-profile-races", "ui-report-bug"))
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("--release", action="store_true")
     p_ev = sub.add_parser("verify-evidence")
     p_ev.add_argument("--matrix", default=os.path.join(ROOT, "dev", "matrix.json"))
+    p_ev.add_argument("--evidence",
+                      default=os.path.join(ROOT, "artifacts", "reliability"))
+    p_ev.add_argument("--stage", default="release",
+                      choices=("pr", "nightly", "release"))
     args = parser.parse_args(argv)
     if args.cmd == "setup":
         return cmd_setup(args)

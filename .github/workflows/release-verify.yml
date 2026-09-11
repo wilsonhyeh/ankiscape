@@ -1,0 +1,161 @@
+# Release verification: manual, pinned candidate SHA. The candidate is built
+# ONCE; every target tests those immutable bytes (hash-verified), and the
+# aggregator refuses to pass on missing targets/scenarios. No publish step.
+name: release-verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Commit SHA of the release candidate
+        required: true
+      evidence_run:
+        description: Optional prior run id whose lane artifacts to reuse
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the immutable candidate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    outputs:
+      artifact_sha: ${{ steps.build.outputs.artifact_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - name: Full Python suite and package build
+        run: |
+          python3 run_tests.py
+          python3 scripts/build_addon.py
+          python3 scripts/audit_assets.py --check
+          python3 scripts/audit_assets.py --archive dist/ankiscape-3.0.0.ankiaddon
+      - name: Record artifact hash
+        id: build
+        run: |
+          HASH=$(python3 -c "import json;print(json.load(open('dist/manifest.json'))['artifact_sha256'])")
+          echo "artifact_sha=$HASH" >> "$GITHUB_OUTPUT"
+      - name: Upload candidate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-artifact
+          path: |
+            dist/ankiscape-3.0.0.ankiaddon
+            dist/manifest.json
+          retention-days: 90
+
+  lanes:
+    name: ${{ matrix.label }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "macos-23.10-qt6", os: macos, runner: macos-14, anki: "23.10", qt: "6" }
+          - { label: "macos-26.8.1-qt6", os: macos, runner: macos-14, anki: "26.8.1", qt: "6" }
+          - { label: "windows-23.10-qt6", os: windows, runner: windows-2022, anki: "23.10", qt: "6" }
+          - { label: "windows-26.8.1-qt6", os: windows, runner: windows-2022, anki: "26.8.1", qt: "6" }
+          - { label: "linux-23.10-qt5", os: linux, runner: ubuntu-22.04, anki: "23.10", qt: "5" }
+          - { label: "linux-23.10-qt6", os: linux, runner: ubuntu-22.04, anki: "23.10", qt: "6" }
+          - { label: "linux-26.8.1-qt6", os: linux, runner: ubuntu-22.04, anki: "26.8.1", qt: "6" }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - name: Download the immutable candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-artifact
+          path: dist
+      - name: Verify candidate bytes unchanged
+        shell: bash
+        run: |
+          EXPECTED="${{ needs.build.outputs.artifact_sha }}"
+          ACTUAL=$(python3 -c "import json;print(json.load(open('dist/manifest.json'))['artifact_sha256'])")
+          test "$EXPECTED" = "$ACTUAL"
+      - name: Linux packages
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd xvfb libfuse2
+      - name: Fetch pinned runtime
+        shell: bash
+        run: |
+          python3 dev/fetch_runtimes.py --download ${{ matrix.os == 'macos' && 'macos' || matrix.os == 'windows' && 'windows' || 'linux' }}/${{ matrix.anki }} --dest .dev/runtimes --extract
+          echo "ANKI_BIN=$(find .dev/runtimes -type f \( -name anki -o -name anki.exe -o -name Anki \) | head -n1)" >> "$GITHUB_ENV"
+      - name: Release lane (native matrix + performance + retries)
+        shell: bash
+        run: |
+          RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            xvfb-run -a python3 dev/reliability.py run-lane --stage release \
+              --os "${{ matrix.os }}" --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
+              --anki-bin "${ANKI_BIN:-}" --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}"
+          else
+            python3 dev/reliability.py run-lane --stage release \
+              --os "${{ matrix.os }}" --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
+              --anki-bin "${ANKI_BIN:-}" --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}"
+          fi
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-${{ matrix.label }}
+          path: artifacts/reliability/
+          retention-days: 90
+
+  aggregate:
+    name: Aggregate and validate release evidence
+    needs: [build, lanes]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - name: Download candidate and all lane evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          merge-multiple: true
+          path: merged
+      - name: Stage evidence tree
+        run: |
+          mkdir -p dist artifacts
+          cp merged/ankiscape-3.0.0.ankiaddon dist/ 2>/dev/null || true
+          cp merged/manifest.json dist/ 2>/dev/null || true
+          cp -R merged/reliability artifacts/ 2>/dev/null || true
+          cp -R merged/artifacts/reliability artifacts/ 2>/dev/null || true
+      - name: Evidence aggregation (fails on any missing target/scenario)
+        run: |
+          python3 dev/reliability.py verify --stage release \
+            --evidence artifacts/reliability
+      - name: Release mutation gate
+        run: python3 dev/mutation_gate.py --environment full
+      - name: Upload aggregated evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-aggregate
+          path: |
+            artifacts/reliability/
+            artifacts/verification/
+          retention-days: 90

@@ -49,3 +49,18 @@ version; restore from `supabase db dump` backups taken before each migration.
 delete account data - always with confirmation. Privileged keys stay out of
 the add-on, logs, and artifacts. Not yet implemented; do not hand-roll SQL
 against production without it.
+
+## Test cohort (migration 0006)
+
+- `public.players.is_test` marks permanent hosted fixture accounts. Only
+  privileged tooling (service role / SQL) may set it; authenticated requests
+  are blocked by a guard trigger and client metadata is ignored.
+- `public.fixture_registry` (private) reserves fixture usernames before any
+  account exists, so a fixture player row is born classified.
+- Public `hiscores`/`public_profile` filter `is_test = false` before rank,
+  sort and limit; test profiles are indistinguishable from unknown names.
+- `test_hiscores`/`test_public_profile`/`self_context` are authenticated-only
+  and authorize from the caller's own player row, never a client flag.
+- Seed/verify: `python3 dev/seed_hosted_fixtures.py --hosted --apply|--verify`
+  and `python3 dev/hosted_fixture_e2e.py --hosted` (see docs/RELIABILITY.md
+  for credentials and rate limits). Never delete registry-owned accounts.

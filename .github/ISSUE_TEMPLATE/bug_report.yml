@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible problem with AnkiScape
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping. **Never upload your collection, account details,
+        email, tokens or card content.** Diagnostics from
+        Settings → Advanced → Report a bug are allowlisted and safe to paste.
+        Reports on GitHub are public.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line describing the problem.
+      placeholder: "Rewards stop showing during reviews"
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions and platform
+      description: Anki version, AnkiScape add-on version, OS (and Qt/Python if shown in diagnostics).
+      placeholder: "Anki 26.08.1, AnkiScape 3.0.0, macOS 15.6 (arm64, Qt 6)"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered, minimal steps.
+      placeholder: "1. Open Evolved\n2. Answer Good on a card\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: Reproducibility
+      options:
+        - Always
+        - Sometimes
+        - Happened once
+        - Not sure yet
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics (optional)
+      description: Paste the allowlisted diagnostics from Settings → Advanced → Report a bug. Never paste raw logs.
+      render: text
+    validations:
+      required: false

@@ -117,6 +117,10 @@ def _expected_from_sources() -> dict:
         expected[f"nav:{section}"] = {
             "display": section, "kind": "nav", "path": rel,
             "consumer": "evolved.assets.NAV_ICONS"}
+    for slot, rel in evolved_assets.SLOT_ICONS.items():
+        expected[f"slot:{slot}"] = {
+            "display": slot, "kind": "ui", "path": rel,
+            "consumer": "evolved.assets.SLOT_ICONS"}
     if "guide" not in evolved_assets.NAV_ICONS:
         expected["nav:guide"] = {
             "display": "guide", "kind": "nav", "path": None,
@@ -280,6 +284,17 @@ def audit_repository() -> list:
         resolved = evolved_assets.nav_icon_path(section)
         if os.path.relpath(resolved, ROOT).replace(os.sep, "/") != rel:
             problems.append(f"nav_icon_path({section}) resolved {resolved}")
+    for slot, rel in evolved_assets.SLOT_ICONS.items():
+        resolved = evolved_assets.slot_icon_path(slot)
+        if os.path.relpath(resolved, ROOT).replace(os.sep, "/") != rel:
+            problems.append(f"slot_icon_path({slot}) resolved {resolved}")
+    for achievement_id in ("first_catch", "first_cook", "cooks_100",
+                           "cooks_1000", "skill_10_mining"):
+        resolved = evolved_assets.achievement_icon_path(achievement_id)
+        if not resolved:
+            problems.append(f"achievement_icon_path({achievement_id}) is empty")
+    if evolved_assets.achievement_icon_path("unknown_achievement") is not None:
+        problems.append("unknown achievements must not resolve an icon")
     for entry in rules_displays():
         rel = _evolved_rel(entry)
         if not rel:

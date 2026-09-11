@@ -115,9 +115,7 @@ class TestSyncJob(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(len(applied), 1)
         # Remote op persisted locally (merge), cursor saved.
-        rows = self.journal._conn.execute(
-            "SELECT op_id FROM operations WHERE op_id='op-remote-1'").fetchall()
-        self.assertEqual(len(rows), 1)
+        self.assertIn("op-remote-1", self.journal.operation_ids())
         self.assertEqual(self.journal.get_server_cursor("game-sync-1"), "7")
 
     def test_remote_id_conflict_quarantined_not_reuploaded(self):
@@ -142,10 +140,7 @@ class TestSyncJob(unittest.TestCase):
         out = job.run_once(generation=7, user_id="u1")
         self.assertTrue(out["ok"])
         # Original payload preserved; poisoned op left the outbox (quarantined).
-        row = self.journal._conn.execute(
-            "SELECT payload_json FROM operations WHERE op_id='op-shared'").fetchone()
-        import json as _json
-        self.assertEqual(_json.loads(row["payload_json"]),
+        self.assertEqual(self.journal.find_operation_payload("op-shared"),
                          {"review_key": "rk-op-shared"})
         self.assertEqual(self.journal.pending_operations(), [])
 

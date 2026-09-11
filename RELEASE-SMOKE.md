@@ -151,3 +151,33 @@ scenarios on both macOS Anki versions, plus hosted account/recovery and
 Keychain checks. These local changes supersede the earlier frozen RC for
 launcher testing; they are not a new published release. Real inbox delivery
 and Windows/Linux GUI verification remain manual.
+
+## Reliability and support workstream (unreleased, 2026-09-10)
+
+Local implementation for the reliability/support plan is recorded in
+`docs/RELIABILITY.md`, `docs/TEST-MATRIX.md` and
+`artifacts/reliability/baseline/`. Status at handoff:
+
+- Engine: accepted answers persist atomically (25 ms interactive budget) and
+  the projection worker publishes off-thread; release-profile budgets pass
+  locally (hook p95 <=0.35 ms, reward completion ~113 ms, 100k rebuild
+  ~5.5 s, state equivalence true).
+- Evidence: `dev/reliability.py` validates provenance/scenarios/budgets;
+  `dev/matrix.json`/`dev/reliability-matrix.json` still require all seven
+  targets; local `verify --stage pr` fails naming the CI workflow (expected).
+- Platforms: seven-target lanes are prepared but **not run** — pinned runtime
+  downloads fail closed until `dev/runtime_manifest.json` records verified
+  URLs and SHA-256 pins, and `.github/workflows/*` are not pushed.
+- Migration `0006_test_cohorts.sql` and `0004_test_cohorts.test.sql` are
+  prepared, **not deployed**; hosted fixture seeding is **blocked** until an
+  authorized execution session supplies credentials and applies it.
+- Support: Report a bug dialog and GitHub templates/configuration script are
+  in place; hosted label/issue-form/vulnerability-reporting changes are
+  **blocked** on `scripts/configure_github.py --apply` authorization.
+- Still manual and unverified: Wilson's real-inbox delivery, AnkiMobile/
+  AnkiDroid sync, and artwork redistribution permission (see
+  `docs/ASSET-RIGHTS.md`). No agent sends email; automated auth codes do not
+  prove real-inbox delivery.
+
+Do not call the release ready while any required platform/scenario/manual
+prerequisite above remains missing.

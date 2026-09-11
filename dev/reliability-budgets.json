@@ -1,0 +1,71 @@
+{
+  "schema": "ankiscape-reliability-budgets",
+  "version": 1,
+  "note": "Fixed acceptance targets from the AnkiScape reliability plan. These are not measured promises; changing one requires a documented plan amendment. Disk-full/locked-db failures are tested for safe degradation, not expected to meet normal successful-write latency.",
+  "budgets": {
+    "accepted_answer_hook": {
+      "description": "Added accepted-answer hook time, ordinary disk",
+      "history_sizes": [0, 1000, 10000, 100000],
+      "metric": "p95_ms",
+      "limit": 20.0,
+      "p99_metric": "p99_ms",
+      "p99_limit": 50.0,
+      "min_samples": 500
+    },
+    "event_loop_lag": {
+      "description": "Event-loop lag during normal reviews/rebuild",
+      "metric": "p95_ms",
+      "limit": 50.0,
+      "max_limit_ms": 200.0,
+      "min_samples": 300,
+      "kind": "native"
+    },
+    "warm_review_scaling": {
+      "description": "Warm append-only review at 100k vs 1k history",
+      "metric": "p95_ratio_100000_over_1000",
+      "limit": 2.0,
+      "kind": "derived"
+    },
+    "warm_shell_open": {
+      "description": "Warm shell opening / section switch (cached projection only)",
+      "metric": "p95_ms",
+      "limit": 300.0,
+      "min_samples": 20,
+      "kind": "native"
+    },
+    "cold_shell_appearance": {
+      "description": "Cold shell appearance to usable shell/loading state; no main-thread history replay",
+      "metric": "ms",
+      "limit": 500.0,
+      "kind": "native"
+    },
+    "reward_completion": {
+      "description": "Ordinary reward completion from durable append to displayed state",
+      "metric": "p95_ms",
+      "limit": 250.0,
+      "min_samples": 30
+    },
+    "late_retraction_rebuild": {
+      "description": "100k late-retraction rebuild; reviewing remains responsive throughout",
+      "metric": "max_ms",
+      "target": 8000.0,
+      "hard_limit": 10000.0,
+      "samples": 3
+    },
+    "idle_cpu": {
+      "description": "Closed/idle add-on: no network polling beyond existing scheduled sync; no new recurring refresh timer; CPU increase vs paired control",
+      "metric": "cpu_pct_delta",
+      "limit": 1.0,
+      "window_s": 300,
+      "kind": "native"
+    },
+    "endurance_memory": {
+      "description": "Endurance memory after warm-up, fixed-size history",
+      "metric": "slope_mib_per_min",
+      "limit": 1.0,
+      "settled_limit_mib": 50.0,
+      "after_warmup_min": 30,
+      "kind": "native"
+    }
+  }
+}

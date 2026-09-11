@@ -143,6 +143,17 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
     diagnostics.setReadOnly(True)
     diagnostics.setVisible(False)
     advanced.layout().addWidget(diagnostics, 1)
+    help_row = QHBoxLayout()
+    report_btn = QPushButton("Report a bug…")
+    report_btn.setObjectName("ankiscape-settings-report-bug")
+    report_btn.setToolTip("Open a prefilled GitHub issue you review and send")
+    report_btn.clicked.connect(lambda: shell.call("on_report_issue"))
+    help_row.addWidget(report_btn)
+    help_row.addStretch(1)
+    advanced.layout().addLayout(help_row)
+    advanced.layout().addWidget(muted_label(
+        "Reports are public on GitHub. Nothing is uploaded automatically; "
+        "you review the exact text before it opens.", wrap=True))
     tabs.addTab(advanced, "Ad&vanced")
 
     def _refresh():

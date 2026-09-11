@@ -61,24 +61,159 @@ except Exception:  # headless import: stubs so the module stays importable
 
 
 from . import theme
-from ..assets import display_icon, font_path, nav_icon_path, skill_icon_path
+from ..assets import (display_icon, font_path, manifest_revision,
+                      nav_icon_path, skill_icon_path)
+
+_ICON_CACHE_MAX_ENTRIES = 256
+_ICON_CACHE_MAX_BYTES = 16 * 1024 * 1024  # estimated decoded pixel storage
+_REGISTERED_FONTS = set()
 
 
-def apply_theme(widget, scale: int = theme.DEFAULT_SCALE) -> None:
-    """Load the display font (when bundled) and apply the fixed palette QSS."""
-    s = theme.clamp_scale(scale)
-    if HAS_QT:
+class IconCache:
+    """GUI-thread-only bounded LRU of decoded/scaled pixmaps.
+
+    The key carries the absolute asset path, the asset-manifest revision, the
+    logical size and the device-pixel ratio, so theme/asset/DPI changes can
+    never serve a stale bitmap. Misses and fallbacks are cached too (None
+    values), so a missing file is not re-probed on every refresh. The
+    decode function is injectable, keeping the cache itself pure/testable.
+    """
+
+    def __init__(self, max_entries: int = _ICON_CACHE_MAX_ENTRIES,
+                 max_bytes: int = _ICON_CACHE_MAX_BYTES, decode=None):
+        from collections import OrderedDict
+
+        self.max_entries = int(max_entries)
+        self.max_bytes = int(max_bytes)
+        self._decode = decode
+        self._data: "OrderedDict" = OrderedDict()
+        self._bytes = 0
+        self.stats = {"hits": 0, "misses": 0, "decodes": 0, "errors": 0,
+                      "evictions": 0, "fallbacks": 0}
+
+    def _size_of(self, value) -> int:
         try:
-            from aqt.qt import QFontDatabase
-            path = font_path()
-            if path:
-                QFontDatabase.addApplicationFont(path)
+            if value is None:
+                return 0
+            width = int(value.width())
+            height = int(value.height())
+            return max(0, width * height * 4)
         except Exception:
-            pass
+            return 0
+
+    def get(self, key):
+        if key in self._data:
+            self.stats["hits"] += 1
+            self._data.move_to_end(key)
+            return self._data[key]
+        self.stats["misses"] += 1
+        value = None
+        if self._decode is not None:
+            try:
+                value = self._decode(key)
+            except Exception:
+                self.stats["errors"] += 1
+                value = None
+        else:
+            self.stats["errors"] += 1
+        self.stats["decodes"] += 1
+        if value is None:
+            self.stats["fallbacks"] += 1
+        self._store(key, value)
+        return value
+
+    def _store(self, key, value) -> None:
+        size = self._size_of(value)
+        if size > self.max_bytes:
+            return  # larger than the whole budget: never cache
+        self._data[key] = value
+        self._bytes += size
+        self._data.move_to_end(key)
+        while self._data and (len(self._data) > self.max_entries
+                              or self._bytes > self.max_bytes):
+            _old_key, old_value = self._data.popitem(last=False)
+            self._bytes -= self._size_of(old_value)
+            self.stats["evictions"] += 1
+
+    def clear(self) -> None:
+        self._data.clear()
+        self._bytes = 0
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def bytes_used(self) -> int:
+        return self._bytes
+
+
+def _device_dpr() -> float:
     try:
-        widget.setStyleSheet(theme.build_stylesheet(s))
+        from aqt.qt import QApplication
+        app = QApplication.instance()
+        if app is not None:
+            screen = app.primaryScreen()
+            if screen is not None:
+                return max(1.0, float(screen.devicePixelRatio()))
     except Exception:
         pass
+    return 1.0
+
+
+def _decode_icon_pixmap(key):
+    """Decode one cache key (see IconCache) into a scaled QPixmap or None."""
+    path, _revision, size, dpr = key
+    try:
+        from aqt.qt import QPixmap, Qt
+        pix = QPixmap(path)
+        if pix.isNull():
+            return None
+        target = max(1, int(round(int(size) * float(dpr))))
+        scaled = pix.scaled(target, target,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.FastTransformation)
+        try:
+            scaled.setDevicePixelRatio(float(dpr))
+        except Exception:
+            pass
+        return scaled
+    except Exception:
+        return None
+
+
+_ICON_CACHE = IconCache(decode=_decode_icon_pixmap)
+
+
+def icon_cache_stats() -> dict:
+    stats = dict(_ICON_CACHE.stats)
+    stats["entries"] = len(_ICON_CACHE)
+    stats["bytes"] = _ICON_CACHE.bytes_used()
+    stats["max_entries"] = _ICON_CACHE.max_entries
+    stats["max_bytes"] = _ICON_CACHE.max_bytes
+    return stats
+
+
+def clear_icon_cache() -> None:
+    _ICON_CACHE.clear()
+
+
+def icon_pixmap(path: str, size: int, dpr: Optional[float] = None):
+    """Integer-scaled, HiDPI-aware QPixmap, or None when the asset is missing.
+
+    Aspect ratio and alpha are preserved; scaling is nearest-neighbor so
+    pixel art stays crisp at every actual slot size. Results (including
+    misses) come from a bounded GUI-thread LRU keyed by path + manifest
+    revision + logical size + device-pixel ratio.
+    """
+    if not HAS_QT or not path:
+        return None
+    try:
+        import os
+        factor = float(dpr) if dpr else _device_dpr()
+        key = (os.path.abspath(str(path)), manifest_revision(), int(size),
+               round(factor, 2))
+        return _ICON_CACHE.get(key)
+    except Exception:
+        return None
 
 
 def body_label(text: str = "", *, wrap: bool = False,
@@ -127,25 +262,22 @@ def success_label(text: str = "") -> "QLabel":
     return body_label(text, object_name="ankiscape-success")
 
 
-def icon_pixmap(path: str, size: int):
-    """Integer-scaled QPixmap, or None when the asset is missing.
-
-    Aspect ratio and alpha are preserved; scaling is nearest-neighbor so
-    pixel art stays crisp at every actual slot size.
-    """
-    if not HAS_QT or not path:
-        return None
+def apply_theme(widget, scale: int = theme.DEFAULT_SCALE) -> None:
+    """Load the display font once and apply the palette QSS."""
+    s = theme.clamp_scale(scale)
+    if HAS_QT:
+        try:
+            from aqt.qt import QFontDatabase
+            path = font_path()
+            if path and path not in _REGISTERED_FONTS:
+                QFontDatabase.addApplicationFont(path)
+                _REGISTERED_FONTS.add(path)
+        except Exception:
+            pass
     try:
-        from aqt.qt import QPixmap, Qt
-        pix = QPixmap(path)
-        if pix.isNull():
-            return None
-        scaled = pix.scaled(size, size,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.FastTransformation)
-        return scaled
+        widget.setStyleSheet(theme.build_stylesheet(s))
     except Exception:
-        return None
+        pass
 
 
 def clear_layout(layout) -> None:

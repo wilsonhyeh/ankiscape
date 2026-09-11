@@ -191,8 +191,7 @@ def main():
                         get_user_id=lambda: mem_a.user_id)
     out = svc_b.maybe_sync(manual=True)
     check("B service download+merge ok", out.get("ok") is True, str(out)[:200])
-    ids_b = sorted(r[0] for r in
-                   journal_b._conn.execute("SELECT op_id FROM operations"))
+    ids_b = sorted(journal_b.operation_ids())
     check("B converged on A's ops",
           ids_b == sorted([op_a1["op_id"], op_a2["op_id"]]), str(ids_b)[:200])
 

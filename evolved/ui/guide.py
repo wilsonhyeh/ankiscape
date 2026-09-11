@@ -4,59 +4,70 @@ from ..logic_pure import multiplied_base_micro, gathering_probability, burn_prob
 
 
 def credits_page(rules=None):
-    """Offline Credits & assets page built from the shipped manifest.
+    """Short About & credits page with an offline asset-details view.
 
-    Every bundled asset's source, revision, retrieval date, size and hash is
-    listed here; the Jagex/Wiki rights notice is preserved verbatim. No
-    network access: the manifest ships inside the add-on.
-    """
+    The normal page stays readable: no per-file checksum dump and no internal
+    release-risk notes. Provenance, hashes and applicable license texts remain
+    available under "Asset sources & licenses" (still fully offline)."""
     import json
     import os
     from ..icons import repo_root
 
-    path = os.path.join(repo_root(), "assets", "manifest.json")
+    _ = rules
+    opening = (
+        "AnkiScape is an independent, noncommercial passion project made out "
+        "of love for Old School RuneScape. It brings a little of that joy to "
+        "studying with Anki; it is not intended to replace RuneScape or "
+        "profit from it.")
+    parts = [
+        "<h1>About &amp; credits</h1>",
+        f"<p>{escape(opening)}</p>",
+        "<p>RuneScape and Old School RuneScape, and the relevant game "
+        "artwork, belong to Jagex Ltd. AnkiScape is not affiliated with or "
+        "endorsed by Jagex. Image sourcing is attributed to the Old School "
+        "RuneScape Wiki, with specific source pages listed under "
+        "“Asset sources &amp; licenses”.</p>",
+        "<p>The bundled pixel display font is Press Start 2P, used under the "
+        "SIL Open Font License 1.1 (see <code>fonts/OFL.txt</code> in the "
+        "add-on). Everything ships inside the add-on; nothing is downloaded "
+        "while you play.</p>",
+        "<h2 id=\"asset-sources\">Asset sources &amp; licenses</h2>",
+        "<p>AnkiScape bundles game artwork from the Old School RuneScape Wiki "
+        "for offline use. That art is licensed media of a copyrighted video "
+        "game; its copyright is held by Jagex Ltd, and the Wiki's permission "
+        "does not by itself license redistribution inside a third-party "
+        "add-on. This add-on is a noncommercial fan project and makes no "
+        "claim of authorization beyond that. See the repository's "
+        "<code>docs/ASSET-RIGHTS.md</code> for the maintainer record.</p>",
+    ]
     try:
+        path = os.path.join(repo_root(), "assets", "manifest.json")
         with open(path, encoding="utf-8") as fh:
             manifest = json.load(fh)
     except (OSError, ValueError):
-        return ("<h1>Credits &amp; assets</h1>"
-                "<p>Asset manifest unavailable in this installation.</p>")
-    _ = rules
-    notices = manifest.get("rights_notices", {})
-    parts = ["<h1>Credits &amp; assets</h1>",
-             "<p>Everything bundled here is used offline. The add-on never "
-             "downloads images while you play.</p>"]
-    for key in ("jagex-wiki", "original", "ofl"):
-        notice = notices.get(key) or {}
-        text = escape(str(notice.get("notice") or ""))
-        issue = escape(str(notice.get("release_issue") or ""))
-        parts.append(f"<h2>{escape(key)}</h2><p>{text}</p>")
-        if issue:
-            parts.append(f"<p><b>Release note:</b> {issue}</p>")
-    parts.append("<h2>Bundled files</h2>")
-    parts.append("<ul>")
-    for record in manifest.get("files", []):
-        if not isinstance(record, dict):
-            continue
+        parts.append("<p>Asset manifest unavailable in this installation."
+                     "</p>")
+        return "".join(parts)
+    records = [r for r in manifest.get("files", []) if isinstance(r, dict)]
+    wiki = sorted({str(r.get("source_page") or "") for r in records
+                   if r.get("rights") == "jagex-wiki" and r.get("source_page")})
+    parts.append("<p>Source pages (Old School RuneScape Wiki):</p><ul>")
+    for source in wiki:
+        parts.append(f"<li><a href=\"{escape(source)}\">{escape(source)}</a></li>")
+    parts.append("</ul>")
+    parts.append("<h3>Provenance and integrity (offline detail)</h3><ul>")
+    for record in records:
         rel = escape(str(record.get("path") or ""))
         display = escape(str(record.get("display") or ""))
-        source = escape(str(record.get("source_page") or
-                           record.get("origin") or ""))
         revision = escape(str(record.get("revision") or ""))
         retrieved = escape(str(record.get("retrieved") or ""))
-        width = record.get("width")
-        height = record.get("height")
-        size = f"{width}x{height}" if width and height else ""
         digest = escape(str(record.get("sha256") or "")[:12])
-        line = f"<li><b>{display}</b> — <code>{rel}</code>"
-        if source:
-            line += f" — source: {source}"
+        rights = escape(str(record.get("rights") or ""))
+        line = (f"<li><b>{display}</b> — <code>{rel}</code> — {rights}")
         if revision:
-            line += f" (rev {revision})"
+            line += f", rev {revision}"
         if retrieved:
             line += f", retrieved {retrieved}"
-        if size:
-            line += f", {size}"
         if digest:
             line += f", sha256 {digest}…"
         line += "</li>"
@@ -114,12 +125,13 @@ Evolved; Classic keeps its separate original rules and progress.</p>'''
     pages['Bank & achievements'] = '''<h1>Bank and achievements</h1><p>The Bank shows your current inventory. Production consumes ingredients automatically. Filtering or inspecting items does not spend them. There is no trading, selling, equipping, or item-use action.</p><p>Achievements track first catch, first successful cook, skill levels 10/30/60/99 in each skill, and 100/1,000 successful cooks. Spending inventory does not remove a successful-action achievement. Undo and sync reconciliation can remove an achievement if its underlying review or level no longer qualifies. Achievements award no additional XP.</p>'''
     pages['Catch-up, sync & accounts'] = '''<h1>Catch-up and online progress</h1><p>Play offline without an account. Reviews synced from mobile are processed on desktop using your gathering preset (Mining, Woodcutting or Fishing), at the highest unlocked tier when replayed. This preset is separate from desktop training. Changes apply from their recorded time onward.</p><p>Reviews before Evolved activation and reviews observed in Classic do not receive catch-up rewards. Direct desktop rewards take priority over a catch-up claim for the same review.</p><h2>Accounts and Hiscores</h2><p>Create an account and enter the email verification code to enable online progress. Log in by username or email. One account links to one Evolved game. Existing offline progress can upload. The server calculates ranking XP from the review history rather than trusting an uploaded XP total.</p><p>When devices spend the same ingredients offline, the merged review order determines which recipe has materials. Invalidated production gets zero reward, so totals and achievements can change after sync. Sync now retries pending uploads; local play continues during an outage.</p><h2>Sign-in and recovery</h2><p>Keep me signed in uses the operating system credential vault when available. Your password is never stored. Log out removes saved sign-in credentials without deleting progress. Forgot password requests an email code, followed by a new password.</p>'''
     pages['Modes, settings & backups'] = '''<h1>Classic and Evolved</h1><p>Classic preserves your original game. Evolved starts a separate six-skill game; XP and items do not transfer. Use the AnkiScape toolbar menu to open the active mode or try Evolved. Evolved Settings → Advanced lets you return to Classic. Leave the reviewer before switching. Closing setup saves its place; Continue Classic lets an upgrading user return immediately.</p><h2>Settings and review HUD</h2><p>Appearance controls scale, HUD position and visibility, celebrations, reduced motion and level-up sounds. The HUD shows active skill progress during reviews. The session recap describes rewards from that study session. Settings apply immediately.</p><h2>Backups</h2><p>Export backup saves your Evolved game history as JSON. Store this file somewhere safe. Restore previews the change and asks for confirmation. A backup for the current game merges missing history. A different game opens as the active Evolved game and signs you out; the old game remains saved. Neither action replaces Anki cards. Export is separate from account sync and Anki collection backups. Advanced diagnostics help explain pending sync problems.</p>'''
-    pages['Credits & assets'] = credits_page(rules)
+    pages['About & credits'] = credits_page(rules)
     return pages
 
 
 def build_guide_screen(shell, deps):
-    from aqt.qt import QWidget, QVBoxLayout, QComboBox, QLineEdit, QTextBrowser, QTextCursor
+    from aqt.qt import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLineEdit,
+                        QPushButton, QTextBrowser, QTextCursor)
     root = QWidget(shell)
     root.setObjectName('ankiscape-guide')
     layout = QVBoxLayout(root)
@@ -135,6 +147,23 @@ def build_guide_screen(shell, deps):
     layout.addWidget(topics)
     layout.addWidget(search)
     layout.addWidget(browser, 1)
+    help_row = QHBoxLayout()
+    report_btn = QPushButton("Report a bug…")
+    report_btn.setObjectName("ankiscape-guide-report-bug")
+    report_btn.setToolTip("Open a prefilled GitHub issue you review and send")
+    report_btn.clicked.connect(lambda: shell.call("on_report_issue"))
+    from .widgets import icon_pixmap
+    from ..assets import slot_icon_path
+    pix = icon_pixmap(slot_icon_path("support.report"), 16)
+    if pix is not None:
+        try:
+            from aqt.qt import QIcon as _QIcon
+            report_btn.setIcon(_QIcon(pix))
+        except Exception:
+            pass
+    help_row.addWidget(report_btn)
+    help_row.addStretch(1)
+    layout.addLayout(help_row)
     topics.currentTextChanged.connect(lambda title: browser.setHtml(pages[title]))
     search.returnPressed.connect(lambda: browser.find(search.text()) or (browser.moveCursor(QTextCursor.MoveOperation.Start), browser.find(search.text())))
     browser.setHtml(pages[topics.currentText()])

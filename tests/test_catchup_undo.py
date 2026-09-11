@@ -76,9 +76,7 @@ class TestCatchup(unittest.TestCase):
         out = run_catchup(_Col([_row(11, 21), _row(12, 22)]), eng, journal,
                           full=True)
         self.assertEqual(out["made"], 1)
-        ops = journal._conn.execute(
-            "SELECT count(*) FROM operations").fetchone()[0]
-        self.assertEqual(ops, 2)
+        self.assertEqual(journal.operation_count(), 2)
 
     def test_hydrate_survives_restart(self):
         path = os.path.join(self.tmp.name, "h.sqlite3")

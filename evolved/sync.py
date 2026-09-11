@@ -209,14 +209,9 @@ class SyncJob:
                 # Either an exact duplicate (already have it) or a conflicting
                 # ID reuse: confirm which by comparing payload hashes.
                 try:
-                    rows = self.journal._conn.execute(
-                        "SELECT payload_json FROM operations WHERE op_id=?",
-                        (op["op_id"],)).fetchall()
-                    if rows:
-                        import json as _json
-                        have = _json.loads(rows[0]["payload_json"])
-                        if payload_hash(have) != payload_hash(op["payload"]):
-                            self._quarantine([op["op_id"]])
+                    have = self.journal.find_operation_payload(op["op_id"])
+                    if have is not None and payload_hash(have) != payload_hash(op["payload"]):
+                        self._quarantine([op["op_id"]])
                 except Exception:
                     pass
                 continue

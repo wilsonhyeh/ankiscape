@@ -1,0 +1,152 @@
+# Nightly: seven native targets, expanded generated properties, local backend,
+# 30-minute endurance, performance metrics and one trusted hosted fixture
+# smoke. Actions pinned by reviewed tag; replace with commit SHAs before
+# enabling hosted runs (review requirement).
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "macos-23.10-qt6", os: macos, runner: macos-14, anki: "23.10", qt: "6" }
+          - { label: "macos-26.8.1-qt6", os: macos, runner: macos-14, anki: "26.8.1", qt: "6" }
+          - { label: "windows-23.10-qt6", os: windows, runner: windows-2022, anki: "23.10", qt: "6" }
+          - { label: "windows-26.8.1-qt6", os: windows, runner: windows-2022, anki: "26.8.1", qt: "6" }
+          - { label: "linux-23.10-qt5", os: linux, runner: ubuntu-22.04, anki: "23.10", qt: "5" }
+          - { label: "linux-23.10-qt6", os: linux, runner: ubuntu-22.04, anki: "23.10", qt: "6" }
+          - { label: "linux-26.8.1-qt6", os: linux, runner: ubuntu-22.04, anki: "26.8.1", qt: "6" }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dev dependencies
+        run: pip install -r dev/requirements.lock
+      - name: Linux system packages
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd xvfb libfuse2
+      - name: Fetch pinned runtime and record actual version
+        shell: bash
+        run: |
+          python3 dev/fetch_runtimes.py --download ${{ matrix.os == 'macos' && 'macos' || matrix.os == 'windows' && 'windows' || 'linux' }}/${{ matrix.anki }} --dest .dev/runtimes --extract
+          echo "ANKI_BIN=$(find .dev/runtimes -type f \( -name anki -o -name anki.exe -o -name Anki \) | head -n1)" >> "$GITHUB_ENV"
+      - name: Native packaged journeys (all scenarios)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            xvfb-run -a python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}"
+          else
+            python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}"
+          fi
+      - name: Record nightly lane evidence
+        if: always()
+        shell: bash
+        run: |
+          RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+          python3 dev/reliability.py run-lane --stage nightly --os "${{ matrix.os }}" \
+            --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
+            --anki-bin "${ANKI_BIN:-}" \
+            --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}" || true
+      - name: Upload lane evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-nightly-${{ matrix.label }}
+          path: artifacts/reliability/
+          retention-days: 30
+
+  backend:
+    name: Local Supabase suite, parity and mutation gate (linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - run: npm install -g supabase@2.115.0
+      - name: Local backend suite
+        working-directory: server
+        run: |
+          supabase start
+          python3 ../dev.py test --suite backend
+      - name: Scoring parity
+        run: python3 dev/scoring_parity.py --local
+      - name: Account contracts
+        run: python3 dev/account_contracts_e2e.py --local
+
+  endurance:
+    name: 30-minute endurance
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - name: Endurance run
+        run: |
+          RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+          mkdir -p "artifacts/reliability/${RUN_ID}/endurance"
+          python3 dev/endurance.py --minutes 30 --answers-per-second 2 \
+            --json "artifacts/reliability/${RUN_ID}/endurance/endurance-30m.json"
+      - name: Upload endurance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-nightly-endurance
+          path: artifacts/reliability/
+          retention-days: 30
+
+  hosted-fixtures:
+    name: Trusted hosted fixture smoke (real backend)
+    if: github.repository == 'wilsonhyeh/ankiscape'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    environment: hosted-fixtures
+    concurrency:
+      group: hosted-fixtures
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - name: Seed/verify permanent fixtures (idempotent)
+        env:
+          ANKISCAPE_PROD_URL: ${{ secrets.ANKISCAPE_PROD_URL }}
+          ANKISCAPE_PROD_ANON_KEY: ${{ secrets.ANKISCAPE_PROD_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ANKISCAPE_FIXTURE_SECRET: ${{ secrets.ANKISCAPE_FIXTURE_SECRET }}
+        run: |
+          python3 dev/seed_hosted_fixtures.py --hosted --plan
+          python3 dev/seed_hosted_fixtures.py --hosted --apply
+          python3 dev/seed_hosted_fixtures.py --hosted --apply
+          python3 dev/seed_hosted_fixtures.py --hosted --verify
+          python3 dev/hosted_fixture_e2e.py --hosted
+      - name: Upload hosted fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-nightly-hosted
+          path: artifacts/reliability/
+          retention-days: 30

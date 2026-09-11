@@ -66,5 +66,5 @@
       "note": ""
     }
   ],
-  "note": "Every record needs OS/arch, Python/Anki/Qt, archive SHA-256, command or exact manual steps, date, assertions, evidence paths. verify-evidence rejects missing targets, hash mismatches, and claimed passes with no record. Fleuron VM results do not count."
+  "note": "Every record needs OS/arch, Python/Anki/Qt, archive SHA-256, command or exact manual steps, date, assertions, evidence paths. verify-evidence rejects missing targets, hash mismatches, and claimed passes with no record. Fleuron VM results do not count. Native lane records are written by dev/reliability.py run-lane with the seven targets in dev/reliability-matrix.json; existing records stay historical and their dates are never rewritten."
 }

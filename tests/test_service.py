@@ -206,8 +206,7 @@ class TestSyncService(unittest.TestCase):
         svc = self._svc()
         out = svc.maybe_sync(manual=True)
         self.assertTrue(out["ok"])
-        ids = sorted(r["op_id"] for r in
-                     self.journal._conn.execute("SELECT op_id FROM operations"))
+        ids = sorted(self.journal.operation_ids())
         self.assertEqual(ids, ["op-a-1", "op-b-1"])
         # Download-first merge, then upload: the merged remote op is still
         # unacknowledged locally, so it uploads too (server dedups by op_id;

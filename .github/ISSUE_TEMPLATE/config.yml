@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support and reporting guide
+    url: https://github.com/wilsonhyeh/ankiscape/blob/main/SUPPORT.md
+    about: Where to ask questions and what never to post publicly.
+  - name: Security policy
+    url: https://github.com/wilsonhyeh/ankiscape/blob/main/SECURITY.md
+    about: How to report a vulnerability privately (never in a public issue).

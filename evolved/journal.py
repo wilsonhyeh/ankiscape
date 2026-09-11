@@ -14,8 +14,13 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-JOURNAL_SCHEMA_VERSION = 1
+JOURNAL_SCHEMA_VERSION = 2
 SYNC_POINTER_MAX_BYTES = 8 * 1024
+# Interactive accepted-answer writes must never sit behind a long lock: 25 ms
+# busy budget, then fail fast so the caller can show recovery instead of
+# freezing the review. Background/bulk writes keep the longer budget.
+INTERACTIVE_BUSY_MS = 25
+DEFAULT_BUSY_MS = 30000
 
 _SCHEMA_V1 = """
 PRAGMA journal_mode=WAL;
@@ -64,6 +69,19 @@ CREATE TABLE IF NOT EXISTS projection_checkpoints (
 );
 """
 
+# v2: O(1) known-claim index for the incremental fast path. Derived from
+# operations; rebuildable, never authoritative.
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS known_review_keys (
+  review_key TEXT PRIMARY KEY,
+  lamport INTEGER NOT NULL,
+  device_id TEXT NOT NULL,
+  device_seq INTEGER NOT NULL,
+  op_id TEXT NOT NULL,
+  first_seen INTEGER NOT NULL
+);
+"""
+
 
 def canonical_json(obj: Any) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -90,6 +108,7 @@ class Journal:
         cur = self._conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'")
         fresh = cur.fetchone() is None
         self._conn.executescript(_SCHEMA_V1)
+        self._conn.executescript(_SCHEMA_V2)
         row = self._conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
         if row is None:
             self._conn.execute("INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
@@ -102,12 +121,70 @@ class Journal:
             if v > JOURNAL_SCHEMA_VERSION:
                 raise RuntimeError(f"unsupported future journal schema v{v}; refusing to overwrite")
             if v < JOURNAL_SCHEMA_VERSION:
-                self._migrate(v)
+                self._migrate(v, fresh)
 
-    def _migrate(self, from_v: int) -> None:
-        # v1 is the first version; future migrations chain here.
+    def _migrate(self, from_v: int, fresh: bool = False) -> None:
+        # v2 adds the known-claim index; backfill it once from operations in
+        # canonical order so the first row per key is the earliest claim.
+        if from_v < 2 and not fresh:
+            self._conn.executescript(_SCHEMA_V2)
+            now = int(time.time())
+            seen = set()
+            rows = self._conn.execute(
+                "SELECT json_extract(payload_json, '$.review_key') AS rk,"
+                " json_extract(payload_json, '$.target_review_key') AS trk,"
+                " lamport, device_id, device_seq, op_id FROM operations"
+                " ORDER BY lamport, device_id, device_seq, op_id").fetchall()
+            for row in rows:
+                for key in (row["rk"], row["trk"]):
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO known_review_keys(review_key,"
+                        " lamport, device_id, device_seq, op_id, first_seen)"
+                        " VALUES(?,?,?,?,?,?)",
+                        (str(key), int(row["lamport"]), str(row["device_id"]),
+                         int(row["device_seq"]), str(row["op_id"]), now))
         self._conn.execute("UPDATE metadata SET value=? WHERE key='schema_version'",
                            (str(JOURNAL_SCHEMA_VERSION),))
+
+    def _register_known_keys(self, op: Dict[str, Any]) -> None:
+        """Call inside an open write transaction only."""
+        now = int(time.time())
+        payload = op.get("payload", {}) or {}
+        for field in ("review_key", "target_review_key"):
+            value = payload.get(field)
+            if value:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO known_review_keys(review_key, lamport,"
+                    " device_id, device_seq, op_id, first_seen)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (str(value), int(op.get("lamport", 0)),
+                     str(op.get("device_id", "")), int(op.get("device_seq", 0)),
+                     str(op.get("op_id", "")), now))
+
+    def is_known_review_key(self, review_key: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM known_review_keys WHERE review_key=? LIMIT 1",
+                (str(review_key),)).fetchone()
+        return row is not None
+
+    def is_known_review_key_before(self, review_key: str, watermark) -> bool:
+        """True when a claim for review_key exists at or before the canonical
+        watermark (i.e. was already folded into the checkpoint)."""
+        values = (int(watermark[0]), str(watermark[1]), int(watermark[2]),
+                  str(watermark[3]))
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT lamport, device_id, device_seq, op_id FROM"
+                " known_review_keys WHERE review_key=?", (str(review_key),)).fetchone()
+        if row is None:
+            return False
+        record = (int(row["lamport"]), str(row["device_id"]),
+                  int(row["device_seq"]), str(row["op_id"]))
+        return record <= values
 
     def close(self) -> None:
         with self._lock:
@@ -123,6 +200,74 @@ class Journal:
                 "SELECT COALESCE(MAX(device_seq),0) AS m FROM operations WHERE device_id=?",
                 (device_id,)).fetchone()
             return int(row["m"]) + 1
+
+    def record_review(self, op: Dict[str, Any], *, review_key: str, revlog_id: int,
+                      card_id: int, fingerprint: str) -> Dict[str, Any]:
+        """One atomic transaction: allocate device sequence, persist the
+        operation, enqueue the outbox entry and record the review
+        observation together. A duplicate identical operation returns its
+        existing committed identity; a changed payload for a reused op_id is
+        a conflict. Interactive busy budget is capped (25 ms) so a busy
+        database fails fast instead of stalling the review."""
+        payload = op.get("payload", {}) or {}
+        ph = payload_hash(payload)
+        blob = canonical_json(payload).decode("utf-8")
+        now = int(time.time())
+        op_id = str(op.get("op_id", ""))
+        with self._lock:
+            self._conn.execute(f"PRAGMA busy_timeout={INTERACTIVE_BUSY_MS}")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                existing = self._conn.execute(
+                    "SELECT op_id, payload_hash, device_id, device_seq, lamport"
+                    " FROM operations WHERE op_id=?", (op_id,)).fetchone()
+                if existing is not None:
+                    self._conn.execute("ROLLBACK")
+                    if existing["payload_hash"] == ph:
+                        return {"ok": True, "duplicate": True, "op_id": op_id,
+                                "device_id": existing["device_id"],
+                                "device_seq": int(existing["device_seq"]),
+                                "lamport": int(existing["lamport"])}
+                    return {"ok": False, "conflict": True, "op_id": op_id,
+                            "error": "op_id_reused_changed_payload"}
+                row = self._conn.execute(
+                    "SELECT COALESCE(MAX(device_seq),0) AS m FROM operations"
+                    " WHERE device_id=?", (op["device_id"],)).fetchone()
+                seq = int(row["m"]) + 1
+                self._conn.execute(
+                    "INSERT INTO operations(op_id, game_uuid, device_id, device_seq, lamport,"
+                    " kind, payload_json, payload_hash, created_at, acked)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,0)",
+                    (op_id, op["game_uuid"], op["device_id"], seq,
+                     int(op["lamport"]), op["kind"], blob, ph, now))
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO outbox(op_id, enqueued_at) VALUES(?,?)",
+                    (op_id, now))
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO review_observations(review_key, revlog_id,"
+                    " card_id, fingerprint, first_seen) VALUES(?,?,?,?,?)",
+                    (str(review_key), int(revlog_id), int(card_id),
+                     str(fingerprint), now))
+                self._register_known_keys(op)
+                self._conn.execute("COMMIT")
+                return {"ok": True, "duplicate": False, "op_id": op_id,
+                        "device_id": op["device_id"], "device_seq": seq,
+                        "lamport": int(op["lamport"]), "payload_hash": ph}
+            except sqlite3.OperationalError as exc:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                return {"ok": False, "busy": True, "op_id": op_id,
+                        "error": f"interactive_write_failed:{exc}"}
+            except Exception:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+            finally:
+                self._conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_MS}")
 
     def append_operation(self, op: Dict[str, Any]) -> Dict[str, Any]:
         """Persist op transactionally; returns stored row. Raises on conflict."""
@@ -141,6 +286,7 @@ class Journal:
                      ph, created))
                 self._conn.execute("INSERT OR IGNORE INTO outbox(op_id, enqueued_at) VALUES(?,?)",
                                    (op["op_id"], created))
+                self._register_known_keys(op)
                 self._conn.execute("COMMIT")
             except Exception:
                 try:
@@ -149,6 +295,39 @@ class Journal:
                     pass
                 raise
         return dict(op, payload_hash=ph)
+
+    def append_operation_auto_seq(self, op: Dict[str, Any]) -> Dict[str, Any]:
+        """Allocate the device sequence and persist op+outbox in one
+        transaction (off the interactive path; callers need not pre-allocate)."""
+        payload = op.get("payload", {}) or {}
+        ph = payload_hash(payload)
+        blob = canonical_json(payload).decode("utf-8")
+        created = int(time.time())
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT COALESCE(MAX(device_seq),0) AS m FROM operations"
+                    " WHERE device_id=?", (op["device_id"],)).fetchone()
+                seq = int(row["m"]) + 1
+                self._conn.execute(
+                    "INSERT INTO operations(op_id, game_uuid, device_id, device_seq, lamport,"
+                    " kind, payload_json, payload_hash, created_at, acked)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,0)",
+                    (op["op_id"], op["game_uuid"], op["device_id"], seq,
+                     int(op["lamport"]), op["kind"], blob, ph, created))
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO outbox(op_id, enqueued_at) VALUES(?,?)",
+                    (op["op_id"], created))
+                self._register_known_keys(op)
+                self._conn.execute("COMMIT")
+                return dict(op, device_seq=seq, payload_hash=ph)
+            except Exception:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
 
     def mark_acked(self, op_ids: List[str]) -> None:
         if not op_ids:
@@ -178,6 +357,168 @@ class Journal:
                 "INSERT OR IGNORE INTO review_observations(review_key, revlog_id, card_id,"
                 " fingerprint, first_seen) VALUES(?,?,?,?,?)",
                 (review_key, int(revlog_id), int(card_id), fingerprint, int(time.time())))
+
+    # ---------------------------------------------------------------- reads
+    # Every access to the operations table goes through these methods. No
+    # caller outside Journal touches `_conn`; the connection stays behind
+    # one lock policy.
+
+    @staticmethod
+    def _row_to_op(row) -> Dict[str, Any]:
+        import json as _json
+
+        return {"op_id": row["op_id"], "game_uuid": row["game_uuid"],
+                "device_id": row["device_id"], "device_seq": int(row["device_seq"]),
+                "lamport": int(row["lamport"]), "kind": row["kind"],
+                "payload": _json.loads(row["payload_json"])}
+
+    def all_operations(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT op_id, game_uuid, device_id, device_seq, lamport, kind,"
+                " payload_json FROM operations ORDER BY lamport, device_id,"
+                " device_seq, op_id").fetchall()
+        return [self._row_to_op(r) for r in rows]
+
+    def operations_after(self, watermark) -> List[Dict[str, Any]]:
+        """Canonical ops strictly after a (lamport, device_id, device_seq,
+        op_id) watermark, in canonical order."""
+        values = (int(watermark[0]), str(watermark[1]), int(watermark[2]),
+                  str(watermark[3]))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT op_id, game_uuid, device_id, device_seq, lamport, kind,"
+                " payload_json FROM operations"
+                " WHERE (lamport, device_id, device_seq, op_id) > (?,?,?,?)"
+                " ORDER BY lamport, device_id, device_seq, op_id", values).fetchall()
+        return [self._row_to_op(r) for r in rows]
+
+    def count_operations_through(self, watermark) -> int:
+        values = (int(watermark[0]), str(watermark[1]), int(watermark[2]),
+                  str(watermark[3]))
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM operations"
+                " WHERE (lamport, device_id, device_seq, op_id) <= (?,?,?,?)",
+                values).fetchone()
+        return int(row["n"])
+
+    def operation_count(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM operations").fetchone()
+        return int(row["n"])
+
+    def max_lamport(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(lamport),0) AS m FROM operations").fetchone()
+        return int(row["m"])
+
+    def operation_ids(self) -> List[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT op_id FROM operations ORDER BY op_id").fetchall()
+        return [str(r["op_id"]) for r in rows]
+
+    def find_operation_payload(self, op_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload_json FROM operations WHERE op_id=?",
+                (str(op_id),)).fetchone()
+        if row is None:
+            return None
+        import json as _json
+
+        try:
+            return _json.loads(row["payload_json"])
+        except ValueError:
+            return None
+
+    def review_observations(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT review_key, revlog_id, card_id, fingerprint FROM"
+                " review_observations ORDER BY rowid").fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_review_disposition(self, review_key: str) -> str:
+        """'retracted', 'active', or 'unknown' (no retraction history)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT kind FROM operations WHERE kind IN"
+                " ('review_retract', 'review_restore') AND"
+                " json_extract(payload_json, '$.target_review_key') = ?"
+                " ORDER BY lamport DESC, device_id, device_seq LIMIT 1",
+                (str(review_key),)).fetchall()
+        if not rows:
+            return "active"
+        return "retracted" if rows[0]["kind"] == "review_retract" else "active"
+
+    def get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM metadata WHERE key=?", (str(key),)).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_metadata(self, key: str, value: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO metadata(key, value) VALUES(?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(key), str(value)))
+
+    # ----------------------------------------------------------- checkpoints
+
+    def load_checkpoint(self, game_uuid: str) -> Optional[Dict[str, Any]]:
+        """Derived projection cache. Disposable: corruption/version mismatch
+        must fall back to a full replay, never fail the game."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT revision, state_json FROM projection_checkpoints"
+                " WHERE game_uuid=?", (str(game_uuid),)).fetchone()
+        if row is None:
+            return None
+        import json as _json
+
+        try:
+            loaded = _json.loads(row["state_json"])
+        except ValueError:
+            return None
+        if not isinstance(loaded, dict):
+            return None
+        from .reducer import prepare_checkpoint
+
+        return prepare_checkpoint(loaded)
+
+    def save_checkpoint(self, game_uuid: str, revision: int,
+                        checkpoint: Dict[str, Any]) -> None:
+        """Serialize first, then one short write transaction."""
+        from .reducer import checkpoint_for_storage, prepare_checkpoint
+
+        prepare_checkpoint(checkpoint)
+        blob = json.dumps(checkpoint_for_storage(checkpoint),
+                          separators=(",", ":"), ensure_ascii=False)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "INSERT INTO projection_checkpoints(game_uuid, revision,"
+                    " state_json, updated_at) VALUES(?,?,?,?)"
+                    " ON CONFLICT(game_uuid) DO UPDATE SET"
+                    " revision=excluded.revision, state_json=excluded.state_json,"
+                    " updated_at=excluded.updated_at",
+                    (str(game_uuid), int(revision), blob, int(time.time())))
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def delete_checkpoint(self, game_uuid: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM projection_checkpoints WHERE game_uuid=?",
+                (str(game_uuid),))
 
     def get_server_cursor(self, game_uuid: str) -> str:
         row = self._conn.execute(
@@ -247,6 +588,7 @@ class Journal:
                         self._conn.execute(
                             "INSERT OR IGNORE INTO outbox(op_id, enqueued_at) VALUES(?,?)",
                             (op["op_id"], int(time.time())))
+                        self._register_known_keys(op)
                     except (KeyError, ValueError, TypeError):
                         continue
                 for ob in obs:

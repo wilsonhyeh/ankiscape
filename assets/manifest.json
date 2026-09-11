@@ -2321,6 +2321,78 @@
       "width": 32,
       "height": 32,
       "format": "png"
+    },
+    {
+      "id": "ui.pause_icon",
+      "kind": "ui",
+      "display": "Pause indicator",
+      "path": "icon/pause_icon.png",
+      "consumers": [
+        "evolved.assets.SLOT_ICONS"
+      ],
+      "action": "keep",
+      "status": "original",
+      "rights": "original",
+      "origin": "scripts/make_ui_assets.py",
+      "bytes": 112,
+      "sha256": "01f830c952a8b3643eebf8c76f982ed2d4540e09cc8f642ab1e67f37364bb2b0",
+      "width": 32,
+      "height": 32,
+      "format": "png"
+    },
+    {
+      "id": "ui.pending_icon",
+      "kind": "ui",
+      "display": "Pending sync indicator",
+      "path": "icon/pending_icon.png",
+      "consumers": [
+        "evolved.assets.SLOT_ICONS"
+      ],
+      "action": "keep",
+      "status": "original",
+      "rights": "original",
+      "origin": "scripts/make_ui_assets.py",
+      "bytes": 144,
+      "sha256": "82fd4c5aab6341fba06160ca32a1b07c27bddb253fb6e8b40a2c119b520e56b4",
+      "width": 32,
+      "height": 32,
+      "format": "png"
+    },
+    {
+      "id": "ui.offline_icon",
+      "kind": "ui",
+      "display": "Offline indicator",
+      "path": "icon/offline_icon.png",
+      "consumers": [
+        "evolved.assets.SLOT_ICONS"
+      ],
+      "action": "keep",
+      "status": "original",
+      "rights": "original",
+      "origin": "scripts/make_ui_assets.py",
+      "bytes": 155,
+      "sha256": "404b5e698a1d649ec0453d04af83b76b08a1573ab752f10e1f7fb84c5c499c73",
+      "width": 32,
+      "height": 32,
+      "format": "png"
+    },
+    {
+      "id": "ui.report_icon",
+      "kind": "ui",
+      "display": "Report a bug",
+      "path": "icon/report_icon.png",
+      "consumers": [
+        "evolved.assets.SLOT_ICONS"
+      ],
+      "action": "keep",
+      "status": "original",
+      "rights": "original",
+      "origin": "scripts/make_ui_assets.py",
+      "bytes": 144,
+      "sha256": "ee66827711edf31f63ba5870270d0f4905608b29da9a1fdfb85422c3872b4891",
+      "width": 32,
+      "height": 32,
+      "format": "png"
     }
   ]
 }

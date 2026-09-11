@@ -1,0 +1,114 @@
+{
+  "schema": "ankiscape-reliability-matrix",
+  "version": 1,
+  "note": "Scenario/target inventory for dev/reliability.py. Versions are compared with zero-pad normalization (26.08.1 == 26.8.1) but records keep actual strings. host: any = executable anywhere, linux-docker = Linux with Docker, linux-native = Linux with Anki + Xvfb, targets = every required target, trusted = one trusted lane in the evidence set.",
+  "required_targets": [
+    { "os": "macos", "anki": "23.10", "qt": "6" },
+    { "os": "macos", "anki": "26.8.1", "qt": "6" },
+    { "os": "windows", "anki": "23.10", "qt": "6" },
+    { "os": "windows", "anki": "26.8.1", "qt": "6" },
+    { "os": "linux", "anki": "23.10", "qt": "5" },
+    { "os": "linux", "anki": "23.10", "qt": "6" },
+    { "os": "linux", "anki": "26.8.1", "qt": "6" }
+  ],
+  "scenarios": [
+    {
+      "id": "python-suite",
+      "title": "Python test suite",
+      "stages": ["pr", "nightly", "release"],
+      "host": "any",
+      "command": ["python", "run_tests.py"],
+      "counts": "unittest"
+    },
+    {
+      "id": "generated-small",
+      "title": "Generated traces, PR scale (>=100 sequences of <=100 ops)",
+      "stages": ["pr"],
+      "host": "any",
+      "command": ["python", "-m", "unittest", "tests.test_generated_sequences", "-v"],
+      "counts": "unittest"
+    },
+    {
+      "id": "generated-expanded",
+      "title": "Generated traces, nightly/release scale (>=1000 sequences; >=5000 on release)",
+      "stages": ["nightly", "release"],
+      "host": "any",
+      "command": ["python", "dev/generated_traces.py", "--stage"],
+      "counts": "script"
+    },
+    {
+      "id": "asset-audit",
+      "title": "Asset manifest/offline audit",
+      "stages": ["pr", "nightly", "release"],
+      "host": "any",
+      "command": ["python", "scripts/audit_assets.py", "--check"]
+    },
+    {
+      "id": "package-audit",
+      "title": "Add-on package build check and archive audit",
+      "stages": ["pr", "nightly", "release"],
+      "host": "any",
+      "command": ["python", "scripts/build_addon.py", "--check"]
+    },
+    {
+      "id": "backend-local",
+      "title": "Local Supabase reset x2 + pgTAP + live Auth/RPC smoke",
+      "stages": ["pr", "nightly", "release"],
+      "host": "linux-docker",
+      "command": ["python", "dev.py", "test", "--suite", "backend"]
+    },
+    {
+      "id": "native-smoke",
+      "title": "One current Linux native packaged journey",
+      "stages": ["pr", "nightly", "release"],
+      "host": "linux-native"
+    },
+    {
+      "id": "native-matrix",
+      "title": "Native packaged journeys on this target",
+      "stages": ["nightly", "release"],
+      "host": "targets"
+    },
+    {
+      "id": "native-journeys",
+      "title": "New native journeys (deferred rewards, rebuild, reporting, polish, test leaderboard, credentials, profile races, recovery)",
+      "stages": ["nightly", "release"],
+      "host": "targets"
+    },
+    {
+      "id": "performance",
+      "title": "Performance metrics vs dev/reliability-budgets.json",
+      "stages": ["nightly", "release"],
+      "host": "targets"
+    },
+    {
+      "id": "endurance-30m",
+      "title": "30-minute active endurance run",
+      "stages": ["nightly"],
+      "host": "targets"
+    },
+    {
+      "id": "endurance-2h",
+      "title": "Two-hour active endurance run",
+      "stages": ["release"],
+      "host": "targets"
+    },
+    {
+      "id": "mutation-gate",
+      "title": "Targeted mutation gate on reward/cohort/diagnostic guards",
+      "stages": ["release"],
+      "host": "any"
+    },
+    {
+      "id": "hosted-fixtures",
+      "title": "Hosted permanent fixture smoke (trusted lane, real backend)",
+      "stages": ["nightly", "release"],
+      "host": "trusted"
+    }
+  ],
+  "workflows": {
+    "pr": ".github/workflows/pr.yml",
+    "nightly": ".github/workflows/nightly.yml",
+    "release": ".github/workflows/release-verify.yml"
+  }
+}

@@ -816,7 +816,33 @@ except Exception:
 _EVOLVED_CTX: dict = {"engine": None, "journal": None, "game_uuid": None,
                        "generation": 0, "user_id": None, "profile_session": None,
                        "sync_service": None, "endpoint": None,
-                       "endpoint_dev": None}
+                       "endpoint_dev": None, "self_context": None}
+
+# Async reward finalization: review_key -> captured context. Outcomes are
+# finalized exactly once for the session recap and the 200-review sync
+# trigger; Undo before completion drops the pending entry (no obsolete toast).
+_PENDING_REVIEWS: dict = {}
+_PENDING_POLLS = {"count": 0}
+# Persistent nonmodal game-recovery state after a failed interactive write.
+_RECOVERY_WARNING: dict = {"active": False, "message": "", "since": 0.0}
+
+
+def _evolved_mark_recovery(reason) -> None:
+    """A failed interactive write: keep reviewing, warn persistently, award
+    nothing and never claim the credit was saved."""
+    _RECOVERY_WARNING.update({"active": True, "message": str(reason)[:200],
+                              "since": time.time()})
+    try:
+        from .evolved.ui.shell import refresh_shell
+        if getattr(mw, "ankiscape_evolved_shell", None) is not None:
+            refresh_shell(mw)
+    except Exception:
+        pass
+
+
+def _evolved_clear_recovery() -> None:
+    if _RECOVERY_WARNING.get("active"):
+        _RECOVERY_WARNING.update({"active": False, "message": "", "since": 0.0})
 
 
 def runtime_menu_opener():
@@ -955,6 +981,7 @@ def _evolved_status() -> dict:
         "pending": _evolved_pending(),
         "last_success": None,
         "last_error": "",
+        "updating": False,
     }
     try:
         if svc is not None:
@@ -965,15 +992,30 @@ def _evolved_status() -> dict:
             status["last_error"] = last_error
     except Exception:
         pass
+    try:
+        engine = _EVOLVED_CTX.get("engine")
+        if engine is not None and hasattr(engine, "projection_status"):
+            projection_status = engine.projection_status()
+            status["updating"] = bool(projection_status.get("busy")
+                                      or projection_status.get("loading"))
+            if projection_status.get("failed") and not status["last_error"]:
+                status["last_error"] = f"projection:{projection_status['failed']}"
+    except Exception:
+        pass
+    if _RECOVERY_WARNING.get("active"):
+        status["recovery"] = True
+        status["recovery_message"] = str(_RECOVERY_WARNING.get("message", ""))
     return status
 
 
 def _evolved_account_info() -> dict:
     sess = _evolved_profile_session()
-    return {"logged_in": bool(sess is not None and sess.logged_in),
+    logged_in = bool(sess is not None and sess.logged_in)
+    return {"logged_in": logged_in,
             "username": (getattr(sess, "username", None) if sess else None) or "",
             "remembered": bool(sess and sess.remember and sess.persistence_ok),
-            "vault_available": bool(sess and sess.vault and sess.vault.available)}
+            "vault_available": bool(sess and sess.vault and sess.vault.available),
+            "is_test": bool(logged_in and _evolved_is_test_cohort())}
 
 
 def _evolved_change_training(skill: str, resource: str) -> dict:
@@ -1578,18 +1620,49 @@ def _evolved_end_session() -> None:
     _EVOLVED_CTX["session"] = None
 
 
-def _evolved_hiscores_cache_get(skill: str):
+def _evolved_hiscores_cache_key(skill: str, cohort: bool = False) -> str:
+    return ("test:" if cohort else "public:") + str(skill)
+
+
+def _evolved_hiscores_cache_get(skill: str, cohort: bool = False):
     cache = _EVOLVED_CTX.get("hiscores_cache") or {}
-    return cache.get(str(skill))
+    return cache.get(_evolved_hiscores_cache_key(skill, cohort))
 
 
-def _evolved_hiscores_cache_set(skill: str, payload: dict) -> None:
+def _evolved_hiscores_cache_set(skill: str, payload: dict,
+                                cohort: bool = False) -> None:
     cache = dict(_EVOLVED_CTX.get("hiscores_cache") or {})
-    cache[str(skill)] = payload
+    cache[_evolved_hiscores_cache_key(skill, cohort)] = payload
     _EVOLVED_CTX["hiscores_cache"] = cache
 
 
-def _evolved_query_hiscores_async(skill: str, limit: int, on_done) -> None:
+def _evolved_is_test_cohort() -> bool:
+    """Server-reported cohort for the signed-in account. Never a client
+    flag: a cached self_context from /rpc/self_context, defaulting to the
+    public cohort when unavailable."""
+    try:
+        sess = _evolved_profile_session()
+        if sess is None or not sess.logged_in:
+            return False
+        cache = _EVOLVED_CTX.get("self_context")
+        if isinstance(cache, dict) and cache.get("user_id") == sess.user_id:
+            return bool(cache.get("is_test"))
+        from .evolved.service import fetch_self_context
+        from .evolved.net import post_json as _post
+        endpoint = _evolved_endpoint()
+        if endpoint is None:
+            return False
+        context = fetch_self_context(_post, endpoint, sess)
+        if not isinstance(context, dict):
+            return False
+        _EVOLVED_CTX["self_context"] = {"user_id": sess.user_id, **context}
+        return bool(context.get("is_test"))
+    except Exception:
+        return False
+
+
+def _evolved_query_hiscores_async(skill: str, limit: int, on_done,
+                                  cohort: bool = False) -> None:
     """Run the query off the Qt thread; deliver on the main thread guarded by
     generation + user identity."""
     import time as _time
@@ -1601,7 +1674,7 @@ def _evolved_query_hiscores_async(skill: str, limit: int, on_done) -> None:
         generation, user = 0, None
 
     def _task():
-        rows = _evolved_query_hiscores(skill, limit)
+        rows = _evolved_query_hiscores(skill, limit, cohort)
         return {"ok": True, "rows": rows, "fetched_at": _time.time()}
 
     def _deliver(result):
@@ -1614,7 +1687,7 @@ def _evolved_query_hiscores_async(skill: str, limit: int, on_done) -> None:
         except Exception:
             return
         if isinstance(result, dict) and result.get("ok"):
-            _evolved_hiscores_cache_set(skill, result)
+            _evolved_hiscores_cache_set(skill, result, cohort)
         try:
             on_done(result)
         except Exception:
@@ -1654,7 +1727,8 @@ def _evolved_query_hiscores_async(skill: str, limit: int, on_done) -> None:
         _failure(exc)
 
 
-def _evolved_lookup_async(username: str, skill: str, on_done) -> None:
+def _evolved_lookup_async(username: str, skill: str, on_done,
+                          cohort: bool = False) -> None:
     """Username lookup against public_profile + selected-skill Hiscores
     rank. Delivered on the main thread; late callbacks after a profile or
     generation change are discarded (same guard as the ranks query)."""
@@ -1676,7 +1750,7 @@ def _evolved_lookup_async(username: str, skill: str, on_done) -> None:
         try:
             return query_public_profile(_post, endpoint, sess,
                                         username=username, skill=selected,
-                                        limit=50)
+                                        limit=50, cohort=cohort)
         except Exception as exc:
             return {"ok": False, "error": str(exc)[:200]}
 
@@ -1828,6 +1902,7 @@ def _evolved_shell_deps() -> dict:
         "take_preselect": _evolved_take_preselect,
         "get_session_recap": _evolved_session_recap,
         "refresh_views": _evolved_refresh_views,
+        "on_report_issue": _evolved_report_issue,
     }
 
 
@@ -2049,7 +2124,8 @@ def _evolved_manual_sync() -> dict:
         return {"ok": False, "error": repr(exc)[:200]}
 
 
-def _evolved_query_hiscores(skill: str, limit: int = 50):
+def _evolved_query_hiscores(skill: str, limit: int = 50,
+                            cohort: bool = False):
     try:
         from .evolved.service import query_hiscores
         from .evolved.net import post_json as _post
@@ -2057,7 +2133,8 @@ def _evolved_query_hiscores(skill: str, limit: int = 50):
         endpoint = _evolved_endpoint()
         if sess is None or not sess.logged_in or endpoint is None:
             raise RuntimeError("offline — log in to sync and view hiscores")
-        return query_hiscores(_post, endpoint, sess, skill=skill, limit=limit)
+        return query_hiscores(_post, endpoint, sess, skill=skill, limit=limit,
+                              cohort=cohort)
     except Exception as exc:
         raise RuntimeError(str(exc)[:200])
 
@@ -2083,6 +2160,111 @@ def _evolved_account_dialog() -> None:
         _evolved_refresh_views()
     except Exception:
         pass
+
+
+def _evolved_report_issue():
+    """Open the private-by-default Report a bug dialog (user-driven only)."""
+    try:
+        from .evolved.ui.report_issue import show_report_issue
+        parent = getattr(mw, "ankiscape_evolved_shell", None) or mw
+        return show_report_issue(parent, {
+            "collect_diagnostics": _evolved_diagnostics_payload,
+            "copy_text": _evolved_copy_text,
+            "open_url": _evolved_open_url,
+        })
+    except Exception as exc:
+        return {"action": "error", "error": repr(exc)[:200]}
+
+
+def _evolved_copy_text(text: str) -> bool:
+    try:
+        from aqt.qt import QApplication
+        QApplication.clipboard().setText(str(text))
+        return True
+    except Exception:
+        return False
+
+
+def _evolved_open_url(url: str) -> bool:
+    try:
+        from aqt.qt import QDesktopServices, QUrl
+        return bool(QDesktopServices.openUrl(QUrl(str(url))))
+    except Exception:
+        return False
+
+
+def _evolved_runtime_versions() -> dict:
+    versions = {"anki": "", "qt": ""}
+    try:
+        import anki as _anki
+        versions["anki"] = str(getattr(_anki, "version", "") or "")
+    except Exception:
+        pass
+    try:
+        from aqt.qt import qVersion
+        versions["qt"] = str(qVersion())
+    except Exception:
+        pass
+    return versions
+
+
+def _evolved_artifact_id() -> str:
+    try:
+        from .evolved import prod_config
+        return str(getattr(prod_config, "PROD_URL", "") or "")[:24]
+    except Exception:
+        return ""
+
+
+def _evolved_mode_name() -> str:
+    try:
+        if _RUNTIME_AVAILABLE:
+            rt = _runtime_mod.get_runtime()
+            return str(getattr(rt.active_adapter, "name", "") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _evolved_diagnostics_payload() -> dict:
+    """Exact allowlisted payload a report may carry. Recorded in the bounded
+    local ring; never includes raw logs, ids, paths or exception text."""
+    import platform
+    from .evolved import diagnostics as _diag
+    from .evolved import ADDON_VERSION
+    status = _evolved_status() or {}
+    settings = _evolved_get_settings() or {}
+    versions = _evolved_runtime_versions()
+    worker: dict = {}
+    try:
+        engine = _EVOLVED_CTX.get("engine")
+        if engine is not None and hasattr(engine, "projection_status"):
+            worker = engine.projection_status() or {}
+    except Exception:
+        worker = {}
+    payload = _diag.collect(
+        addon_version=ADDON_VERSION,
+        artifact_id=_evolved_artifact_id(),
+        anki=versions.get("anki", ""),
+        python=platform.python_version(),
+        qt=versions.get("qt", ""),
+        os_name=platform.system(),
+        arch=platform.machine(),
+        mode=_evolved_mode_name(),
+        error_code=(status.get("recovery_message")
+                    or worker.get("failed")
+                    or status.get("last_error", "")),
+        pending=_evolved_pending(),
+        toggles=settings,
+        timings={"worker_queue_latency_p95": 0} if worker.get("busy") else {},
+        recovery=bool(_RECOVERY_WARNING.get("active")),
+        worker_failed=bool(worker.get("failed")),
+        logged_in=bool(_evolved_account_info().get("logged_in")))
+    try:
+        _diag.record(payload)
+    except Exception:
+        pass
+    return payload
 
 
 def _evolved_recovery_flow():
@@ -2660,6 +2842,29 @@ def _routing_on_profile_close():
             _runtime_mod.get_runtime().end_profile()
     except Exception:
         pass
+    # Stop the projection worker with a bounded join; it owns its connection
+    # and finishes/abandons itself, so profile close never blocks on a
+    # rebuild. Flush the derived checkpoint first so restarts stay fast.
+    try:
+        engine = _EVOLVED_CTX.get("engine")
+        if engine is not None:
+            try:
+                engine.flush_checkpoint()
+            except Exception:
+                pass
+            worker = engine.detach_worker()
+            if worker is not None:
+                try:
+                    if not worker.stop(timeout=1.0):
+                        debug_log("evolved: projection worker still finishing; "
+                                  "its connection closes on thread exit")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    _PENDING_REVIEWS.clear()
+    _PENDING_POLLS["count"] = 0
+    _RECOVERY_WARNING.update({"active": False, "message": "", "since": 0.0})
     # Release Evolved widgets/HUD after generation invalidation.
     try:
         from .evolved.ui.shell import release_shell
@@ -2699,7 +2904,8 @@ def _routing_on_profile_close():
                          "sync_service_game": None, "sync_service_user": None,
                          "endpoint": None, "endpoint_dev": None,
                          "onboarding": None, "session": None,
-                         "hiscores_cache": None, "preselect": None})
+                         "hiscores_cache": None, "preselect": None,
+                         "self_context": None})
     try:
         from .evolved.ui.hud import HudOwner  # noqa: F401 (owner release point)
     except Exception:
@@ -2809,6 +3015,13 @@ def _ensure_evolved_engine():
         engine.hydrate()
     except Exception:
         pass
+    try:
+        from .evolved.projection_worker import ProjectionWorker
+        worker = ProjectionWorker(journal.path, engine.cfg).start()
+        worker.notify_dirty()
+        engine.attach_worker(worker)
+    except Exception as exc:
+        debug_log(f"evolved: projection worker unavailable: {exc!r}")
     _EVOLVED_CTX.update({"engine": engine, "journal": journal, "game_uuid": game_uuid,
                          "user_id": _EVOLVED_CTX.get("user_id")})
     return engine
@@ -2901,7 +3114,33 @@ def _on_did_answer_card(reviewer, card, ease):
             return
         if isinstance(result, dict) and result.get("needs_recovery"):
             debug_log("evolved: persistence failed; game requires recovery")
+            _evolved_mark_recovery(result.get("error", "persist_failed"))
+            # Conservative reconciliation from Anki's accepted revlog happens
+            # on the existing undo/sync hooks; never invent the missing
+            # training selection or claim the credit was saved.
+            try:
+                _reconcile_undo_state()
+            except Exception:
+                pass
             return
+        if isinstance(result, dict) and result.get("pending"):
+            # Persisted durably; the projection worker publishes the outcome.
+            # Finalize exactly once when it lands, and show a quiet updating
+            # HUD in the meantime (no reward before completion).
+            try:
+                _evolved_after_review_event(result, engine, skill, resource)
+            except Exception as exc:
+                debug_log(f"evolved: pending publish failed: {exc!r}")
+            _evolved_finalize_pending()
+            if _PENDING_REVIEWS:
+                try:
+                    from aqt.qt import QTimer as _QTimer
+                    _QTimer.singleShot(150, _evolved_finalize_pending)
+                    _QTimer.singleShot(200, _evolved_check_completion)
+                except Exception:
+                    pass
+            return
+        _evolved_clear_recovery()
         # Publish to the open shell + HUD from persisted reward events (never
         # from answer-button clicks); paused reviews show their reason.
         try:
@@ -2913,31 +3152,145 @@ def _on_did_answer_card(reviewer, card, ease):
             _QTimer.singleShot(200, _evolved_check_completion)
         except Exception:
             pass
-        # Count toward the 200-review sync trigger; a policy-2 paused review
-        # is persisted but not a positive award.
-        if isinstance(result, dict) and result.get("awarded"):
-            try:
-                svc = _EVOLVED_CTX.get("sync_service")
-                if svc is not None:
-                    svc.note_reviews(1)
-            except Exception:
-                pass
     except Exception:
         pass
+
+
+def _evolved_record_outcome(engine, key: str, outcome: str, awarded: bool,
+                            paused: bool, skill: str = "") -> None:
+    """Session recap + sync trigger bookkeeping for one finalized outcome."""
+    if not key:
+        return
+    try:
+        from .evolved import session_summary as _ss
+        session = _EVOLVED_CTX.get("session")
+        if session is not None:
+            _ss.record(session, key, outcome, awarded, paused)
+    except Exception:
+        pass
+    if awarded:
+        try:
+            svc = _EVOLVED_CTX.get("sync_service")
+            if svc is not None:
+                svc.note_reviews(1)
+        except Exception:
+            pass
+
+
+def _evolved_finalize_pending() -> int:
+    """Finalize async review outcomes exactly once (session recap, sync
+    trigger, reward toast). Undo before completion removes the review from
+    Anki history but the pending entry is dropped when its key never appears:
+    the retraction suppresses the obsolete award downstream instead."""
+    engine = _EVOLVED_CTX.get("engine")
+    if engine is None or not _PENDING_REVIEWS:
+        return 0
+    # Undo-before-completion drops the award downstream; expire captions that
+    # can never finalize so the map stays bounded in a long session.
+    now = time.time()
+    for key in list(_PENDING_REVIEWS.keys()):
+        if now - float(_PENDING_REVIEWS[key].get("queued", now)) > 300.0:
+            _PENDING_REVIEWS.pop(key, None)
+    finalized = 0
+    for key in list(_PENDING_REVIEWS.keys()):
+        try:
+            outcome = engine.outcome_for(key)
+        except Exception:
+            outcome = None
+        if outcome is None:
+            continue
+        info = _PENDING_REVIEWS.pop(key, {})
+        _evolved_finalize_one(engine, key, info, outcome)
+        finalized += 1
+    if finalized:
+        try:
+            from .evolved.ui.shell import refresh_shell
+            if getattr(mw, "ankiscape_evolved_shell", None) is not None:
+                refresh_shell(mw)
+        except Exception:
+            pass
+    if _PENDING_REVIEWS:
+        status = {}
+        try:
+            if hasattr(engine, "projection_status"):
+                status = engine.projection_status()
+        except Exception:
+            status = {}
+        if status.get("failed"):
+            _evolved_mark_recovery(f"projection:{status.get('failed')}")
+            _PENDING_REVIEWS.clear()
+            return finalized
+        _PENDING_POLLS["count"] += 1
+        if _PENDING_POLLS["count"] <= 50:
+            try:
+                from aqt.qt import QTimer as _QTimer
+                _QTimer.singleShot(150, _evolved_finalize_pending)
+            except Exception:
+                pass
+    else:
+        _PENDING_POLLS["count"] = 0
+    return finalized
+
+
+def _evolved_finalize_one(engine, key: str, info: dict, outcome: dict) -> None:
+    awarded = bool(outcome.get("rewarded"))
+    outcome_name = str(outcome.get("outcome", "") or "")
+    paused = outcome_name in ("paused_materials", "paused_level")
+    skill = str(info.get("skill") or outcome.get("skill") or "")
+    _evolved_record_outcome(engine, key, outcome_name, awarded, paused, skill)
+    try:
+        from .evolved.ui import qt_hud
+        projection = engine.projection()
+        settings = _evolved_get_settings()
+        reward = outcome if awarded else None
+        pause_text = ""
+        if paused and not awarded:
+            pause_text = _evolved_pause_text(projection, skill, outcome_name)
+        qt_hud.on_review_event(
+            mw, projection, skill, reward=reward,
+            paused_reason=(pause_text or outcome_name),
+            settings={"visible": bool(settings.get("hud_visible", True)),
+                      "position": settings.get("hud_position", "bottom"),
+                      "ui_scale": settings.get("ui_scale", 100),
+                      "celebrations": bool(settings.get("celebrations", True)),
+                      "reduced_motion": bool(settings.get("reduced_motion", False)),
+                      "sound": bool(settings.get("sound", False))})
+        before = int((info.get("before_levels") or {}).get(skill, 1))
+        after = int((projection.get("levels") or {}).get(skill, 1))
+        if awarded and after > before and bool(settings.get("celebrations", True)):
+            qt_hud.celebrate(
+                mw, f"Level up: {skill.title()} {after}", kind="level",
+                settings={"sound": bool(settings.get("sound", False)),
+                          "reduced_motion": bool(settings.get("reduced_motion", False))})
+    except Exception as exc:
+        debug_log(f"evolved: reward finalize publish failed: {exc!r}")
 
 
 def _evolved_after_review_event(result, engine, skill: str, resource: str) -> None:
     """HUD/shell/session publication for one persisted review event."""
+    result = result or {}
+    if result.get("pending"):
+        key = result.get("review_key")
+        if key:
+            _PENDING_REVIEWS[key] = {
+                "skill": skill, "resource": resource, "queued": time.time(),
+                "before_levels": dict(result.get("before_levels") or {})}
+        try:
+            _evolved_update_hud_after_reward()
+        except Exception:
+            pass
+        try:
+            from .evolved.ui.shell import refresh_shell
+            if getattr(mw, "ankiscape_evolved_shell", None) is not None:
+                refresh_shell(mw)
+        except Exception:
+            pass
+        return
     outcome = (result or {}).get("outcome", "") or ""
     awarded = bool((result or {}).get("awarded"))
-    try:
-        from .evolved import session_summary as _ss
-        session = _EVOLVED_CTX.get("session")
-        if session is not None and (result or {}).get("review_key"):
-            _ss.record(session, (result or {}).get("review_key", ""), outcome,
-                       awarded, outcome in ("paused_materials", "paused_level"))
-    except Exception:
-        pass
+    paused = outcome in ("paused_materials", "paused_level")
+    _evolved_record_outcome(engine, (result or {}).get("review_key", ""),
+                            outcome, awarded, paused, skill)
     try:
         from .evolved.ui import qt_hud
         projection = engine.projection()
@@ -2947,7 +3300,7 @@ def _evolved_after_review_event(result, engine, skill: str, resource: str) -> No
             reward_outcomes = (projection.get("review_outcomes") or {})
             reward = reward_outcomes.get((result or {}).get("review_key", ""))
         pause_text = ""
-        if outcome in ("paused_materials", "paused_level") and not awarded:
+        if paused and not awarded:
             pause_text = _evolved_pause_text(projection, skill, outcome)
         qt_hud.on_review_event(
             mw, projection, skill, reward=reward,

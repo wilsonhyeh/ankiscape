@@ -16,6 +16,8 @@ Claim precedence per review_key: direct > skip (Classic-mode no-reward claim)
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from fractions import Fraction
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,10 +30,500 @@ from .logic_pure import (
 CATCHUP_SKILLS = ("mining", "woodcutting", "fishing")
 _DIRECT_SKILLS = ("mining", "woodcutting", "fishing", "cooking", "smithing", "crafting")
 SUPPORTED_POLICIES = (1, 2)
+REDUCER_VERSION = 2
+CHECKPOINT_VERSION = 1
+# Presentation-only per-review outcomes are bounded so the fast path never
+# copies an ever-growing map on each accepted answer. Older outcomes fall out
+# of recent windows; XP/inventory/counters remain authoritative and complete.
+OUTCOME_WINDOW = 2000
+
+_RULES_HASH_CACHE: Dict[int, Tuple[Any, str]] = {}
 
 
 def canonical_order_key(op: Dict[str, Any]):
     return (int(op["lamport"]), str(op["device_id"]), int(op["device_seq"]), str(op["op_id"]))
+
+
+def watermark_tuple(value) -> Optional[Tuple[int, str, int, str]]:
+    if not value:
+        return None
+    try:
+        return (int(value[0]), str(value[1]), int(value[2]), str(value[3]))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def rules_hash(rules: Dict[str, Any]) -> str:
+    cached = _RULES_HASH_CACHE.get(id(rules))
+    if cached is not None and cached[0] is rules:
+        return cached[1]
+    blob = json.dumps(rules, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+    digest = hashlib.sha256(blob).hexdigest()
+    _RULES_HASH_CACHE[id(rules)] = (rules, digest)
+    return digest
+
+
+def prepare_checkpoint(checkpoint: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Attach the in-memory known-key set; extending consumes the checkpoint."""
+    if not checkpoint:
+        return checkpoint
+    if "_known_set" not in checkpoint:
+        checkpoint["_known_set"] = set(checkpoint.get("known_keys") or [])
+    return checkpoint
+
+
+def checkpoint_for_storage(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    """JSON-safe, bounded view: known-key claims are indexed in the journal
+    (known_review_keys), so they are not duplicated into the derived cache."""
+    out = {k: v for k, v in checkpoint.items() if not k.startswith("_")}
+    out.pop("known_keys", None)
+    return out
+
+
+class ProjectionState:
+    """Mutable fold state shared by full replay and incremental checkpoint
+    extension. Applying an already-selected winner here is the single
+    implementation of reward application; full replay and the fast path call
+    exactly the same method, so integer XP, draw inputs, achievements,
+    inventory, pauses and gem grants cannot drift apart."""
+
+    def __init__(self, rules: Dict[str, Any], game_uuid: str):
+        self.rules = rules
+        self.game_uuid = game_uuid
+        self.rules_version = int(rules.get("rules_version", 1))
+        self.thresholds = rules.get("thresholds", [])
+        self.ores = {o["display"]: o for o in rules.get("ores", [])}
+        self.trees = {t["display"]: t for t in rules.get("trees", [])}
+        self.fish = {f["display"]: f for f in rules.get("fish", [])}
+        self.bars = {b["display"]: b for b in rules.get("bars", [])}
+        self.crafts = {c["display"]: c for c in rules.get("crafting", [])}
+        self.gems = rules.get("gems", [])
+        self.xp: Dict[str, int] = {s: 0 for s in SKILLS}
+        self.inv: Dict[str, int] = {}
+        self.counters: Dict[str, int] = {
+            "successful_actions": 0, "cooking_attempts": 0, "successful_cooks": 0,
+            "gems": 0, "first_catch": 0, "first_cook": 0}
+        self.per_skill_success: Dict[str, int] = {s: 0 for s in SKILLS}
+        self.adjustments: List[str] = []
+        self.diagnostics: List[str] = []
+        self.conflicts: List[Dict[str, Any]] = []
+        self.review_outcomes: Dict[str, Dict[str, Any]] = {}
+        self.skipped: set = set()
+        self.known_keys: set = set()
+        self.revision = 0
+        self.watermark: Optional[Tuple[int, str, int, str]] = None
+
+    def levels(self) -> Dict[str, int]:
+        return {s: level_from_xp_micro(self.xp[s], self.thresholds) for s in SKILLS}
+
+    def add_item(self, name: str, qty: int) -> None:
+        self.inv[name] = self.inv.get(name, 0) + qty
+        if self.inv[name] < 0:
+            raise AssertionError("negative inventory - replay bug")
+
+    def apply_winner(self, rk: str, op: Dict[str, Any],
+                     preset_for=None) -> None:
+        """Apply one winning claim exactly as the reference reducer does."""
+        payload = op.get("payload", {}) or {}
+        prov = payload.get("provenance", "catchup")
+        policy = reward_policy_of(payload)
+        levels = self.levels()
+        if prov == "direct":
+            skill = str(payload.get("skill", "")).lower()
+            resource = str(payload.get("resource", ""))
+            if skill not in _DIRECT_SKILLS:
+                self.diagnostics.append(f"unknown_skill:{rk}")
+                outcomes = {"skill": skill or "mining", "xp_micro": 0,
+                            "outcome": "invalid", "rewarded": False,
+                            "items": {}, "consumed": {}}
+                if policy != 2:
+                    self.xp["mining"] += MICRO
+                    outcomes["xp_micro"] = MICRO
+                    outcomes["outcome"] = "practice"
+                self.review_outcomes[rk] = outcomes
+                return
+            res = _apply_direct(skill, resource, levels, self.inv, self.rules,
+                                self.rules_version, self.game_uuid, rk, self.gems,
+                                self.ores, self.trees, self.fish, self.bars,
+                                self.crafts, self.diagnostics, reward_policy=policy)
+        else:
+            try:
+                review_ts = int(payload.get("review_ts", 0))
+            except (ValueError, TypeError):
+                review_ts = 0
+            skill = preset_for(review_ts) if preset_for else "mining"
+            res = _apply_catchup(skill, levels, self.inv, self.rules,
+                                 self.rules_version, self.game_uuid, rk, self.gems,
+                                 self.ores, self.trees, self.fish, self.diagnostics,
+                                 reward_policy=policy)
+        if res is None:
+            return
+        consumed = res.get("consumed", {})
+        conflicted = False
+        for name, qty in consumed.items():
+            if self.inv.get(name, 0) < qty:
+                # Stale provisional outcome: shared-ingredient conflict. The
+                # stable replay gives the item to the first canonical claim.
+                self.adjustments.append(f"material_conflict:{rk}:{name}")
+                if policy == 2:
+                    res = {"skill": res["skill"], "xp_micro": 0, "consumed": {},
+                           "counters": {}, "outcome": "paused_materials"}
+                    self.review_outcomes[rk] = {
+                        "skill": res["skill"], "xp_micro": 0,
+                        "outcome": "paused_materials", "rewarded": False,
+                        "items": {}, "consumed": {},
+                        "adjustment": f"material_conflict:{name}"}
+                else:
+                    self.xp[res["skill"]] += MICRO
+                    res = {"skill": res["skill"], "xp_micro": MICRO,
+                           "consumed": {}, "counters": {}, "outcome": "practice"}
+                    self.review_outcomes[rk] = {
+                        "skill": res["skill"], "xp_micro": MICRO,
+                        "outcome": "practice", "rewarded": True,
+                        "items": {}, "consumed": {},
+                        "adjustment": f"material_conflict:{name}"}
+                conflicted = True
+                break
+        if not conflicted:
+            self.xp[res["skill"]] += res["xp_micro"]
+            for name, qty in res.get("consumed", {}).items():
+                self.inv[name] = self.inv.get(name, 0) - qty
+            items = {}
+            if res.get("item_out"):
+                self.add_item(res["item_out"], res.get("item_qty", 1))
+                items[res["item_out"]] = res.get("item_qty", 1)
+            if res.get("gem_out"):
+                # Gems are extra loot alongside the ore (guide: cut them
+                # through Crafting); the XP was already added by _apply_direct.
+                self.add_item(res["gem_out"], 1)
+                items[res["gem_out"]] = 1
+            self.review_outcomes[rk] = {
+                "skill": res["skill"], "xp_micro": int(res.get("xp_micro", 0)),
+                "outcome": res.get("outcome", ""),
+                "rewarded": bool(int(res.get("xp_micro", 0)) > 0),
+                "items": items, "consumed": dict(res.get("consumed", {})),
+                "adjustment": ""}
+        self.counters["successful_actions"] += res.get("counters", {}).get(
+            "successful_actions", 0)
+        self.per_skill_success[res["skill"]] += res.get("counters", {}).get(
+            "successful_actions", 0)
+        for key in ("cooking_attempts", "successful_cooks", "gems"):
+            self.counters[key] += res.get("counters", {}).get(key, 0)
+        if res.get("outcome") in ("success",) and res["skill"] == "fishing" \
+                and not self.counters["first_catch"]:
+            self.counters["first_catch"] = 1
+        if res.get("outcome") == "success" and res["skill"] == "cooking" \
+                and not self.counters["first_cook"]:
+            self.counters["first_cook"] = 1
+
+    def finalize(self) -> Dict[str, Any]:
+        levels = self.levels()
+        achievements = _achievements(levels, self.counters)
+        outcomes = self.review_outcomes
+        if len(outcomes) > OUTCOME_WINDOW:
+            outcomes = dict(list(outcomes.items())[-OUTCOME_WINDOW:])
+        skipped = sorted(self.skipped)
+        if len(skipped) > OUTCOME_WINDOW:
+            skipped = skipped[-OUTCOME_WINDOW:]
+
+        def _bound(values):
+            return values[-OUTCOME_WINDOW:] if len(values) > OUTCOME_WINDOW else list(values)
+
+        return {
+            "xp_micro": dict(self.xp),
+            "xp_display": {s: str(v) for s, v in self.xp.items()},
+            "levels": levels,
+            "total_level": sum(levels.values()),
+            "inventory": dict(self.inv),
+            "counters": dict(self.counters),
+            "per_skill_success": dict(self.per_skill_success),
+            "achievements": sorted(achievements),
+            "revision": self.revision,
+            "adjustments": _bound(self.adjustments),
+            "diagnostics": _bound(self.diagnostics),
+            "conflicts": _bound(self.conflicts),
+            "review_outcomes": outcomes,
+            "skipped": skipped,
+        }
+
+
+def _canonical_operations(operations: List[Dict[str, Any]]):
+    """Dedup by op_id, reject bad sequences, sort canonically (reference)."""
+    conflicts: List[Dict[str, Any]] = []
+    by_id: Dict[str, Dict] = {}
+    for op in operations:
+        oid = str(op.get("op_id", ""))
+        if not oid:
+            conflicts.append({"type": "missing_op_id", "op": op})
+            continue
+        if oid in by_id:
+            if by_id[oid] != op:
+                conflicts.append({"type": "reused_id_changed_content", "op_id": oid})
+            continue
+        by_id[oid] = op
+    seen_seq: Dict[Tuple[str, int], Dict] = {}
+    ops: List[Dict] = []
+    for op in by_id.values():
+        try:
+            key = (str(op["device_id"]), int(op["device_seq"]))
+            if int(op["device_seq"]) <= 0:
+                raise ValueError("device_seq must be positive")
+        except (KeyError, ValueError, TypeError):
+            conflicts.append({"type": "bad_sequence", "op_id": op.get("op_id")})
+            continue
+        if key in seen_seq and seen_seq[key].get("payload") != op.get("payload"):
+            conflicts.append({"type": "seq_reuse_changed_payload",
+                              "device": key[0], "seq": key[1]})
+            continue
+        seen_seq.setdefault(key, op)
+        ops.append(op)
+    ops.sort(key=canonical_order_key)
+    return ops, conflicts
+
+
+def _preset_timeline(ops, conflicts):
+    presets: List[Tuple[int, int, str]] = []
+    for pos, op in enumerate(ops):
+        if op.get("kind") != "catchup_preset":
+            continue
+        payload = op.get("payload", {}) or {}
+        skill = str(payload.get("skill", "")).lower()
+        if skill not in CATCHUP_SKILLS:
+            conflicts.append({"type": "bad_preset_skill", "op_id": op.get("op_id")})
+            continue
+        try:
+            ts = int(payload.get("effective_ts", 0))
+        except (ValueError, TypeError):
+            conflicts.append({"type": "bad_preset_ts", "op_id": op.get("op_id")})
+            continue
+        presets.append((ts, pos, skill))
+    presets.sort()
+    return presets
+
+
+def _select_claims(ops, conflicts, diagnostics):
+    """Winning claim per key: direct > skip > catch-up; retract last-wins."""
+    awards_by_key: Dict[str, List[Tuple[int, Dict]]] = {}
+    retract_by_key: Dict[str, List[Tuple[int, Dict]]] = {}
+    skip_by_key: Dict[str, Tuple[int, Dict]] = {}
+    for pos, op in enumerate(ops):
+        kind = op.get("kind")
+        payload = op.get("payload", {}) or {}
+        if kind == "review_award":
+            rk = str(payload.get("review_key", ""))
+            if not rk:
+                conflicts.append({"type": "missing_review_key",
+                                  "op_id": op.get("op_id")})
+                continue
+            policy = reward_policy_of(payload)
+            if policy not in SUPPORTED_POLICIES:
+                diagnostics.append(f"unsupported_policy:{rk}:{policy}")
+                continue
+            awards_by_key.setdefault(rk, []).append((pos, op))
+        elif kind in ("review_retract", "review_restore"):
+            rk = str(payload.get("target_review_key", ""))
+            if not rk:
+                conflicts.append({"type": "missing_target_key",
+                                  "op_id": op.get("op_id")})
+                continue
+            retract_by_key.setdefault(rk, []).append((pos, op))
+        elif kind == "review_skip":
+            rk = str(payload.get("review_key", ""))
+            if not rk:
+                conflicts.append({"type": "missing_review_key",
+                                  "op_id": op.get("op_id")})
+                continue
+            existing = skip_by_key.get(rk)
+            if existing is None or pos < existing[0]:
+                skip_by_key[rk] = (pos, op)
+    winners: List[Tuple[int, str, Dict]] = []
+    for rk, lst in awards_by_key.items():
+        retracts = sorted(retract_by_key.get(rk, []), key=lambda t: t[0])
+        if retracts:
+            last_kind = retracts[-1][1].get("kind")
+            if last_kind == "review_retract":
+                continue  # disabled until explicit redo restore
+        directs = [(p, o) for p, o in lst
+                   if (o.get("payload", {}) or {}).get("provenance") == "direct"]
+        catches = [(p, o) for p, o in lst
+                   if (o.get("payload", {}) or {}).get("provenance") != "direct"]
+        if directs:
+            pos, op = sorted(directs, key=lambda t: t[0])[0]
+            if len(directs) > 1:
+                diagnostics.append(f"duplicate_direct_ignored:{rk}")
+            winners.append((pos, rk, op))
+        elif rk in skip_by_key:
+            diagnostics.append(f"claim_skipped:{rk}")
+        elif catches:
+            pos, op = sorted(catches, key=lambda t: t[0])[0]
+            if len(catches) > 1:
+                diagnostics.append(f"duplicate_catchup_ignored:{rk}")
+            winners.append((pos, rk, op))
+    winners.sort(key=lambda t: t[0])
+    return winners, skip_by_key
+
+
+def _known_keys(ops) -> set:
+    known = set()
+    for op in ops:
+        payload = op.get("payload", {}) or {}
+        for field in ("review_key", "target_review_key"):
+            value = payload.get(field)
+            if value:
+                known.add(str(value))
+    return known
+
+
+def build_checkpoint(operations: List[Dict[str, Any]], rules: Dict[str, Any],
+                     game_uuid: str) -> Dict[str, Any]:
+    """Full reference computation plus resumable metadata."""
+    ops, conflicts = _canonical_operations(operations)
+    diagnostics: List[str] = []
+    presets = _preset_timeline(ops, conflicts)
+    winners, skip_by_key = _select_claims(ops, conflicts, diagnostics)
+    state = ProjectionState(rules, game_uuid)
+    state.conflicts = conflicts
+    state.diagnostics = diagnostics
+
+    def preset_for(review_ts: int) -> str:
+        skill = "mining"  # default before first preset
+        for ts, _, s in presets:
+            if ts <= review_ts:
+                skill = s
+            else:
+                break
+        return skill
+
+    for _pos, rk, op in winners:
+        state.apply_winner(rk, op, preset_for)
+    state.skipped = set(skip_by_key.keys())
+    state.revision = len(ops)
+    state.watermark = canonical_order_key(ops[-1]) if ops else None
+    state.known_keys = _known_keys(ops)
+    checkpoint = {
+        "version": CHECKPOINT_VERSION,
+        "reducer_version": REDUCER_VERSION,
+        "rules_hash": rules_hash(rules),
+        "game_uuid": game_uuid,
+        "revision": state.revision,
+        "watermark": list(state.watermark) if state.watermark else None,
+        "known_keys": sorted(state.known_keys),
+        "_known_set": state.known_keys,
+        "state": state.finalize(),
+    }
+    return checkpoint
+
+
+def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any],
+           game_uuid: str) -> Dict[str, Any]:
+    """Reference full replay. Pure + deterministic; identical output to the
+    pre-refactor reducer and to incremental checkpoint extension."""
+    return build_checkpoint(operations, rules, game_uuid)["state"]
+
+
+def extend_checkpoint(checkpoint: Dict[str, Any], new_ops: List[Dict[str, Any]],
+                      rules: Dict[str, Any], game_uuid: str, *,
+                      key_known=None) -> Optional[Dict[str, Any]]:
+    """Apply only append-only new direct awards/skips on top of a checkpoint.
+
+    Returns an extended checkpoint, or None when the fast path is invalid:
+    changed rules/reducer/game, a non-tail canonical insertion, a claim for an
+    already-known review key, a retract/restore/preset/catch-up op, or an
+    unsupported policy. Callers must fall back to a full rebuild on None.
+    """
+    if not checkpoint:
+        return None
+    if checkpoint.get("version") != CHECKPOINT_VERSION:
+        return None
+    if checkpoint.get("reducer_version") != REDUCER_VERSION:
+        return None
+    if checkpoint.get("rules_hash") != rules_hash(rules):
+        return None
+    if str(checkpoint.get("game_uuid")) != str(game_uuid):
+        return None
+    watermark = watermark_tuple(checkpoint.get("watermark"))
+    if watermark is None:
+        if int(checkpoint.get("revision", 0) or 0) == 0:
+            watermark = (-1, "", -1, "")  # empty checkpoint: any key extends
+        else:
+            return None
+    known = prepare_checkpoint(checkpoint).get("_known_set") or set()
+    batch_seen: set = set()
+
+    def _claimed(review_key: str) -> bool:
+        if review_key in batch_seen:
+            return True
+        batch_seen.add(review_key)
+        if key_known is not None:
+            try:
+                # ``watermark``: only claims folded into the checkpoint count;
+                # claims from this very batch or newer work do not.
+                return bool(key_known(review_key, watermark))
+            except TypeError:
+                return bool(key_known(review_key))
+            except Exception:
+                return True  # uncertain: force a safe rebuild
+        return review_key in known
+
+    state = ProjectionState(rules, game_uuid)
+    internal = checkpoint.get("state") or {}
+    state.xp = {s: int(internal.get("xp_micro", {}).get(s, 0)) for s in SKILLS}
+    state.inv = {str(k): int(v) for k, v in (internal.get("inventory") or {}).items()}
+    state.counters = dict(internal.get("counters") or state.counters)
+    state.per_skill_success = {
+        s: int((internal.get("per_skill_success") or {}).get(s, 0)) for s in SKILLS}
+    state.adjustments = list(internal.get("adjustments") or [])
+    state.diagnostics = list(internal.get("diagnostics") or [])
+    state.conflicts = list(internal.get("conflicts") or [])
+    state.review_outcomes = dict(internal.get("review_outcomes") or {})
+    state.skipped = set(internal.get("skipped") or [])
+    state.revision = int(checkpoint.get("revision", 0))
+    state.watermark = watermark
+    state.known_keys = known
+
+    for op in sorted(new_ops, key=canonical_order_key):
+        key = canonical_order_key(op)
+        if key <= watermark:
+            return None  # late canonical insertion invalidates the fast path
+        kind = op.get("kind")
+        payload = op.get("payload", {}) or {}
+        rk = str(payload.get("review_key", ""))
+        if kind == "review_skip":
+            if not rk or _claimed(rk):
+                return None
+            known.add(rk)
+            state.skipped.add(rk)
+        elif kind == "review_award":
+            if not rk or _claimed(rk):
+                return None  # conflicting or replacement claim
+            if payload.get("provenance") != "direct":
+                return None
+            policy = reward_policy_of(payload)
+            if policy not in SUPPORTED_POLICIES:
+                return None
+            known.add(rk)
+            state.apply_winner(rk, op)
+        else:
+            return None  # retract/restore/preset/unknown: rebuild
+        state.revision += 1
+        state.watermark = key
+    state.known_keys = known
+    checkpoint = {
+        "version": CHECKPOINT_VERSION,
+        "reducer_version": REDUCER_VERSION,
+        "rules_hash": rules_hash(rules),
+        "game_uuid": game_uuid,
+        "revision": state.revision,
+        "watermark": list(state.watermark) if state.watermark else None,
+        # known_keys is materialized only when the checkpoint is persisted;
+        # the in-memory set above is mutated in place (extending consumes the
+        # previous checkpoint), so the hot path never copies it.
+        "known_keys": checkpoint.get("known_keys", []),
+        "_known_set": known,
+        "state": state.finalize(),
+    }
+    return checkpoint
 
 
 def reward_policy_of(payload: Dict[str, Any]) -> int:
@@ -72,265 +564,6 @@ def _gem_pick(r: int, gems) -> Dict | None:
             return g
     return None
 
-
-def replay(operations: List[Dict[str, Any]], rules: Dict[str, Any],
-           game_uuid: str) -> Dict[str, Any]:
-    """Replay operation set to a revisioned state. Pure + deterministic.
-
-    Returns {xp_micro, levels, inventory, achievements, counters,
-    revision, adjustments, diagnostics, conflicts, review_outcomes, skipped}.
-    """
-    diagnostics: List[str] = []
-    conflicts: List[Dict[str, Any]] = []
-
-    # Dedup by op_id; changed payload with reused id is a conflict.
-    by_id: Dict[str, Dict] = {}
-    for op in operations:
-        oid = str(op.get("op_id", ""))
-        if not oid:
-            conflicts.append({"type": "missing_op_id", "op": op})
-            continue
-        if oid in by_id:
-            if by_id[oid] != op:
-                conflicts.append({"type": "reused_id_changed_content", "op_id": oid})
-            continue
-        by_id[oid] = op
-
-    # (device_id, seq) reuse with different payload is preserved, not overwritten.
-    seen_seq: Dict[Tuple[str, int], Dict] = {}
-    ops: List[Dict] = []
-    for op in by_id.values():
-        try:
-            key = (str(op["device_id"]), int(op["device_seq"]))
-            if int(op["device_seq"]) <= 0:
-                raise ValueError("device_seq must be positive")
-        except (KeyError, ValueError, TypeError):
-            conflicts.append({"type": "bad_sequence", "op_id": op.get("op_id")})
-            continue
-        if key in seen_seq and seen_seq[key].get("payload") != op.get("payload"):
-            conflicts.append({"type": "seq_reuse_changed_payload", "device": key[0], "seq": key[1]})
-            continue
-        seen_seq.setdefault(key, op)
-        ops.append(op)
-
-    ops.sort(key=canonical_order_key)
-
-    # Preset timeline (effective_ts, canonical_pos, skill).
-    presets: List[Tuple[int, int, str]] = []
-    for pos, op in enumerate(ops):
-        if op.get("kind") == "catchup_preset":
-            payload = op.get("payload", {}) or {}
-            skill = str(payload.get("skill", "")).lower()
-            if skill not in CATCHUP_SKILLS:
-                conflicts.append({"type": "bad_preset_skill", "op_id": op.get("op_id")})
-                continue
-            try:
-                ts = int(payload.get("effective_ts", 0))
-            except (ValueError, TypeError):
-                conflicts.append({"type": "bad_preset_ts", "op_id": op.get("op_id")})
-                continue
-            presets.append((ts, pos, skill))
-    presets.sort()
-
-    def preset_for(review_ts: int) -> str:
-        skill = "mining"  # default before first preset
-        for ts, _, s in presets:
-            if ts <= review_ts:
-                skill = s
-            else:
-                break
-        return skill
-
-    # Group review awards + retractions + skips by review_key.
-    awards_by_key: Dict[str, List[Tuple[int, Dict]]] = {}
-    retract_by_key: Dict[str, List[Tuple[int, Dict]]] = {}
-    skip_by_key: Dict[str, Tuple[int, Dict]] = {}
-    for pos, op in enumerate(ops):
-        kind = op.get("kind")
-        payload = op.get("payload", {}) or {}
-        if kind == "review_award":
-            rk = str(payload.get("review_key", ""))
-            if not rk:
-                conflicts.append({"type": "missing_review_key", "op_id": op.get("op_id")})
-                continue
-            policy = reward_policy_of(payload)
-            if policy not in SUPPORTED_POLICIES:
-                diagnostics.append(f"unsupported_policy:{rk}:{policy}")
-                continue
-            awards_by_key.setdefault(rk, []).append((pos, op))
-        elif kind in ("review_retract", "review_restore"):
-            rk = str(payload.get("target_review_key", ""))
-            if not rk:
-                conflicts.append({"type": "missing_target_key", "op_id": op.get("op_id")})
-                continue
-            retract_by_key.setdefault(rk, []).append((pos, op))
-        elif kind == "review_skip":
-            rk = str(payload.get("review_key", ""))
-            if not rk:
-                conflicts.append({"type": "missing_review_key", "op_id": op.get("op_id")})
-                continue
-            existing = skip_by_key.get(rk)
-            if existing is None or pos < existing[0]:
-                skip_by_key[rk] = (pos, op)
-
-    # Winning claim per key: direct beats skip beats catch-up; earliest
-    # canonical within a provenance. Retraction: last retract/restore decides.
-    winners: List[Tuple[int, str, Dict]] = []
-    for rk, lst in awards_by_key.items():
-        # Last retract/restore in canonical order decides.
-        retracts = sorted(retract_by_key.get(rk, []), key=lambda t: t[0])
-        if retracts:
-            last_kind = retracts[-1][1].get("kind")
-            if last_kind == "review_retract":
-                continue  # disabled until explicit redo restore
-        directs = [(p, o) for p, o in lst if (o.get("payload", {}) or {}).get("provenance") == "direct"]
-        catches = [(p, o) for p, o in lst if (o.get("payload", {}) or {}).get("provenance") != "direct"]
-        if directs:
-            pos, op = sorted(directs, key=lambda t: t[0])[0]
-            if len(directs) > 1:
-                diagnostics.append(f"duplicate_direct_ignored:{rk}")
-            winners.append((pos, rk, op))
-        elif rk in skip_by_key:
-            # Classic-mode no-reward claim suppresses catch-up credit.
-            diagnostics.append(f"claim_skipped:{rk}")
-        elif catches:
-            pos, op = sorted(catches, key=lambda t: t[0])[0]
-            if len(catches) > 1:
-                diagnostics.append(f"duplicate_catchup_ignored:{rk}")
-            winners.append((pos, rk, op))
-    winners.sort(key=lambda t: t[0])
-
-    xp: Dict[str, int] = {s: 0 for s in SKILLS}
-    inv: Dict[str, int] = {}
-    counters: Dict[str, int] = {"successful_actions": 0, "cooking_attempts": 0,
-                                "successful_cooks": 0, "gems": 0,
-                                "first_catch": 0, "first_cook": 0}
-    per_skill_success: Dict[str, int] = {s: 0 for s in SKILLS}
-    adjustments: List[str] = []
-    review_outcomes: Dict[str, Dict[str, Any]] = {}
-    rules_version = int(rules.get("rules_version", 1))
-    thresholds = rules.get("thresholds", [])
-
-    ores = {o["display"]: o for o in rules.get("ores", [])}
-    trees = {t["display"]: t for t in rules.get("trees", [])}
-    fish = {f["display"]: f for f in rules.get("fish", [])}
-    bars = {b["display"]: b for b in rules.get("bars", [])}
-    crafts = {c["display"]: c for c in rules.get("crafting", [])}
-    gems = rules.get("gems", [])
-
-    def add_item(name: str, qty: int):
-        inv[name] = inv.get(name, 0) + qty
-        if inv[name] < 0:
-            raise AssertionError("negative inventory - replay bug")
-
-    for pos, rk, op in winners:
-        payload = op.get("payload", {}) or {}
-        prov = payload.get("provenance", "catchup")
-        policy = reward_policy_of(payload)
-        levels = {s: level_from_xp_micro(xp[s], thresholds) for s in SKILLS}
-        if prov == "direct":
-            skill = str(payload.get("skill", "")).lower()
-            resource = str(payload.get("resource", ""))
-            if skill not in _DIRECT_SKILLS:
-                diagnostics.append(f"unknown_skill:{rk}")
-                outcomes = {"skill": skill or "mining", "xp_micro": 0,
-                            "outcome": "invalid", "rewarded": False,
-                            "items": {}, "consumed": {}}
-                if policy != 2:
-                    xp["mining"] += MICRO
-                    outcomes["xp_micro"] = MICRO
-                    outcomes["outcome"] = "practice"
-                review_outcomes[rk] = outcomes
-                continue
-            res = _apply_direct(skill, resource, levels, inv, rules, rules_version,
-                                game_uuid, rk, gems, ores, trees, fish, bars, crafts,
-                                diagnostics, reward_policy=policy)
-        else:
-            try:
-                review_ts = int(payload.get("review_ts", 0))
-            except (ValueError, TypeError):
-                review_ts = 0
-            skill = preset_for(review_ts)
-            res = _apply_catchup(skill, levels, inv, rules, rules_version, game_uuid,
-                                 rk, gems, ores, trees, fish, diagnostics,
-                                 reward_policy=policy)
-        # Apply result to state.
-        if res is None:
-            continue
-        consumed = res.get("consumed", {})
-        conflicted = False
-        for name, qty in consumed.items():
-            if inv.get(name, 0) < qty:
-                # Stale provisional outcome: shared-ingredient conflict. The
-                # stable replay gives the item to the first canonical claim.
-                adjustments.append(f"material_conflict:{rk}:{name}")
-                if policy == 2:
-                    res = {"skill": res["skill"], "xp_micro": 0, "consumed": {},
-                           "counters": {}, "outcome": "paused_materials"}
-                    review_outcomes[rk] = {
-                        "skill": res["skill"], "xp_micro": 0,
-                        "outcome": "paused_materials", "rewarded": False,
-                        "items": {}, "consumed": {},
-                        "adjustment": f"material_conflict:{name}"}
-                else:
-                    xp[res["skill"]] += MICRO
-                    res = {"skill": res["skill"], "xp_micro": MICRO,
-                           "consumed": {}, "counters": {}, "outcome": "practice"}
-                    review_outcomes[rk] = {
-                        "skill": res["skill"], "xp_micro": MICRO,
-                        "outcome": "practice", "rewarded": True,
-                        "items": {}, "consumed": {},
-                        "adjustment": f"material_conflict:{name}"}
-                conflicted = True
-                break
-        if res is None:
-            continue
-        if not conflicted:
-            xp[res["skill"]] += res["xp_micro"]
-            for name, qty in res.get("consumed", {}).items():
-                inv[name] = inv.get(name, 0) - qty
-            items = {}
-            if res.get("item_out"):
-                add_item(res["item_out"], res.get("item_qty", 1))
-                items[res["item_out"]] = res.get("item_qty", 1)
-            if res.get("gem_out"):
-                # Gems are extra loot alongside the ore (guide: cut them
-                # through Crafting); the XP was already added by _apply_direct.
-                add_item(res["gem_out"], 1)
-                items[res["gem_out"]] = 1
-            review_outcomes[rk] = {
-                "skill": res["skill"], "xp_micro": int(res.get("xp_micro", 0)),
-                "outcome": res.get("outcome", ""),
-                "rewarded": bool(int(res.get("xp_micro", 0)) > 0),
-                "items": items, "consumed": dict(res.get("consumed", {})),
-                "adjustment": ""}
-        counters["successful_actions"] += res.get("counters", {}).get("successful_actions", 0)
-        per_skill_success[res["skill"]] += res.get("counters", {}).get("successful_actions", 0)
-        for key in ("cooking_attempts", "successful_cooks", "gems"):
-            counters[key] += res.get("counters", {}).get(key, 0)
-        if res.get("outcome") in ("success",) and res["skill"] == "fishing" and not counters["first_catch"]:
-            counters["first_catch"] = 1
-        if res.get("outcome") == "success" and res["skill"] == "cooking" and not counters["first_cook"]:
-            counters["first_cook"] = 1
-
-    levels = {s: level_from_xp_micro(xp[s], thresholds) for s in SKILLS}
-    achievements = _achievements(levels, counters)
-    return {
-        "xp_micro": dict(xp),
-        "xp_display": {s: str(v) for s, v in xp.items()},
-        "levels": levels,
-        "total_level": sum(levels.values()),
-        "inventory": dict(inv),
-        "counters": dict(counters),
-        "per_skill_success": per_skill_success,
-        "achievements": sorted(achievements),
-        "revision": len(ops),
-        "adjustments": adjustments,
-        "diagnostics": diagnostics,
-        "conflicts": conflicts,
-        "review_outcomes": review_outcomes,
-        "skipped": sorted(skip_by_key.keys()),
-    }
 
 
 def _zero(skill: str, outcome: str, diagnostics=None, reason: str = ""):

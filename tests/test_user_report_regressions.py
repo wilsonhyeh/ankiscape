@@ -55,7 +55,7 @@ class UserRegressions(unittest.TestCase):
         for title,table in [('Mining','ores'),('Woodcutting','trees'),('Fishing','fish'),('Cooking','fish'),('Smithing','bars'),('Crafting','crafting')]:
             for resource in rules[table]: self.assertIn(resource['display'],pages[title])
         for threshold in rules['thresholds']: self.assertIn(f'{threshold:,}',pages['Level table'])
-        credits=pages['Credits & assets']
+        credits=pages['About & credits']
         self.assertIn('oldschool.runescape.wiki',credits)
         self.assertIn('Jagex Ltd',credits)
         self.assertIn('fish/shrimp.png',credits)

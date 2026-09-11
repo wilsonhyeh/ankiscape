@@ -37,3 +37,26 @@ The log files are git-ignored and should not be shipped in releases.
 	- Overview refresh hides the HUD
 
 These tests aim to catch regressions in gating, migrations, and core behavior without requiring a full Anki GUI runtime.
+
+## Reliability gates (3.0)
+
+Beyond the unit suite, the reliability workstream adds:
+
+```bash
+python3 dev/reliability.py verify --stage pr
+python3 dev/reliability.py verify --stage nightly
+python3 dev/reliability.py verify --stage release --evidence artifacts/reliability
+python3 dev/reliability.py verify-evidence --matrix dev/reliability-matrix.json --evidence artifacts/reliability
+python3 dev/perf_runtime.py --profile release
+python3 dev/endurance.py --minutes 30
+python3 dev/generated_traces.py --stage pr
+python3 dev/mutation_gate.py --environment pure
+```
+
+- Evidence contract and budgets: `dev/reliability.py`, `dev/reliability-budgets.json`,
+  `dev/reliability-matrix.json`; see `docs/RELIABILITY.md`.
+- Requirement-to-test mapping: `docs/TEST-MATRIX.md`.
+- Native journeys (all run on the packaged artifact): `ui-visual-polish`,
+  `ui-deferred-rewards`, `ui-rebuild-review`, `ui-test-leaderboard`,
+  `ui-credential-fallback`, `ui-recovery`, `ui-profile-races`, `ui-report-bug`.
+- Hosted fixtures: `dev/seed_hosted_fixtures.py` + `dev/hosted_fixture_e2e.py`.
