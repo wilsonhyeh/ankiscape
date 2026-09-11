@@ -159,9 +159,13 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
-    app, anki_bin, installed = dev._pick_app(args.anki)
-    if not anki_bin:
-        print(f"ui_ux_verify: ERROR: no installed Anki.app matches "
+    if getattr(args, "anki_bin", ""):
+        app, anki_bin, installed = dev._resolve_runtime(args.anki,
+                                                        args.anki_bin)
+    else:
+        app, anki_bin, installed = dev._pick_app(args.anki)
+    if not anki_bin or str(installed).startswith("unverified:"):
+        print(f"ui_ux_verify: ERROR: no verified Anki runtime matches "
               f"{args.anki!r}", file=sys.stderr)
         return 2
 

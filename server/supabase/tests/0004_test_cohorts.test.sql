@@ -13,9 +13,9 @@ insert into public.fixture_registry
   (suite_id, suite_version, username_norm, expected_trace_hash, reserved_email)
 values
   ('hosted-v1', 1, 'testtom', 'trace-hash-tom',
-   'testtom@hosted-v1.example.invalid'),
+   'testtom@example.invalid'),
   ('hosted-v1', 1, 'testtina', 'trace-hash-tina',
-   'testtina@hosted-v1.example.invalid'),
+   'testtina@example.invalid'),
   ('hosted-v1', 1, 'unclaimed', 'trace-hash-unclaimed',
    'unclaimed@hosted-v1.example.invalid'),
   ('hosted-v1', 1, 'reservedok', 'trace-hash-reservedok',

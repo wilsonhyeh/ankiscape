@@ -46,6 +46,8 @@ jobs:
           BIN=$(python3 dev/fetch_runtimes.py --download ${{ matrix.os == 'macos' && 'macos' || matrix.os == 'windows' && 'windows' || 'linux' }}/${{ matrix.anki }} --dest .dev/runtimes --install | tail -n1)
           echo "ANKI_BIN=$BIN" >> "$GITHUB_ENV"
           echo "resolved runtime: $BIN"
+      - name: Build the candidate package
+        run: python3 scripts/build_addon.py
       - name: Native packaged journeys (all scenarios)
         shell: bash
         env:
@@ -59,6 +61,9 @@ jobs:
           fi
       - name: Record nightly lane evidence
         if: always()
+        env:
+          ANKISCAPE_FIXTURE_EMAIL: ${{ secrets.ANKISCAPE_FIXTURE_EMAIL }}
+          ANKISCAPE_FIXTURE_PASSWORD: ${{ secrets.ANKISCAPE_FIXTURE_PASSWORD }}
         shell: bash
         run: |
           RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
