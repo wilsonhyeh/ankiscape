@@ -71,7 +71,7 @@ def _read_json(path: str):
 
 def _run_journey(dev, args, journey):
     try:
-        rc = dev._e2e_suite(args.anki, str(args.qt), journey)
+        rc = dev._e2e_suite(args.anki, str(args.qt), journey, args.anki_bin)
     except Exception as exc:  # noqa: BLE001
         rc = 1
         print(f"ui_ux_verify: {journey} raised {exc!r}", file=sys.stderr)
@@ -140,6 +140,8 @@ def main(argv=None) -> int:
     parser.add_argument("--anki", required=True,
                         help="target Anki version prefix, e.g. 26.08.1")
     parser.add_argument("--qt", required=True, type=int, choices=(5, 6))
+    parser.add_argument("--anki-bin", default="",
+                        help="explicit runtime executable (native matrix)")
     parser.add_argument("--scenarios", default=",".join(ALL_SCENARIOS))
     args = parser.parse_args(argv)
 

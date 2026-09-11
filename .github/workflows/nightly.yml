@@ -47,13 +47,15 @@ jobs:
           echo "ANKI_BIN=$BIN" >> "$GITHUB_ENV"
           echo "resolved runtime: $BIN"
       - name: Native packaged journeys (all scenarios)
-        if: matrix.os != 'windows'
         shell: bash
+        env:
+          ANKISCAPE_FIXTURE_EMAIL: ${{ secrets.ANKISCAPE_FIXTURE_EMAIL }}
+          ANKISCAPE_FIXTURE_PASSWORD: ${{ secrets.ANKISCAPE_FIXTURE_PASSWORD }}
         run: |
           if [ "${{ matrix.os }}" = "linux" ]; then
-            xvfb-run -a python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}"
+            xvfb-run -a python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}"
           else
-            python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}"
+            python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}"
           fi
       - name: Record nightly lane evidence
         if: always()

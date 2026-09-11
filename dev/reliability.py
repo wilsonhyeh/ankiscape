@@ -821,7 +821,8 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str) -> Dict
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     try:
-        rc = module._e2e_suite(str(ctx.get("anki", "")), str(ctx.get("qt", "")), journey)
+        rc = module._e2e_suite(str(ctx.get("anki", "")), str(ctx.get("qt", "")),
+                               journey, str(ctx.get("anki_bin", "") or ""))
     except Exception as exc:  # noqa: BLE001
         rc = 1
         print(f"[reliability] journey {journey} raised {exc!r}", file=sys.stderr)
@@ -863,6 +864,8 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
                 "assertions": [], "counts": {}}
     command = [sys.executable, ui_verify, "--anki", str(ctx.get("anki")),
                "--qt", str(ctx.get("qt"))]
+    if ctx.get("anki_bin"):
+        command += ["--anki-bin", str(ctx["anki_bin"])]
     log_path = os.path.join(out_dir, "native-matrix.log")
     rc, _ = _run_command(command, log_path, env=ctx.get("env"),
                          timeout=ctx.get("native_timeout", 7200))
