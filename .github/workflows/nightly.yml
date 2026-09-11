@@ -40,11 +40,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y zstd xvfb libfuse2
-      - name: Fetch pinned runtime and record actual version
+      - name: Install pinned runtime
         shell: bash
         run: |
-          python3 dev/fetch_runtimes.py --download ${{ matrix.os == 'macos' && 'macos' || matrix.os == 'windows' && 'windows' || 'linux' }}/${{ matrix.anki }} --dest .dev/runtimes --extract
-          echo "ANKI_BIN=$(find .dev/runtimes -type f \( -name anki -o -name anki.exe -o -name Anki \) | head -n1)" >> "$GITHUB_ENV"
+          BIN=$(python3 dev/fetch_runtimes.py --download ${{ matrix.os == 'macos' && 'macos' || matrix.os == 'windows' && 'windows' || 'linux' }}/${{ matrix.anki }} --dest .dev/runtimes --install | tail -n1)
+          echo "ANKI_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "resolved runtime: $BIN"
       - name: Native packaged journeys (all scenarios)
         if: matrix.os != 'windows'
         shell: bash

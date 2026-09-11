@@ -87,6 +87,46 @@ def download(entry: dict, dest_dir: str, *, allow_unpinned: bool) -> str:
     return path
 
 
+def install(entry: dict, archive: str, dest_dir: str) -> str:
+    """Install/mount the pinned runtime for this host and return its binary."""
+    kind = entry.get("kind", "")
+    if kind == "dmg":
+        mount = os.path.join(dest_dir, "mnt")
+        os.makedirs(mount, exist_ok=True)
+        proc = subprocess.run(
+            ["hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint",
+             mount, archive], capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            raise SystemExit(f"fetch_runtimes: hdiutil attach failed: "
+                             f"{(proc.stderr or '')[:200]}")
+        binary = os.path.join(mount, "Anki.app", "Contents", "MacOS", "Anki")
+        if not os.path.isfile(binary):
+            raise SystemExit(f"fetch_runtimes: binary not found in dmg: {binary}")
+        return binary
+    if kind in ("exe", "msi"):
+        if kind == "msi":
+            cmd = ["msiexec", "/i", archive, "/qn", "/norestart"]
+        else:
+            cmd = [archive, "/S"]
+        subprocess.run(cmd, timeout=900)
+        root = os.environ.get("LOCALAPPDATA", "")
+        for candidate in (os.path.join(root, "Programs", "Anki", "anki.exe"),
+                          os.path.join(os.environ.get("PROGRAMFILES", ""),
+                                       "Anki", "anki.exe")):
+            if os.path.isfile(candidate):
+                return candidate
+        raise SystemExit("fetch_runtimes: installed anki.exe not found")
+    if kind in ("tar.zst", "tar.gz", "tar.xz"):
+        extract(entry, archive, dest_dir)
+        for base, _dirs, files in os.walk(dest_dir):
+            if "anki" in files:
+                candidate = os.path.join(base, "anki")
+                if os.access(candidate, os.X_OK):
+                    return candidate
+        raise SystemExit("fetch_runtimes: extracted anki binary not found")
+    return archive
+
+
 def extract(entry: dict, archive: str, dest_dir: str) -> str:
     kind = entry.get("kind", "")
     os.makedirs(dest_dir, exist_ok=True)
@@ -120,6 +160,8 @@ def main(argv=None) -> int:
     parser.add_argument("--target", default="", help="OS/ANKI for --verify")
     parser.add_argument("--dest", default=os.path.join(ROOT, ".dev", "runtimes"))
     parser.add_argument("--extract", action="store_true")
+    parser.add_argument("--install", action="store_true",
+                        help="mount/install the runtime and print its binary")
     parser.add_argument("--allow-unpinned", action="store_true")
     args = parser.parse_args(argv)
     manifest = load_manifest()
@@ -140,9 +182,12 @@ def main(argv=None) -> int:
         return 0
     entry = find_target(manifest, args.download)
     path = download(entry, args.dest, allow_unpinned=args.allow_unpinned)
+    target_dir = os.path.join(args.dest, entry["os"], entry["anki"])
+    if args.install:
+        print(install(entry, path, target_dir))
+        return 0
     if args.extract:
-        path = extract(entry, path, os.path.join(args.dest, entry["os"],
-                                                 entry["anki"]))
+        path = extract(entry, path, target_dir)
     print(path)
     return 0
 
