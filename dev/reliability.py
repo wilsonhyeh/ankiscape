@@ -1099,13 +1099,16 @@ def _run_package_audit(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
     steps.append(("build_addon_check", rc))
     if rc == 1:
         # No current artifact in this checkout (PR/local role without a
-        # distributed candidate): build one, then re-check.
+        # distributed candidate): build one, then re-check. The intentional
+        # stale probe is normalized once the rebuild succeeds.
         rc_build, _ = _run_command([sys.executable, build_script], log_path,
                                    env=ctx.get("env"))
         steps.append(("build_addon", rc_build))
         rc_check, _ = _run_command([sys.executable, build_script, "--check"],
                                    log_path, env=ctx.get("env"))
         steps.append(("build_addon_recheck", rc_check))
+        if rc_build == 0 and rc_check == 0:
+            steps[0] = ("build_addon_stale_rebuilt", 0)
         rc = rc_check
     if rc == 0:
         try:
