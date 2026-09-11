@@ -1003,6 +1003,31 @@ def _scenario_files(out_dir: str, names: List[str]) -> List[Dict[str, Any]]:
     return files
 
 
+def _archive_files(out_dir: str, subdir: str) -> List[str]:
+    """Relative paths of every file under out_dir/subdir (sorted)."""
+    root = os.path.join(out_dir, subdir)
+    names: List[str] = []
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            names.append(os.path.relpath(os.path.join(base, name), out_dir))
+    return sorted(names)
+
+
+def _copy_log_tail(src: str, dest: str, limit: int = 65536) -> bool:
+    """Copy the last `limit` bytes of an Anki stdout/stderr log."""
+    try:
+        with open(src, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - limit))
+            data = fh.read()
+        with open(dest, "wb") as fh:
+            fh.write(data)
+        return True
+    except OSError:
+        return False
+
+
 def run_scenario(ctx: Dict[str, Any], scenario: Dict[str, Any],
                  stage: str, out_dir: str) -> Dict[str, Any]:
     """Execute one scenario row; returns its record entry."""
@@ -1216,6 +1241,14 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
                 shot_names.append(dest_name)
             except OSError:
                 pass
+    # Keep the launched Anki's own stdout/stderr tail so a pre-driver
+    # launch failure (e.g. Linux 23.10 Qt5) is diagnosable from evidence.
+    extra_names = []
+    log_src = os.path.join(base, "anki-stdout.log")
+    tail_name = f"{scenario_id or journey}-anki-stdout-tail.log"
+    if os.path.isfile(log_src) and _copy_log_tail(
+            log_src, os.path.join(out_dir, tail_name)):
+        extra_names.append(tail_name)
     entry = {"journey": journey, "exit_status": int(rc),
              "steps": len(steps),
              "failed": [s.get("name") for s in failed],
@@ -1223,7 +1256,7 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
                              "detail": str(s.get("detail", ""))[:200]}
                             for s in steps],
              "screenshots": [os.path.join(out_dir, n) for n in shot_names],
-             "files": _scenario_files(out_dir, shot_names),
+             "files": _scenario_files(out_dir, shot_names + extra_names),
              "runtime": runtime}
     return entry
 
@@ -1322,12 +1355,14 @@ def _run_native_performance(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]
                 "assertions": [], "counts": {}, "files": []}
     metrics_name = "native-performance-metrics.json"
     raw_name = "native-performance-raw.json"
+    evidence_sub = "native-performance-runs"
     profile = "release" if ctx.get("stage") == "release" else "nightly"
     command = [sys.executable, tool, "--anki", str(ctx.get("anki")),
                "--qt", str(ctx.get("qt")), "--profile", profile,
                "--anki-bin", str(ctx.get("anki_bin", "") or ""),
                "--json", os.path.join(out_dir, metrics_name),
-               "--raw", os.path.join(out_dir, raw_name)]
+               "--raw", os.path.join(out_dir, raw_name),
+               "--evidence-dir", os.path.join(out_dir, evidence_sub)]
     log_name = "native-performance.log"
     rc, _ = _run_command(command, os.path.join(out_dir, log_name),
                          env=ctx.get("env"),
@@ -1337,7 +1372,9 @@ def _run_native_performance(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]
              "detail": f"exit {rc}",
              "assertions": [{"name": "native_performance", "ok": rc == 0}],
              "counts": {},
-             "files": _scenario_files(out_dir, [metrics_name, raw_name, log_name])}
+             "files": _scenario_files(
+                 out_dir, [metrics_name, raw_name, log_name]
+                 + _archive_files(out_dir, evidence_sub))}
     metrics_path = os.path.join(out_dir, metrics_name)
     if os.path.isfile(metrics_path):
         try:
@@ -1391,13 +1428,15 @@ def _run_endurance(ctx: Dict[str, Any], minutes: int, out_dir: str) -> Dict[str,
                 "assertions": [], "counts": {}, "files": []}
     metrics_name = f"{sid}-metrics.json"
     raw_name = f"{sid}-raw.json"
+    evidence_sub = f"{sid}-runs"
     profile = "release" if ctx.get("stage") == "release" else "nightly"
     command = [sys.executable, tool, "--anki", str(ctx.get("anki")),
                "--qt", str(ctx.get("qt")), "--profile", profile,
                "--anki-bin", str(ctx.get("anki_bin", "") or ""),
                "--endurance-minutes", str(minutes),
                "--json", os.path.join(out_dir, metrics_name),
-               "--raw", os.path.join(out_dir, raw_name)]
+               "--raw", os.path.join(out_dir, raw_name),
+               "--evidence-dir", os.path.join(out_dir, evidence_sub)]
     log_name = f"{sid}.log"
     rc, _ = _run_command(command, os.path.join(out_dir, log_name),
                          env=ctx.get("env"), timeout=minutes * 60 + 2700)
@@ -1405,7 +1444,9 @@ def _run_endurance(ctx: Dict[str, Any], minutes: int, out_dir: str) -> Dict[str,
              "command": " ".join(command), "exit_status": rc, "detail": f"exit {rc}",
              "assertions": [{"name": "endurance_native", "ok": rc == 0}],
              "counts": {},
-             "files": _scenario_files(out_dir, [metrics_name, raw_name, log_name])}
+             "files": _scenario_files(
+                 out_dir, [metrics_name, raw_name, log_name]
+                 + _archive_files(out_dir, evidence_sub))}
     metrics_path = os.path.join(out_dir, metrics_name)
     if os.path.isfile(metrics_path):
         try:

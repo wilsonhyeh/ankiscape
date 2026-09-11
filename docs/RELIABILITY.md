@@ -28,8 +28,7 @@ overwrite its date): `python3 dev/reliability.py baseline`.
   a different version silently. Headless probes read the release layout
   (Info.plist, `anki-<v>.dist-info`); hash-verified downloads may declare
   `--anki-actual`, recorded as `declared` in evidence.
-- Linux native lanes need Xvfb and a real desktop session; an offscreen Qt
-  platform is refused (`dev/runtime_adapter.requires_desktop`).
+- Linux native lanes need Xvfb, a real desktop session (`dev/runtime_adapter.requires_desktop` refuses offscreen) and a UTF-8 locale (`LANG=C.UTF-8`; the 23.10 launcher exits without one). The 23.10 Qt5 bundle needs its own system libs beyond the Qt6 set: `libglib2.0-0`, `libxcb-xinerama0`, `libxcb-randr0`, `libxcb-sync1`, `libxcb-xinput0`, `libxi6`, `libxtst6`, `libxdamage1`, `libxcomposite1`, `libxrandr2`, `libxcursor1`, `libsm6`, `libice6`, `libnss3`, `libpulse-mainloop-glib0`, `libwayland-cursor0`, `libwayland-egl1`, `libgstreamer1.0-0`, `libgstreamer-plugins-base1.0-0` (workflows install the full list).
 - Hosted fixture lanes need `ANKISCAPE_PROD_URL`, `ANKISCAPE_PROD_ANON_KEY`,
   `SUPABASE_SERVICE_ROLE_KEY` (provisioning only) and
   `ANKISCAPE_FIXTURE_SECRET` from approved secret storage. Per-lane native

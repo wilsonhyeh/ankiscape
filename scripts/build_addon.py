@@ -103,12 +103,21 @@ def _scan_secrets(members: list) -> list:
     return hits
 
 
+# Generated at build time (gitignored): a consumer checkout of a production
+# candidate legitimately lacks it, so --check compares without it there.
+GENERATED_MEMBERS = ("evolved/prod_config.py",)
+
+
 def _source_hash(members: list) -> str:
     sha = hashlib.sha256()
     for member in members:
         with open(os.path.join(ROOT, member), "rb") as fh:
             sha.update(fh.read())
     return sha.hexdigest()
+
+
+def _source_hash_no_generated(members: list) -> str:
+    return _source_hash([m for m in members if m not in GENERATED_MEMBERS])
 
 
 def _load_audit_module():
@@ -128,11 +137,17 @@ def _report_problems(step: str, problems: list) -> None:
         print(f"  {problem}", file=sys.stderr)
 
 
-def _check_current(source_hash: str, prod_baked: bool) -> int:
+def _check_current(source_hash: str, prod_baked: bool,
+                   source_hash_no_generated: str) -> int:
     """--check: report whether dist/ matches current source + flavor.
 
     Exit 0 when the packaged artifact is current, 1 when stale (a rebuild
     would write different bytes), 2 on bad usage. Never writes anything.
+
+    A distributed production candidate carries a generated
+    `evolved/prod_config.py` that is gitignored, so a consumer checkout has
+    no such file. That absence is expected: compare the source hash without
+    generated members and require the archive to match the recorded bytes.
     """
     manifest_path = os.path.join(DIST, "manifest.json")
     try:
@@ -144,20 +159,44 @@ def _check_current(source_hash: str, prod_baked: bool) -> int:
     reasons = []
     if not os.path.isfile(ARCHIVE):
         reasons.append("archive missing")
+    else:
+        with open(ARCHIVE, "rb") as fh:
+            actual = hashlib.sha256(fh.read()).hexdigest()
+        if record.get("artifact_sha256") != actual:
+            reasons.append("archive bytes changed "
+                           f"(dist {str(record.get('artifact_sha256'))[:12]}... "
+                           f"vs now {actual[:12]}...)")
     if record.get("archive") != os.path.basename(ARCHIVE):
         reasons.append(f"archive name changed ({record.get('archive')!r})")
-    if record.get("source_hash") != source_hash:
-        reasons.append("source changed "
-                       f"(dist {str(record.get('source_hash'))[:12]}... vs "
-                       f"now {source_hash[:12]}...)")
-    if bool(record.get("prod_endpoint_baked")) != prod_baked:
-        reasons.append("flavor changed (dist prod_endpoint_baked="
-                       f"{record.get('prod_endpoint_baked')} vs now {prod_baked})")
+    candidate_prod = bool(record.get("prod_endpoint_baked"))
+    if candidate_prod and not prod_baked:
+        # Consumer checkout of a production candidate: the generated module
+        # only exists at build time. Verify it is actually in the archive,
+        # then compare the source hash computed without generated members.
+        if record.get("source_hash_no_generated") != source_hash_no_generated:
+            reasons.append("source changed "
+                           f"(dist {str(record.get('source_hash_no_generated'))[:12]}"
+                           f"... vs now {source_hash_no_generated[:12]}...)")
+        try:
+            with zipfile.ZipFile(ARCHIVE) as archive:
+                if "evolved/prod_config.py" not in archive.namelist():
+                    reasons.append("prod config missing from archive")
+        except (OSError, zipfile.BadZipFile):
+            reasons.append("archive unreadable")
+    else:
+        if record.get("source_hash") != source_hash:
+            reasons.append("source changed "
+                           f"(dist {str(record.get('source_hash'))[:12]}... vs "
+                           f"now {source_hash[:12]}...)")
+        if candidate_prod != prod_baked:
+            reasons.append("flavor changed (dist prod_endpoint_baked="
+                           f"{record.get('prod_endpoint_baked')} vs now "
+                           f"{prod_baked})")
     if reasons:
         print(f"build: STALE: {'; '.join(reasons)}", file=sys.stderr)
         return 1
     print(f"build: artifact current ({os.path.basename(ARCHIVE)}, "
-          f"{record.get('members')} members, prod={prod_baked}, "
+          f"{record.get('members')} members, prod={candidate_prod}, "
           f"sha256={str(record.get('artifact_sha256'))[:12]}...)")
     return 0
 
@@ -185,8 +224,10 @@ def main(argv=None) -> int:
               "collected; check the allowlist", file=sys.stderr)
         return 1
     source_hash = _source_hash(members)
+    source_hash_no_generated = _source_hash_no_generated(members)
     if check_only:
-        return _check_current(source_hash, prod_baked)
+        return _check_current(source_hash, prod_baked,
+                              source_hash_no_generated)
     # Complete asset coverage: missing, corrupt, placeholder or fallback
     # supported art fails the build before any archive is written.
     audit = _load_audit_module()
@@ -239,7 +280,9 @@ def main(argv=None) -> int:
         return 1
     record = {"archive": os.path.basename(ARCHIVE), "version": VERSION,
               "package": PACKAGE_ID, "members": len(members),
-              "source_hash": source_hash, "artifact_sha256": artifact_hash,
+              "source_hash": source_hash,
+              "source_hash_no_generated": source_hash_no_generated,
+              "artifact_sha256": artifact_hash,
               "prod_endpoint_baked": prod_baked,
               "member_list": members}
     with open(os.path.join(DIST, "manifest.json"), "w", encoding="utf-8") as fh:

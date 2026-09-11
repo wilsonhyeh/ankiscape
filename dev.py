@@ -843,6 +843,14 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
                                                          "build_addon.py"),
                             "--check"], capture_output=True, text=True)
     if check.returncode == 1:
+        # Consumer lanes of a distributed candidate must never rebuild: the
+        # evidence contract binds results to the handed-over bytes. Local
+        # development without that lock still self-builds.
+        if os.environ.get("ANKISCAPE_CANDIDATE_LOCKED"):
+            return _fail("dist candidate does not match this checkout",
+                         (check.stderr or "").strip()[:300]
+                         + " (ANKISCAPE_CANDIDATE_LOCKED: consumers never "
+                           "rebuild the artifact)")
         proc = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "build_addon.py")])
         if proc.returncode != 0:
             return 1

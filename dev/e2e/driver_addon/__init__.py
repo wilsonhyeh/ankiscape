@@ -7,6 +7,7 @@
 # Protocol with dev.py: journey.json {journey, phase, run_id} in the base.
 # A phase ends with relaunch.json {next_phase, run_id} (dev.py relaunches
 # into the next phase) or e2e-assertions.json (final, run_id stamped).
+import gc
 import json
 import os
 import sys
@@ -195,8 +196,16 @@ def _quit(exit_code):
     raise SystemExit(exit_code)
 
 
-def _fail(msg):
+def _fail(msg, full_detail=""):
     _step("fatal", False, msg)
+    try:
+        # The assertions step keeps a 500-char summary; the full detail
+        # (e.g. an untruncated traceback) lands beside it for diagnosis.
+        if full_detail:
+            with open(_out_path("fatal.txt"), "w", encoding="utf-8") as fh:
+                fh.write(str(full_detail) + "\n")
+    except Exception:
+        pass
     _shot("fatal")
     _finish(1)
 
@@ -358,7 +367,8 @@ def run():
         except SystemExit:
             raise
         except Exception:
-            _fail("driver exception: " + traceback.format_exc()[-2000:])
+            full = traceback.format_exc()
+            _fail("driver exception: " + full[-2000:], full_detail=full)
         else:
             _beat("poll_ok")
             QTimer.singleShot(100, tick)
@@ -680,6 +690,40 @@ def _finish_evolved_verification(state, marker="ui"):
     _finish(0 if ok else 1)
 
 
+def _lift_deck_daily_limits(col, deck_id, per_day=10000):
+    """Raise new/review per-day caps on the disposable e2e decks.
+
+    Anki's default preset stops after 20 new cards a day; long measurement
+    journeys (120+ answers, endurance) otherwise exhaust the queue and the
+    driver spins until its watchdog. This is test-owned deck configuration
+    in an isolated profile, never product code.
+
+    Modern Anki extends today's limits through the scheduler; the legacy
+    `update_config(dict)` shim is verified by read-back because it is a
+    silent no-op on 26.x."""
+    # Modern v3 scheduler: extend today's limits directly (the same path as
+    # Custom Study's "increase today's limit").
+    try:
+        col.sched.extend_limits(per_day, per_day)
+        return "extend_limits"
+    except Exception:
+        pass
+    # Legacy decks: update the saved config and verify it persisted; a
+    # silent no-op must not be reported as success.
+    try:
+        conf = col.decks.config_dict_for_deck_id(deck_id)
+        conf["new"]["perDay"] = per_day
+        conf["rev"]["perDay"] = max(
+            per_day, int(conf["rev"].get("perDay", 0) or 0))
+        col.decks.update_config(conf)
+        back = col.decks.config_dict_for_deck_id(deck_id)
+        if int(back["new"].get("perDay") or 0) >= per_day:
+            return "config_dict"
+    except Exception:
+        pass
+    return "failed: no working per-day limit API"
+
+
 def _seed_deck(state, deck="E2E Deck", count=5, prefix="E2E"):
     from aqt import mw
     col = mw.col
@@ -688,6 +732,9 @@ def _seed_deck(state, deck="E2E Deck", count=5, prefix="E2E"):
     try:
         deck_id = col.decks.id(deck)
         col.decks.select(deck_id)
+        limits = _lift_deck_daily_limits(col, deck_id)
+        _step("deck_limits", not str(limits).startswith("failed"),
+              str(limits)[:200])
         model = col.models.by_name("Basic")
         if model is None:
             return False
@@ -3040,6 +3087,10 @@ def _seed_bulk_ops(state, count):
                         "provenance": "direct", "reward_policy": 2,
                         "skill": "mining", "resource": "Rune essence"}})
     engine.journal.import_game(game, {"operations": ops, "observations": []})
+    # Advance the lamport clock past the imported history (the engine's own
+    # restart path), or later real reviews sort before the bulk ops and
+    # their outcomes fall out of the bounded presentation window.
+    engine.hydrate()
     engine.invalidate_projection()
     state["bulk_seeded"] = True
     _step("bulk_history_imported", True, f"{count} ops")
@@ -3221,7 +3272,11 @@ def _poll_ui_rebuild_review(state):
 
 
 def _logged_in_via_fixture(state):
-    """Sign in with the hosted fixture credentials from the truster lane."""
+    """Sign in with the hosted fixture credentials from the trusted lane.
+
+    Returns None without credentials, else (ok, diagnostic) so a failure
+    names the failing stage (session, endpoint, or the auth error) without
+    ever printing the secret."""
     email = os.environ.get("ANKISCAPE_FIXTURE_EMAIL", "")
     password = os.environ.get("ANKISCAPE_FIXTURE_PASSWORD", "")
     if not email or not password:
@@ -3232,14 +3287,19 @@ def _logged_in_via_fixture(state):
         from ankiscape.evolved.net import post_json as _post
         sess = ankiscape._evolved_profile_session()
         endpoint = ankiscape._evolved_endpoint()
-        if sess is None or endpoint is None:
-            return False
-        return bool(ankiscape._evolved_login_submit(
+        if sess is None:
+            return False, "fixture sign-in failed: no profile session"
+        if endpoint is None:
+            return False, "fixture sign-in failed: endpoint unconfigured"
+        result = ankiscape._evolved_login_submit(
             {"identity": email, "password": password, "remember": False},
-            sess, endpoint, _accounts, _post).get("ok"))
+            sess, endpoint, _accounts, _post)
+        if result.get("ok"):
+            return True, f"endpoint={endpoint.base_url}"
+        return False, ("fixture sign-in failed: "
+                       + str(result.get("error"))[:160])
     except Exception as exc:
-        _step("fixture_login_error", False, repr(exc))
-        return False
+        return False, "fixture sign-in raised: " + repr(exc)[:160]
 
 
 def _poll_ui_test_leaderboard(state):
@@ -3258,11 +3318,12 @@ def _poll_ui_test_leaderboard(state):
                   "no fixture credentials on this lane (trusted-only)")
             state["stage"] = "public_only"
             return
-        if not result:
-            _step("test_leaderboard_login", False, "fixture sign-in failed")
+        ok, detail = result
+        if not ok:
+            _step("test_leaderboard_login", False, detail)
             _finish(1)
             return
-        _step("test_leaderboard_login", True)
+        _step("test_leaderboard_login", True, detail)
         if not _find_shell():
             _open_shell_via_menu()
             return
@@ -3651,13 +3712,43 @@ def _perf_marker(name, value=""):
 
 
 def _rss_mib():
+    """Process RSS in MiB, or None when the platform cannot measure it.
+
+    A missing measurement must fail endurance validation; it must never be
+    reported as a zero that reads like a flat slope."""
     try:
+        if sys.platform == "win32":
+            import ctypes
+            import ctypes.wintypes as _wt
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [
+                    ("cb", _wt.DWORD),
+                    ("PageFaultCount", _wt.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = _PMC()
+            counters.cb = ctypes.sizeof(counters)
+            ok = ctypes.windll.psapi.GetProcessMemoryInfo(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                ctypes.byref(counters), counters.cb)
+            if not ok:
+                return None
+            return round(counters.WorkingSetSize / (1024 * 1024), 1)
         import resource
         value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         return round(value / (1024 * 1024), 1) if sys.platform == "darwin" \
             else round(value / 1024, 1)
     except Exception:
-        return 0.0
+        return None
 
 
 def _process_cpu_seconds():
@@ -3712,6 +3803,38 @@ def _perf_reward_watch(state):
     except Exception:
         pass
     return None
+
+
+def _resolve_reward_watches(state):
+    """Record displayed-reward latency for every deferred reward the engine
+    has published since the last check.
+
+    A single watch slot loses samples whenever publication takes longer
+    than one answer cycle (exactly what a 100k-op rebuild causes), which
+    silently collapses the required reward sample count."""
+    import time as _time
+    watches = state.get("reward_watches") or []
+    if not watches:
+        return
+    try:
+        import ankiscape
+        engine = ankiscape._EVOLVED_CTX.get("engine")
+    except Exception:
+        engine = None
+    still = []
+    for watch in watches:
+        outcome = None
+        if engine is not None:
+            try:
+                outcome = engine.outcome_for(watch["key"])
+            except Exception:
+                outcome = None
+        if outcome is not None:
+            state["reward_ms"].append(round(
+                (_time.perf_counter() - watch["start"]) * 1000.0, 2))
+        else:
+            still.append(watch)
+    state["reward_watches"] = still
 
 
 def _poll_native_endurance(state, cfg):
@@ -3882,22 +4005,10 @@ def _poll_native_performance(state):
         state["rebuild_watch"] = []
         state["rebuild_at"] = [int(v) for v in (cfg.get("rebuilds_at") or [])]
         state["answer_started"] = None
-        state["reward_watch"] = None
+        state["reward_watches"] = []
         return
     if stage == "answers":
-        if state.get("reward_watch"):
-            key = state["reward_watch"]
-            try:
-                import ankiscape
-                engine = ankiscape._EVOLVED_CTX.get("engine")
-                outcome = engine.outcome_for(key) if engine is not None else None
-            except Exception:
-                outcome = None
-            if outcome is not None:
-                started = state.get("reward_started") or _time.perf_counter()
-                state["reward_ms"].append(
-                    round((_time.perf_counter() - started) * 1000.0, 2))
-                state["reward_watch"] = None
+        _resolve_reward_watches(state)
         for watch in list(state.get("rebuild_watch", [])):
             revision, engine = _perf_journal_revision()
             if engine is not None and revision >= watch["target"]:
@@ -3919,8 +4030,11 @@ def _poll_native_performance(state):
                 state["answer_started"] = _time.perf_counter()
                 state["answers_done"] += 1
                 if mode == "addon":
-                    state["reward_watch"] = _perf_reward_watch(state)
-                    state["reward_immediate"] = state["reward_watch"] is None
+                    key = _perf_reward_watch(state)
+                    state["reward_immediate"] = key is None
+                    if key is not None:
+                        state.setdefault("reward_watches", []).append(
+                            {"key": key, "start": _time.perf_counter()})
                     state["reward_started"] = _time.perf_counter()
                 if state["answers_done"] in state.get("rebuild_at", []) \
                         and mode == "addon":
@@ -3954,16 +4068,23 @@ def _poll_native_performance(state):
         return
     if stage == "settle":
         state["settle_ticks"] = state.get("settle_ticks", 0) + 1
+        _resolve_reward_watches(state)
         revision, engine = _perf_journal_revision()
         target = engine.journal.operation_count() if engine is not None else 0
-        if not state.get("rebuild_watch") and \
-                (engine is None or revision >= target):
+        pending_rewards = len(state.get("reward_watches") or [])
+        settled = (not state.get("rebuild_watch")
+                   and (engine is None or revision >= target))
+        if settled and not pending_rewards:
             state["stage"] = "shell"
             return
         if state["settle_ticks"] > 1200:
-            _step("settle_timeout", False,
-                  f"revision={revision} target={target} "
-                  f"watches={len(state.get('rebuild_watch') or [])}")
+            if pending_rewards:
+                _step("reward_publication_timeout", False,
+                      f"unpublished={pending_rewards}")
+            if not settled:
+                _step("settle_timeout", False,
+                      f"revision={revision} target={target} "
+                      f"watches={len(state.get('rebuild_watch') or [])}")
             state["stage"] = "shell"
         return
     if stage == "shell":

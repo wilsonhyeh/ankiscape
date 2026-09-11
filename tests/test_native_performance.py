@@ -127,5 +127,57 @@ class NativePerformanceEvaluationTests(unittest.TestCase):
         self.assertEqual(NP.PROFILES["release"]["repetitions"], 3)
 
 
+def _endurance_report(**overrides):
+    report = {"profile": "nightly", "duration_min": 30.0, "sample_count": 60,
+              "window_samples": 60, "slope_mib_per_min": 0.2,
+              "settled_increase_mib": 4.0, "baseline_rss_mib": 200.0,
+              "sample_cadence_s": 30.0, "eligible_for_release": False,
+              "pass": True, "failures": []}
+    report.update(overrides)
+    return report
+
+
+class NativeEnduranceEvaluationTests(unittest.TestCase):
+    """Endurance is its own experiment: no paired control, no timing
+    budgets. Its absence or invalidity must still fail."""
+
+    def test_valid_endurance_does_not_require_paired_runs(self):
+        cfg = dict(NP.PROFILES["nightly"])
+        runs = [{"install_addon": True, "rc": 0, "runtime": {},
+                 "journey": "native-performance", "raw": {"mode": "endurance"}}]
+        metrics, failures = NP._evaluate("nightly", cfg, runs,
+                                         endurance_report=_endurance_report())
+        self.assertEqual(failures, [])
+        self.assertNotIn("missing_control_runs", failures)
+        self.assertFalse(any(f.startswith("budget:") for f in failures))
+        self.assertFalse(any(f.startswith("floor:") for f in failures))
+        self.assertEqual(metrics["endurance_memory"]["pass"], True)
+
+    def test_failed_endurance_report_fails_evaluation(self):
+        cfg = dict(NP.PROFILES["nightly"])
+        runs = [{"install_addon": True, "rc": 0, "runtime": {},
+                 "journey": "native-performance", "raw": {"mode": "endurance"}}]
+        report = _endurance_report()
+        report["pass"] = False
+        report["failures"] = ["insufficient_samples:1"]
+        _metrics, failures = NP._evaluate("nightly", cfg, runs,
+                                          endurance_report=report)
+        self.assertIn("endurance:insufficient_samples:1", failures)
+        self.assertIn("endurance:not_pass", failures)
+        self.assertNotIn("missing_control_runs", failures)
+
+    def test_missing_endurance_evidence_still_fails(self):
+        cfg = dict(NP.PROFILES["nightly"])
+        runs = [{"install_addon": True, "rc": 1, "runtime": {},
+                 "journey": "native-performance", "raw": {}}]
+        report = {"profile": "nightly", "duration_min": 30.0,
+                  "sample_count": 0, "pass": False,
+                  "failures": ["endurance_raw_missing"]}
+        _metrics, failures = NP._evaluate("nightly", cfg, runs,
+                                          endurance_report=report)
+        self.assertIn("endurance:endurance_raw_missing", failures)
+        self.assertIn("endurance:not_pass", failures)
+
+
 if __name__ == "__main__":
     unittest.main()

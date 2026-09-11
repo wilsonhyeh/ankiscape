@@ -18,6 +18,8 @@ import argparse
 import importlib.util
 import json
 import os
+import re
+import shutil
 import sys
 import time
 
@@ -92,8 +94,65 @@ def _max_ticks(cfg: dict) -> int:
             + int(float(cfg.get("endurance_minutes", 0)) * 600))
 
 
+def _stuck_shot_order(name: str) -> int:
+    match = re.search(r"stuck-(\d+)", name)
+    return int(match.group(1)) if match else 10 ** 9
+
+
+def _archive_run_evidence(base: str, dest_dir: str) -> list:
+    """Copy the driver's own diagnostics for one run.
+
+    Watchdog/subprocess timeouts must keep the last heartbeat, the watchdog
+    trace, the fatal detail (full traceback), the assertion record, the Anki
+    stderr tail and the final stuck screenshot so a later session can name
+    the stalled phase. Runs on every outcome, pass or fail."""
+    os.makedirs(dest_dir, exist_ok=True)
+    copied = []
+    singles = [
+        ("e2e-heartbeat.json", "heartbeat.json"),
+        ("e2e-trace.jsonl", "trace.jsonl"),
+        ("e2e-faulthandler.log", "faulthandler.log"),
+        ("e2e-fatal.txt", "fatal.txt"),
+        ("e2e-assertions.json", "assertions.json"),
+        ("e2e-perf-native.json", "perf-native.json"),
+        ("relaunch.json", "relaunch.json"),
+    ]
+    for src_name, dest_name in singles:
+        src = os.path.join(base, src_name)
+        if os.path.isfile(src):
+            shutil.copyfile(src, os.path.join(dest_dir, dest_name))
+            copied.append(dest_name)
+    log = os.path.join(base, "anki-stdout.log")
+    if os.path.isfile(log):
+        with open(log, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 262144))
+            data = fh.read()
+        with open(os.path.join(dest_dir, "anki-stdout-tail.log"), "wb") as fh:
+            fh.write(data)
+        copied.append("anki-stdout-tail.log")
+    try:
+        shots = sorted((n for n in os.listdir(base)
+                        if n.startswith("e2e-") and n.endswith(".png")
+                        and ("stuck-" in n or "fatal" in n)),
+                       key=_stuck_shot_order)
+    except OSError:
+        shots = []
+    for name in shots[-3:]:
+        dest_name = name[len("e2e-"):]
+        try:
+            shutil.copyfile(os.path.join(base, name),
+                            os.path.join(dest_dir, dest_name))
+            copied.append(dest_name)
+        except OSError:
+            continue
+    return copied
+
+
 def _run_journey(journey: str, *, install_addon: bool, config: dict,
-                 anki: str, qt: str, anki_bin: str) -> dict:
+                 anki: str, qt: str, anki_bin: str,
+                 evidence_dir: str = "") -> dict:
     dev = _dev()
     config = dict(config)
     config.setdefault("max_ticks", _max_ticks(config))
@@ -116,8 +175,15 @@ def _run_journey(journey: str, *, install_addon: bool, config: dict,
             runtime = (json.load(fh) or {}).get("runtime") or {}
     except (OSError, ValueError):
         pass
+    evidence = []
+    if evidence_dir:
+        try:
+            evidence = _archive_run_evidence(base, evidence_dir)
+        except OSError:
+            evidence = []
     return {"journey": journey, "install_addon": install_addon,
-            "rc": int(rc), "raw": raw, "runtime": runtime}
+            "rc": int(rc), "raw": raw, "runtime": runtime,
+            "evidence": evidence}
 
 
 def _collect_perf(runs, mode):
@@ -141,7 +207,7 @@ def _collect_field(runs, field, mode=None):
 
 
 def _run_paired(profile: str, cfg: dict, anki: str, qt: str,
-                anki_bin: str) -> list:
+                anki_bin: str, evidence_root: str = "") -> list:
     runs = []
     control_cfg = dict(cfg)
     control_cfg.update({"answers": cfg["answers"], "bulk_ops": 0,
@@ -151,10 +217,18 @@ def _run_paired(profile: str, cfg: dict, anki: str, qt: str,
     for repetition in range(int(cfg.get("repetitions", 1))):
         control = _run_journey("native-performance-control",
                                install_addon=False, config=control_cfg,
-                               anki=anki, qt=qt, anki_bin=anki_bin)
+                               anki=anki, qt=qt, anki_bin=anki_bin,
+                               evidence_dir=(os.path.join(
+                                   evidence_root,
+                                   f"rep{repetition}-control")
+                                   if evidence_root else ""))
         addon = _run_journey("native-performance", install_addon=True,
                              config=addon_cfg, anki=anki, qt=qt,
-                             anki_bin=anki_bin)
+                             anki_bin=anki_bin,
+                             evidence_dir=(os.path.join(
+                                 evidence_root,
+                                 f"rep{repetition}-addon")
+                                 if evidence_root else ""))
         control["repetition"] = repetition
         addon["repetition"] = repetition
         runs.extend([control, addon])
@@ -186,6 +260,30 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
     rel = _rel()
     budgets = json.load(open(BUDGETS_PATH, encoding="utf-8"))
     floors = cfg.get("floors", {})
+    if endurance_report is not None:
+        # Endurance is its own experiment: it has no paired control and no
+        # timing budgets, and must not be failed for their absence. The
+        # separate native-performance record still enforces every paired
+        # responsiveness budget.
+        metrics = {
+            "endurance_memory": {
+                "slope_mib_per_min": endurance_report.get("slope_mib_per_min"),
+                "settled_increase_mib": endurance_report.get("settled_increase_mib"),
+                "duration_min": endurance_report.get("duration_min"),
+                "baseline_rss_mib": endurance_report.get("baseline_rss_mib"),
+                "samples": endurance_report.get("sample_count"),
+                "window_samples": endurance_report.get("window_samples"),
+                "sample_cadence_s": endurance_report.get("sample_cadence_s"),
+                "eligible_for_release":
+                    endurance_report.get("eligible_for_release"),
+                "pass": endurance_report.get("pass"),
+            },
+        }
+        failures.extend(f"endurance:{f}" for f in
+                        endurance_report.get("failures") or [])
+        if endurance_report.get("pass") is not True:
+            failures.append("endurance:not_pass")
+        return metrics, failures
     addon_runs = [r for r in runs if r["install_addon"] and r["rc"] == 0]
     control_runs = [r for r in runs if not r["install_addon"] and r["rc"] == 0]
     if not control_runs:
@@ -225,19 +323,6 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
         "network_polling": "none",
         "new_recurring_timer": False,
     }
-    if endurance_report is not None:
-        metrics["endurance_memory"] = {
-            "slope_mib_per_min": endurance_report.get("slope_mib_per_min"),
-            "settled_increase_mib": endurance_report.get("settled_increase_mib"),
-            "duration_min": endurance_report.get("duration_min"),
-            "baseline_rss_mib": endurance_report.get("baseline_rss_mib"),
-            "samples": endurance_report.get("sample_count"),
-            "eligible_for_release": endurance_report.get("eligible_for_release"),
-            "pass": endurance_report.get("pass"),
-        }
-        failures.extend(f"endurance:{f}" for f in
-                        endurance_report.get("failures") or [])
-
     required = {"event_loop_lag", "warm_shell_open", "cold_shell_appearance",
                 "idle_cpu", "reward_completion", "late_retraction_rebuild"}
     for failure in rel.evaluate_budgets(
@@ -284,6 +369,10 @@ def main(argv=None) -> int:
     parser.add_argument("--raw", default="")
     parser.add_argument("--endurance-minutes", type=float, default=0.0)
     parser.add_argument("--repetitions", type=int, default=0)
+    parser.add_argument("--evidence-dir", default="",
+                        help="archive per-run driver diagnostics here "
+                             "(heartbeat, watchdog trace, fatal detail, "
+                             "stuck screenshots, Anki stderr tail)")
     args = parser.parse_args(argv)
 
     cfg = dict(PROFILES[args.profile])
@@ -304,7 +393,11 @@ def main(argv=None) -> int:
         })
         run = _run_journey("native-performance", install_addon=True,
                            config=endurance_cfg, anki=args.anki, qt=args.qt,
-                           anki_bin=args.anki_bin)
+                           anki_bin=args.anki_bin,
+                           evidence_dir=(os.path.join(
+                               args.evidence_dir,
+                               f"endurance-{args.endurance_minutes:g}m")
+                               if args.evidence_dir else ""))
         runs.append(run)
         raw = run["raw"]
         if raw.get("mode") == "endurance":
@@ -315,9 +408,19 @@ def main(argv=None) -> int:
                 endurance_report.setdefault("failures", []).append(
                     "equivalence:false")
                 endurance_report["pass"] = False
+        else:
+            # The journey died before writing its endurance payload (or
+            # wrote the wrong mode): missing endurance evidence is a
+            # failure, never an absent check.
+            endurance_report = {
+                "profile": args.profile,
+                "duration_min": args.endurance_minutes,
+                "sample_count": 0, "pass": False,
+                "failures": ["endurance_raw_missing"],
+            }
     else:
         runs = _run_paired(args.profile, cfg, args.anki, args.qt,
-                           args.anki_bin)
+                           args.anki_bin, evidence_root=args.evidence_dir)
 
     metrics, failures = _evaluate(args.profile, cfg, runs,
                                   endurance_report=endurance_report)
@@ -343,7 +446,8 @@ def main(argv=None) -> int:
         "observed": observed, "metrics": metrics,
         "runs": [{"journey": r["journey"], "rc": r["rc"],
                   "runtime": r["runtime"],
-                  "raw_len": len(json.dumps(r["raw"]))} for r in runs],
+                  "raw_len": len(json.dumps(r["raw"])),
+                  "evidence": len(r.get("evidence") or [])} for r in runs],
         "failures": failures, "warnings": warnings,
         "pass": not failures,
     }
