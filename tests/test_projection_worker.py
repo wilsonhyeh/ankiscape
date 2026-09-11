@@ -77,9 +77,12 @@ class ProjectionWorkerTests(unittest.TestCase):
         self.assertEqual(latest["revision"], reference["revision"])
         self.assertEqual(latest["xp_micro"], reference["xp_micro"])
         self.assertEqual(latest["inventory"], reference["inventory"])
-        status = worker.status()
-        self.assertFalse(status["busy"])
-        self.assertEqual(status["failed"], "")
+        # latest() is published before the pass clears busy, so wait for
+        # quiescence rather than assuming the same tick.
+        self.assertTrue(_wait_for(
+            lambda: not worker.status()["busy"]
+            and worker.status()["failed"] == ""))
+        self.assertEqual(worker.status()["failed"], "")
 
     def test_engine_pending_credit_finalizes_exactly_once(self):
         worker = self._worker()
