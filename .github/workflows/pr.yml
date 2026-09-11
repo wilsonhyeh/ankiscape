@@ -86,7 +86,7 @@ jobs:
         if: always()
         run: |
           RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
-          python3 dev/reliability.py run-lane --stage pr --os linux \
+          xvfb-run -a python3 dev/reliability.py run-lane --stage pr --os linux \
             --anki 26.8.1 --qt 6 --anki-bin "${ANKI_BIN:-}" \
             --out "artifacts/reliability/${RUN_ID}/linux-pr" || true
       - name: Upload PR evidence

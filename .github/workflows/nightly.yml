@@ -67,10 +67,17 @@ jobs:
         shell: bash
         run: |
           RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
-          python3 dev/reliability.py run-lane --stage nightly --os "${{ matrix.os }}" \
-            --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
-            --anki-bin "${ANKI_BIN:-}" \
-            --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}" || true
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            xvfb-run -a python3 dev/reliability.py run-lane --stage nightly --os "${{ matrix.os }}" \
+              --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
+              --anki-bin "${ANKI_BIN:-}" \
+              --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}" || true
+          else
+            python3 dev/reliability.py run-lane --stage nightly --os "${{ matrix.os }}" \
+              --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
+              --anki-bin "${ANKI_BIN:-}" \
+              --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}" || true
+          fi
       - name: Upload lane evidence
         if: always()
         uses: actions/upload-artifact@v4
