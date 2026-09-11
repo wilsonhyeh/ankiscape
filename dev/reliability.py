@@ -1203,14 +1203,21 @@ def _run_performance(ctx: Dict[str, Any], scenario: Dict[str, Any],
     return entry
 
 
-def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
-                        *, scenario_id: str = "") -> Dict[str, Any]:
+def _load_dev_module():
+    """dev.py as a module (one loader for journey and matrix paths)."""
     import importlib.util
 
     dev_path = os.path.join(ROOT, "dev.py")
-    spec = importlib.util.spec_from_file_location("ankiscape_dev_reliability", dev_path)
+    spec = importlib.util.spec_from_file_location("ankiscape_dev_reliability",
+                                                  dev_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
+                        *, scenario_id: str = "") -> Dict[str, Any]:
+    module = _load_dev_module()
     try:
         rc = module._e2e_suite(str(ctx.get("anki", "")), str(ctx.get("qt", "")),
                                journey, str(ctx.get("anki_bin", "") or ""),
@@ -1300,6 +1307,31 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
             pass
     assertions = [{"name": "ui_ux_report", "ok": rc == 0,
                    "detail": os.path.relpath(report, ROOT)}]
+    # The matrix runs journeys via ui_ux_verify.py; keep the driver's own
+    # heartbeat, full fatal detail and Anki stderr tail for each journey so a
+    # watchdog timeout names its stalled phase (previously report-only).
+    dev = _load_dev_module()
+    matrix_dir = os.path.join(getattr(dev, "DEV_DIR", ""), "e2e")
+    for journey in sorted(os.listdir(matrix_dir)) if os.path.isdir(matrix_dir) \
+            else []:
+        base = os.path.join(matrix_dir, journey)
+        for src_name, suffix in (
+                ("e2e-heartbeat.json", "heartbeat.json"),
+                ("e2e-fatal.txt", "fatal.txt"),
+                ("e2e-perf-native.json", "perf-native.json")):
+            src = os.path.join(base, src_name)
+            dest_name = f"native-matrix-{journey}-{suffix}"
+            if os.path.isfile(src):
+                try:
+                    shutil.copyfile(src, os.path.join(out_dir, dest_name))
+                    files.append(dest_name)
+                except OSError:
+                    pass
+        log_src = os.path.join(base, "anki-stdout.log")
+        tail_name = f"native-matrix-{journey}-anki-stdout-tail.log"
+        if os.path.isfile(log_src) and _copy_log_tail(
+                log_src, os.path.join(out_dir, tail_name)):
+            files.append(tail_name)
     return {"id": "native-matrix", "status": "pass" if rc == 0 else "fail",
             "command": " ".join(command), "exit_status": rc,
             "detail": f"exit {rc}",

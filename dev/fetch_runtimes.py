@@ -149,6 +149,7 @@ def _write_version_stamp(entry: dict, binary: str) -> None:
 def install(entry: dict, archive: str, dest_dir: str) -> str:
     """Install/mount the pinned runtime for this host and return its binary."""
     kind = entry.get("kind", "")
+    os.makedirs(dest_dir, exist_ok=True)
     if kind == "dmg":
         mount = os.path.join(dest_dir, "mnt")
         os.makedirs(mount, exist_ok=True)
@@ -165,9 +166,13 @@ def install(entry: dict, archive: str, dest_dir: str) -> str:
         return binary
     if kind in ("exe", "msi"):
         if kind == "msi":
-            log_path = os.path.join(dest_dir, "msiexec.log")
-            cmd = ["msiexec", "/i", archive, "/qn", "/norestart",
-                   "/l*v", log_path]
+            # msiexec exits 1622 ("error opening installation log file")
+            # when the log's parent directory does not exist; make both the
+            # install dir and the log path absolute before invoking it.
+            os.makedirs(dest_dir, exist_ok=True)
+            log_path = os.path.abspath(os.path.join(dest_dir, "msiexec.log"))
+            cmd = ["msiexec", "/i", os.path.abspath(archive), "/qn",
+                   "/norestart", "/l*v", log_path]
         else:
             cmd = [archive, "/S"]
         proc = subprocess.run(cmd, timeout=900)
