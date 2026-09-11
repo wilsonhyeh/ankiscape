@@ -105,16 +105,42 @@ def install(entry: dict, archive: str, dest_dir: str) -> str:
         return binary
     if kind in ("exe", "msi"):
         if kind == "msi":
-            cmd = ["msiexec", "/i", archive, "/qn", "/norestart"]
+            log_path = os.path.join(dest_dir, "msiexec.log")
+            cmd = ["msiexec", "/i", archive, "/qn", "/norestart",
+                   "/l*v", log_path]
         else:
             cmd = [archive, "/S"]
-        subprocess.run(cmd, timeout=900)
-        root = os.environ.get("LOCALAPPDATA", "")
-        for candidate in (os.path.join(root, "Programs", "Anki", "anki.exe"),
-                          os.path.join(os.environ.get("PROGRAMFILES", ""),
-                                       "Anki", "anki.exe")):
-            if os.path.isfile(candidate):
-                return candidate
+        proc = subprocess.run(cmd, timeout=900)
+        if kind == "msi" and proc.returncode not in (0, 3010):
+            detail = ""
+            try:
+                with open(log_path, encoding="utf-16", errors="replace") as fh:
+                    detail = "".join(fh.readlines()[-6:])[:400]
+            except OSError:
+                pass
+            raise SystemExit(f"fetch_runtimes: msiexec exit {proc.returncode}: "
+                             f"{detail}")
+        roots = [os.environ.get("LOCALAPPDATA", ""),
+                 os.environ.get("PROGRAMFILES", ""),
+                 os.environ.get("PROGRAMFILES(X86)", ""),
+                 os.environ.get("PROGRAMW6432", "")]
+        for root in roots:
+            if not root:
+                continue
+            for relative in (("Programs", "Anki"), ("Anki",), ("Anki", "Programs")):
+                candidate = os.path.join(root, *relative, "anki.exe")
+                if os.path.isfile(candidate):
+                    return candidate
+        # Last resort: bounded search for anki.exe under the install roots.
+        for root in roots:
+            if not root or not os.path.isdir(root):
+                continue
+            for base, dirs, files in os.walk(root):
+                if base.count(os.sep) - root.count(os.sep) > 3:
+                    dirs[:] = []
+                    continue
+                if "anki.exe" in files:
+                    return os.path.join(base, "anki.exe")
         raise SystemExit("fetch_runtimes: installed anki.exe not found")
     if kind in ("tar.zst", "tar.gz", "tar.xz"):
         extract(entry, archive, dest_dir)
