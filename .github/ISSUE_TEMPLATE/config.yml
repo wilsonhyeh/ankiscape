@@ -6,3 +6,6 @@ contact_links:
   - name: Security policy
     url: https://github.com/wilsonhyeh/ankiscape/blob/main/SECURITY.md
     about: How to report a vulnerability privately (never in a public issue).
+  - name: Report a vulnerability privately
+    url: https://github.com/wilsonhyeh/ankiscape/security/advisories/new
+    about: Private security reporting (never a public issue).
