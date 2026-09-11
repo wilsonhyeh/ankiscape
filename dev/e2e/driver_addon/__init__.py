@@ -984,6 +984,35 @@ def _reviewer_settled():
         return False
 
 
+def _reviewer_ready():
+    """True only when the reviewer is actually showing a card.
+
+    Unlike _reviewer_settled (which is also true outside the reviewer),
+    this gates long answer loops: hammering moveToState() while the
+    webview is still loading wedges Anki 26.x in a transition loop."""
+    try:
+        from aqt import mw
+        if getattr(mw, "state", "") != "review":
+            return False
+        reviewer = getattr(mw, "reviewer", None)
+        if reviewer is None or getattr(reviewer, "card", None) is None:
+            return False
+        return getattr(reviewer, "state", "") in ("question", "answer")
+    except Exception:
+        return False
+
+
+def _reviewer_debug():
+    try:
+        from aqt import mw
+        reviewer = getattr(mw, "reviewer", None)
+        return (f"mw={getattr(mw, 'state', '?')} "
+                f"reviewer={getattr(reviewer, 'state', '?')} "
+                f"card={bool(getattr(reviewer, 'card', None))}")
+    except Exception as exc:
+        return repr(exc)[:80]
+
+
 def _answer_current_card(state, ease=3):
     """Human-order answer: show the answer side, then invoke the real answer.
 
@@ -3271,6 +3300,19 @@ def _poll_ui_rebuild_review(state):
         return
 
 
+# Display names of the permanent hosted-v1 fixture cohort
+# (dev/fixtures/hosted-v1.json). Any of these appearing in non-cohort
+# standings is a public isolation failure.
+FIXTURE_NAMES = {
+    "WillowMere", "FlintHarbor", "Mosswarden", "RowanVale",
+    "CopperFinch", "AlderTrail", "PebbleFox", "EmberBrook",
+    "BirchRook", "HazelForge", "FernVoyager", "AshenPike",
+    "MapleStrider", "ReedRunner", "OakLantern", "SlateOtter",
+    "QuietAnvil", "BrambleWren", "SilverNettle", "CedarTern",
+    "RiverKestrel", "DawnThistle", "MistBadger", "DuskHeron",
+}
+
+
 def _logged_in_via_fixture(state):
     """Sign in with the hosted fixture credentials from the trusted lane.
 
@@ -3313,10 +3355,11 @@ def _poll_ui_test_leaderboard(state):
     if stage == "login":
         result = _logged_in_via_fixture(state)
         if result is None:
-            # Untrusted lane: verify public isolation only, never fake a login.
-            _step("test_leaderboard_credentials", True,
-                  "no fixture credentials on this lane (trusted-only)")
-            state["stage"] = "public_only"
+            # Hosted coverage is required on this lane; missing credentials
+            # are a failure, never a silently different test.
+            _step("test_leaderboard_credentials", False,
+                  "missing fixture credentials (hosted coverage required)")
+            _finish(1)
             return
         ok, detail = result
         if not ok:
@@ -3324,9 +3367,8 @@ def _poll_ui_test_leaderboard(state):
             _finish(1)
             return
         _step("test_leaderboard_login", True, detail)
-        if not _find_shell():
-            _open_shell_via_menu()
-            return
+        # Record once: a missing shell is open_hiscores' job, not a reason to
+        # sign in again on the next tick.
         state["stage"] = "open_hiscores"
         return
     if stage == "open_hiscores":
@@ -3345,39 +3387,46 @@ def _poll_ui_test_leaderboard(state):
         shell = _find_shell()
         if shell is None:
             return
-        from aqt.qt import QApplication, QCheckBox
+        from aqt.qt import QApplication, QCheckBox, QLabel, QListWidget
         toggle = shell.findChild(QCheckBox, "ankiscape-hiscores-test-toggle")
-        _step("test_leaderboard_toggle_visible",
-              toggle is not None and toggle.isVisible())
+        if not state.get("toggle_visible_reported"):
+            state["toggle_visible_reported"] = True
+            _step("test_leaderboard_toggle_visible",
+                  toggle is not None and toggle.isVisible())
         if toggle is None:
             _finish(0 if not RESULT["errors"] else 1)
             return
         if not toggle.isChecked():
             toggle.setChecked(True)
             QApplication.processEvents()
-            if state["toggle_ticks"] > 120:
-                _step("test_leaderboard_rows", False, "never loaded")
-                _finish(1)
+            # Reset the wait budget only when the check actually flips.
+            state["toggle_ticks"] = 0
             return
-        status = shell.findChild(object, "ankiscape-hiscores-status")
-        text = str(getattr(status, "text", lambda: "")())
-        ok = "Test leaderboard" in text
-        _step("test_leaderboard_labeled", ok, text[:120])
-        _shot("ui-test-leaderboard")
-        _finish(0 if not RESULT["errors"] else 1)
-        return
-    if stage == "public_only":
-        # Public paths must exclude test names on every lane.
+        status = shell.findChild(QLabel, "ankiscape-hiscores-status")
+        text = str(status.text()) if status is not None else ""
+        loading = (not text) or text.startswith("Loading")
+        if loading and state["toggle_ticks"] <= 300:
+            return  # allow the asynchronous hosted fetch to settle
+        listing = shell.findChild(QListWidget, "ankiscape-hiscores-list")
+        rows = [listing.item(i).text() for i in range(listing.count())] \
+            if listing is not None else []
+        labeled = "Test leaderboard" in text
+        _step("test_leaderboard_labeled", labeled, text[:160])
+        rows_ok = bool(rows) and not any("Nothing to show" in r for r in rows)
+        _step("test_leaderboard_test_rows",
+              rows_ok and any(n in " ".join(rows) for n in FIXTURE_NAMES),
+              f"rows={len(rows)} first={rows[0][:80] if rows else ''}")
+        # Public (non-cohort) standings must exclude test names, while the
+        # labeled cohort view above includes them. Both run while signed in.
         try:
             import ankiscape
-            rows = ankiscape._evolved_query_hiscores("mining", 100)
-            test_names = {"WillowMere", "FlintHarbor", "Mosswarden"}
-            leaked = test_names & {str(r.get("username")) for r in rows}
+            public = ankiscape._evolved_query_hiscores("mining", 100)
+            leaked = FIXTURE_NAMES & {str(r.get("username")) for r in public}
             _step("test_leaderboard_public_isolated", not leaked,
-                  f"leaked={sorted(leaked)}")
+                  f"public_rows={len(public)} leaked={sorted(leaked)}")
         except Exception as exc:
-            _step("test_leaderboard_public_isolated", False, repr(exc))
-        _shot("ui-test-leaderboard-public")
+            _step("test_leaderboard_public_isolated", False, repr(exc)[:160])
+        _shot("ui-test-leaderboard")
         _finish(0 if not RESULT["errors"] else 1)
 
 
@@ -3849,15 +3898,55 @@ def _poll_native_endurance(state, cfg):
         if int(cfg.get("bulk_ops", 0) or 0):
             if not _seed_bulk_ops(state, int(cfg["bulk_ops"])):
                 return
-        _open_reviewer(state, "ENDURE")
-        state["stage"] = "grow"
-        state["started_monotonic"] = _time.monotonic()
-        state["answers"] = 0
-        state["samples"] = []
-        state["next_sample"] = _time.monotonic()
-        state["grow_until"] = _time.monotonic() + max(1.0, minutes * 60.0) * 0.5
-        state["answers_per_second"] = float(cfg.get("answers_per_second", 2.0))
-        state["eligible_for_release"] = bool(cfg.get("eligible_for_release", False))
+        # Let the projection catch up before opening the reviewer; starting
+        # reviews into an unsettled webview wedges the 26.x reviewer in a
+        # transition loop with a JS-error flood (nightly 34641447537).
+        state["quiesce_ticks"] = 0
+        state["stage"] = "quiesce"
+        return
+    if stage == "quiesce":
+        state["quiesce_ticks"] = state.get("quiesce_ticks", 0) + 1
+        revision, engine = _perf_journal_revision()
+        target = engine.journal.operation_count() if engine is not None else 0
+        ready = engine is None or revision >= target
+        if ready or state["quiesce_ticks"] > 3600:
+            if not ready:
+                _step("quiesce_timeout", False,
+                      f"revision={revision} target={target}")
+            _open_reviewer(state, "ENDURE")
+            state["stage"] = "reviewer"
+            state["reviewer_ticks"] = 0
+        return
+    if stage == "reviewer":
+        state["reviewer_ticks"] = state.get("reviewer_ticks", 0) + 1
+        if _reviewer_ready():
+            state["stage"] = "grow"
+            state["started_monotonic"] = _time.monotonic()
+            state["answers"] = 0
+            state["samples"] = []
+            state["next_sample"] = state["started_monotonic"]
+            state["grow_until"] = state["started_monotonic"] + \
+                max(1.0, minutes * 60.0) * 0.5
+            state["answers_per_second"] = float(
+                cfg.get("answers_per_second", 2.0))
+            state["eligible_for_release"] = bool(
+                cfg.get("eligible_for_release", False))
+            return
+        if state["reviewer_ticks"] % 50 == 0:
+            _open_reviewer(state, "ENDURE")
+        if state["reviewer_ticks"] > 600:
+            _step("reviewer_ready_timeout", False, _reviewer_debug())
+            state["stage"] = "grow"
+            state["started_monotonic"] = _time.monotonic()
+            state["answers"] = 0
+            state["samples"] = []
+            state["next_sample"] = state["started_monotonic"]
+            state["grow_until"] = state["started_monotonic"] + \
+                max(1.0, minutes * 60.0) * 0.5
+            state["answers_per_second"] = float(
+                cfg.get("answers_per_second", 2.0))
+            state["eligible_for_release"] = bool(
+                cfg.get("eligible_for_release", False))
         return
     if stage == "grow":
         now = _time.monotonic()
@@ -3874,6 +3963,8 @@ def _poll_native_endurance(state, cfg):
                 "objects": len(gc.get_objects()),
                 "threads": threading.active_count(),
                 "answers": state["answers"]})
+        if not _reviewer_ready():
+            return
         if not _answer_current_card(state):
             return
         state["answers"] += 1

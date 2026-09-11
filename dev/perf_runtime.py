@@ -4,7 +4,7 @@
 
 Profiles (sample counts per measured history size):
   baseline  - 0/1k/10k x 20, 100k x 3 (capture before optimizations land)
-  nightly   - 0/1k/10k x 200, 100k x 10
+  nightly   - 0/1k/10k x 200, 100k x 50
   release   - every size x 500 (the budget's sample floor)
 
 Measured (pure Python, tmp journal, synthetic data seeded outside timed
@@ -50,7 +50,11 @@ from evolved.ui.menu_model import (achievement_rows, hiscores_status,  # noqa: E
 
 PROFILES = {
     "baseline": {"small": 20, "large": 3},
-    "nightly": {"small": 200, "large": 10},
+    # `large` needs enough samples that p95 is not just the max: with 10
+    # samples a single slow write made the 100k p95 flip 1.8 -> 6.3 ms and
+    # the scaling ratio with it (nightly 34641447537). 50 keeps the same
+    # gate and definition while making the percentile meaningful.
+    "nightly": {"small": 200, "large": 50},
     "release": {"small": 500, "large": 500},
 }
 HISTORY_SIZES = (0, 1000, 10000, 100000)

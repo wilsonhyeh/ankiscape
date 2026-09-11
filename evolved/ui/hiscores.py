@@ -135,9 +135,13 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         else:
             status_icon.setVisible(False)
         try:
-            status.setObjectName("ankiscape-error" if kind == "error"
-                                 else ("ankiscape-success" if kind == "ok"
-                                       else "ankiscape-muted"))
+            # Keep the stable identity object name: style via a dynamic
+            # property so tests/tools can always find this label.
+            status.setProperty(
+                "statusKind",
+                "error" if kind == "error"
+                else ("success" if kind == "ok" else "muted"))
+            status.setObjectName(OBJECT_NAMES["hiscores_status"])
             status.style().unpolish(status)
             status.style().polish(status)
         except Exception:

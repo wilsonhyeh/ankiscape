@@ -214,11 +214,14 @@ QLabel#ankiscape-shell-header {{
 }}
 QLabel#ankiscape-shell-header {{ font-size: {body + 1}px; }}
 QLabel#ankiscape-training-title {{ font-size: {body + 2}px; color: {TEXT}; }}
-QLabel#ankiscape-muted {{
+QLabel#ankiscape-muted,
+QLabel[statusKind="muted"] {{
   color: {TEXT_MUTED};
 }}
-QLabel#ankiscape-success {{ color: {SUCCESS}; }}
-QLabel#ankiscape-error {{ color: {ERROR}; }}
+QLabel#ankiscape-success,
+QLabel[statusKind="success"] {{ color: {SUCCESS}; }}
+QLabel#ankiscape-error,
+QLabel[statusKind="error"] {{ color: {ERROR}; }}
 QWidget#ankiscape-icon-rail {{
   background-color: {PANEL};
   border-right: 2px solid {BORDER};
