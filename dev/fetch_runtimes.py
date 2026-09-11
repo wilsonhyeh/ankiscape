@@ -128,6 +128,24 @@ def download(entry: dict, dest_dir: str, *, allow_unpinned: bool) -> str:
     return path
 
 
+def _write_version_stamp(entry: dict, binary: str) -> None:
+    """Record the manifest-pinned identity next to the installed binary.
+
+    Windows installers have no probeable version file; the adapter reads this
+    stamp, and the in-Anki handshake remains the authoritative observed check.
+    Read-only mounts (dmg) simply skip the write."""
+    try:
+        directory = os.path.dirname(os.path.abspath(binary))
+        payload = {"anki": entry.get("anki"), "qt": entry.get("qt"),
+                   "arch": entry.get("arch"), "sha256": entry.get("sha256"),
+                   "source": entry.get("url", "")}
+        with open(os.path.join(directory, "runtime-version.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(payload, fh)
+    except OSError:
+        pass
+
+
 def install(entry: dict, archive: str, dest_dir: str) -> str:
     """Install/mount the pinned runtime for this host and return its binary."""
     kind = entry.get("kind", "")
@@ -143,6 +161,7 @@ def install(entry: dict, archive: str, dest_dir: str) -> str:
         binary = os.path.join(mount, "Anki.app", "Contents", "MacOS", "Anki")
         if not os.path.isfile(binary):
             raise SystemExit(f"fetch_runtimes: binary not found in dmg: {binary}")
+        _write_version_stamp(entry, binary)
         return binary
     if kind in ("exe", "msi"):
         if kind == "msi":
@@ -171,6 +190,7 @@ def install(entry: dict, archive: str, dest_dir: str) -> str:
             for relative in (("Programs", "Anki"), ("Anki",), ("Anki", "Programs")):
                 candidate = os.path.join(root, *relative, "anki.exe")
                 if os.path.isfile(candidate):
+                    _write_version_stamp(entry, candidate)
                     return candidate
         # Last resort: bounded search for anki.exe under the install roots.
         for root in roots:
@@ -181,7 +201,9 @@ def install(entry: dict, archive: str, dest_dir: str) -> str:
                     dirs[:] = []
                     continue
                 if "anki.exe" in files:
-                    return os.path.join(base, "anki.exe")
+                    candidate = os.path.join(base, "anki.exe")
+                    _write_version_stamp(entry, candidate)
+                    return candidate
         raise SystemExit("fetch_runtimes: installed anki.exe not found")
     if kind in ("tar.zst", "tar.gz", "tar.xz"):
         extract(entry, archive, dest_dir)
@@ -189,6 +211,7 @@ def install(entry: dict, archive: str, dest_dir: str) -> str:
             if "anki" in files:
                 candidate = os.path.join(base, "anki")
                 if os.access(candidate, os.X_OK):
+                    _write_version_stamp(entry, candidate)
                     return candidate
         raise SystemExit("fetch_runtimes: extracted anki binary not found")
     return archive

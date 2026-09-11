@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import platform
+import json
 import plistlib
 import re
 import subprocess
@@ -80,6 +81,15 @@ def _probe_version_from_files(binary: str) -> str:
         except OSError:
             pass
     for folder in (base, os.path.join(base, "app")):
+        stamp = os.path.join(folder, "runtime-version.json")
+        if os.path.isfile(stamp):
+            try:
+                with open(stamp, encoding="utf-8") as fh:
+                    value = str((json.load(fh) or {}).get("anki", ""))
+                if re.match(r"^\d+(?:\.\d+)+$", value):
+                    return value
+            except (OSError, ValueError):
+                pass
         try:
             names = os.listdir(folder)
         except OSError:
