@@ -6,4 +6,4 @@
 # (npm i -g supabase@2.115.0 or brew install supabase/tap/supabase);
 # the pin is recorded in dev/toolchains.json.
 hypothesis==6.112.1  # generated operation sequences (tests only; optional locally)
-
+Pillow==11.3.0  # asset/package audit and build validation
