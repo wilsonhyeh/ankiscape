@@ -6,12 +6,16 @@ The public anon key MAY ship (it is a publishable client key, gated by RLS);
 the service-role/SMTP/admin keys MUST NEVER ship. This script takes ONLY the
 anon key + URL, writes a two-constant module, and refuses to run when given
 anything resembling a privileged key (service_role JWT, sb_secret_, SMTP
-password). Run manually before the production build; never in CI unattended.
+password). Candidate workflows invoke it with the ANKISCAPE_PROD_URL and
+ANKISCAPE_PROD_ANON_KEY environment variables so the one build job produces a
+production-configured package; fork PR builds remain local-only/secret-free.
 
 Usage:
   python3 scripts/make_prod_config.py \
     --url https://vjqzamuogcughdvzskmf.supabase.co \
     --anon-key <sb_publishable_... or anon JWT>
+  ANKISCAPE_PROD_URL=... ANKISCAPE_PROD_ANON_KEY=... \
+    python3 scripts/make_prod_config.py
 
 To clear (dev builds): python3 scripts/make_prod_config.py --clear
 """
@@ -41,11 +45,13 @@ def main(argv=None) -> int:
         else:
             print("prod_config: already absent")
         return 0
-    url = args.url.strip()
-    key = args.anon_key.strip()
+    url = (args.url or os.environ.get("ANKISCAPE_PROD_URL", "")).strip()
+    key = (args.anon_key
+           or os.environ.get("ANKISCAPE_PROD_ANON_KEY", "")).strip()
     if not url.startswith("https://") or not key:
-        print("prod_config: ERROR: --url must be https:// and --anon-key "
-              "non-empty", file=sys.stderr)
+        print("prod_config: ERROR: --url/--anon-key (or ANKISCAPE_PROD_URL/"
+              "ANKISCAPE_PROD_ANON_KEY) must provide an https:// URL and a "
+              "non-empty public anon key", file=sys.stderr)
         return 2
     lowered = (url + "\n" + key).lower()
     for marker in FORBIDDEN_MARKERS:

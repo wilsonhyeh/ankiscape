@@ -3200,6 +3200,9 @@ def _evolved_finalize_pending() -> int:
         if outcome is None:
             continue
         info = _PENDING_REVIEWS.pop(key, {})
+        # A confirmed write ends any persistence-recovery state, whether the
+        # reward itself was awarded or paused.
+        _evolved_clear_recovery()
         _evolved_finalize_one(engine, key, info, outcome)
         finalized += 1
     if finalized:

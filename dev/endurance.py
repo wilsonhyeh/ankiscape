@@ -44,6 +44,17 @@ SETTLED_LIMIT_MIB = 50.0
 FIXED_HISTORY = 1000
 
 
+def _metrics_module():
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "endurance_metrics.py")
+    spec = importlib.util.spec_from_file_location(
+        "ankiscape_endurance_metrics", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _rss_mib() -> float:
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform == "darwin":
@@ -142,30 +153,20 @@ def run(minutes: float, answers_per_second: float,
         journal.close()
         tmp.cleanup()
 
-    warmup_cut = max(1, int(len(samples) * 0.3))
-    warm = samples[warmup_cut:]
-    if len(warm) >= 2:
-        (t0, m0), (t1, m1) = warm[0], warm[-1]
-        slope = (m1 - m0) / max(0.001, (t1 - t0) / 60.0)
-        settled = max(s["rss_mib"] for s in warm) - min(
-            s["rss_mib"] for s in warm)
-    else:
-        slope = settled = 0.0
-    failures = []
+    report = _metrics_module().evaluate_endurance(
+        samples, profile="engine-smoke", duration_min=minutes)
+    failures = list(report.get("failures") or [])
     if not equivalent:
         failures.append("final worker state != reference replay")
-    if slope > SLOPE_LIMIT_MIB_PER_MIN:
-        failures.append(f"rss slope {slope:.2f} MiB/min exceeds budget")
-    if settled > SETTLED_LIMIT_MIB:
-        failures.append(f"settled increase {settled:.1f} MiB exceeds budget")
     summary = {
         "minutes": minutes, "answers_per_second": answers_per_second,
         "answers": answers, "busy_retries": busy_retries,
         "fixed_history": FIXED_HISTORY,
         "layers": ["journal", "engine", "projection_worker"],
         "native_ui_cycles": "platform lane journeys (ui-lifecycle)",
-        "slope_mib_per_min": round(slope, 3),
-        "settled_increase_mib": round(settled, 1),
+        "eligible_for_release": False,
+        "slope_mib_per_min": report.get("slope_mib_per_min"),
+        "settled_increase_mib": report.get("settled_increase_mib"),
         "samples": samples, "equivalence": equivalent,
         "budgets": {"slope_mib_per_min": SLOPE_LIMIT_MIB_PER_MIN,
                     "settled_increase_mib": SETTLED_LIMIT_MIB},

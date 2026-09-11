@@ -9,6 +9,8 @@
 # into the next phase) or e2e-assertions.json (final, run_id stamped).
 import json
 import os
+import sys
+import threading
 import time
 import traceback
 
@@ -107,6 +109,40 @@ def _shot(name):
         pass
 
 
+def _runtime_identity():
+    """Observed runtime identity from inside the real Anki process.
+
+    The requested version strings cannot prove what actually launched; the
+    evidence contract consumes this handshake instead.
+    """
+    ident = {"anki": "", "python": "", "qt": "", "arch": ""}
+    try:
+        import aqt
+        ident["anki"] = str(getattr(aqt, "appVersion", "") or "")
+    except Exception:
+        pass
+    try:
+        from aqt import mw
+        pm_version = getattr(getattr(mw, "pm", None), "anki_version", "")
+        if not ident["anki"] and pm_version:
+            ident["anki"] = str(pm_version)
+    except Exception:
+        pass
+    try:
+        import platform
+        import sys as _sys
+        ident["python"] = ".".join(str(v) for v in _sys.version_info[:3])
+        ident["arch"] = platform.machine()
+    except Exception:
+        pass
+    try:
+        from aqt.qt import qVersion
+        ident["qt"] = str(qVersion())
+    except Exception:
+        ident["qt"] = ""
+    return ident
+
+
 def _finish(exit_code):
     RESULT["finished"] = time.time()
     try:
@@ -114,6 +150,7 @@ def _finish(exit_code):
         RESULT["qt_version"] = str(qVersion())
     except Exception:
         RESULT["qt_version"] = ""
+    RESULT["runtime"] = _runtime_identity()
     try:
         with open(_out_path("assertions.json"), "w", encoding="utf-8") as fh:
             json.dump(RESULT, fh, indent=2)
@@ -134,7 +171,9 @@ def _finish_phase(next_phase):
             json.dump({"next_phase": int(next_phase), "run_id": RUN_ID,
                        "ok": not RESULT["errors"],
                        "failed_steps": [s["name"] for s in RESULT["steps"]
-                                        if not s.get("ok")]}, fh)
+                                        if not s.get("ok")],
+                       "failed_details": [s for s in RESULT["steps"]
+                                          if not s.get("ok")]}, fh)
     except Exception:
         pass
     _quit(0)
@@ -306,7 +345,12 @@ def run():
             state["ticks"] += 1
             if state["ticks"] == 1:
                 _beat("first_tick")
-            if state["ticks"] > 1200:  # ~120 s watchdog per phase
+            max_ticks = 1200
+            try:
+                max_ticks = int(_perf_config().get("max_ticks") or 0) or 1200
+            except Exception:
+                pass
+            if state["ticks"] > max_ticks:  # watchdog per phase
                 return _fail("watchdog: journey did not finish in time")
             if state["ticks"] % 150 == 0:
                 _shot(f"stuck-{state['ticks']}")
@@ -891,6 +935,47 @@ def _reviewer_settled():
         return getattr(reviewer, "state", "?") != "transition"
     except Exception:
         return False
+
+
+def _answer_current_card(state, ease=3):
+    """Human-order answer: show the answer side, then invoke the real answer.
+
+    Calling `_answerCard` while the reviewer is still on the question side
+    does not reliably schedule or emit `reviewer_did_answer_card` (Anki's
+    own buttons only exist on the answer side). Returns True once the real
+    answer call was made this tick.
+    """
+    from aqt import mw
+    if getattr(mw, "state", "") != "review":
+        try:
+            mw.moveToState("review")
+        except Exception:
+            pass
+        return False
+    if state.get("awaiting"):
+        return False
+    reviewer = getattr(mw, "reviewer", None)
+    if reviewer is None or getattr(reviewer, "card", None) is None:
+        return False
+    if not _reviewer_settled():
+        return False
+    rst = getattr(reviewer, "state", "")
+    if rst == "question":
+        show = getattr(reviewer, "_showAnswer", None)
+        if callable(show):
+            try:
+                show()
+            except Exception:
+                pass
+        return False
+    if rst == "answer":
+        answer = getattr(reviewer, "_answerCard", None)
+        if not callable(answer):
+            return False
+        state["answer_calls"] = state.get("answer_calls", 0) + 1
+        answer(ease)
+        return True
+    return False
 
 
 def _poll_settle(state):
@@ -2467,7 +2552,13 @@ def _run_art_checks(state):
             if scaled is None or scaled.isNull():
                 mapping_problems.append(f"{rel} null at {size}")
                 continue
-            if scaled.width() > size or scaled.height() > size:
+            try:
+                dpr = float(scaled.devicePixelRatio()) or 1.0
+            except Exception:
+                dpr = 1.0
+            logical_w = scaled.width() / dpr
+            logical_h = scaled.height() / dpr
+            if logical_w > size + 0.5 or logical_h > size + 0.5:
                 mapping_problems.append(f"{rel} exceeds {size}px slot")
             if pix.width() and pix.height():
                 want = pix.height() / pix.width()
@@ -2504,11 +2595,16 @@ def _run_art_checks(state):
         from ankiscape.evolved.ui.guide import guide_pages
         pages = guide_pages(load_rules())
         short = [title for title, body in pages.items() if len(body) < 100]
-        credits = pages.get("Credits & assets", "")
+        credits = ""
+        for title, body in pages.items():
+            if "credit" in title.lower():
+                credits = body
+                break
         ok = (not short and "Jagex Ltd" in credits
               and "oldschool.runescape.wiki" in credits)
         _step("art_guide_pages_render", ok,
-              f"pages={len(pages)} short={short}")
+              f"pages={len(pages)} short={short} credits="
+              f"{'found' if credits else 'missing'}")
     except Exception as exc:
         _step("art_guide_pages_render", False, repr(exc))
 
@@ -2786,9 +2882,15 @@ def _visual_polish_checks(state):
     except Exception as exc:
         _step("visual_min_size_usable", False, repr(exc))
 
-    # 3. Icon cache: repeated full cycles must not re-decode files.
+    # 3. Icon cache: repeated full cycles must not re-decode files. One
+    # warm-up cycle establishes the cache; the measured cycles must reuse it.
     try:
+        cache = ui_widgets._ICON_CACHE
+        for section in ART_SECTIONS:
+            _click_rail(section)
+            QApplication.processEvents()
         before = ui_widgets.icon_cache_stats()
+        keys_before = set(cache._data.keys())
         for _ in range(2):
             for section in ART_SECTIONS:
                 _click_rail(section)
@@ -2796,8 +2898,13 @@ def _visual_polish_checks(state):
         after = ui_widgets.icon_cache_stats()
         decodes = _visual_stat(after, "decodes") - _visual_stat(before, "decodes")
         hits = _visual_stat(after, "hits") - _visual_stat(before, "hits")
+        lost = sorted(keys_before - set(cache._data.keys()))
+        fresh = sorted(k for k in cache._data.keys() if k not in keys_before)
+        sample = "; ".join(
+            f"{str(k[0])[-28:]}|{k[2]}|{k[3]}" for k in fresh[:6])
         _step("visual_icon_cache_reuse", decodes <= 4 and hits > 0,
-              f"re-decodes={decodes} hits={hits}")
+              f"re-decodes={decodes} hits={hits} lost_keys={len(lost)} "
+              f"entries={after.get('entries')} fresh={sample}")
         _step("visual_icon_cache_bounded",
               _visual_stat(after, "entries") <= 256
               and _visual_stat(after, "bytes") <= 16 * 1024 * 1024,
@@ -2807,7 +2914,13 @@ def _visual_polish_checks(state):
 
     # 4. Bounded rows after 100 section changes.
     try:
+        # The screen lookup requires a visible widget: show each section
+        # before grabbing its root so the row-count probe is real.
+        _click_rail("bank")
+        QApplication.processEvents()
         bank = _shell_child(shell, ART_SCREEN_NAMES["bank"])
+        _click_rail("achievements")
+        QApplication.processEvents()
         achievements = _shell_child(shell, ART_SCREEN_NAMES["achievements"])
         bank_before = int(bank.row_count()) if hasattr(bank, "row_count") else -1
         ach_before = int(achievements.row_count()) if hasattr(achievements, "row_count") else -1
@@ -2936,16 +3049,12 @@ def _seed_bulk_ops(state, count):
 def _answer_with_timing(state):
     """One real reviewer answer, timed around the accepted-answer hook."""
     import time as _time
-    from aqt import mw
-    reviewer = getattr(mw, "reviewer", None)
-    card = getattr(reviewer, "card", None) if reviewer is not None else None
-    answer = getattr(reviewer, "_answerCard", None) if reviewer is not None else None
-    if card is None or not callable(answer):
-        return None
     before = _award_count()
     start = _time.perf_counter()
-    answer(3)  # real reviewer path; the hook runs synchronously inside
+    called = _answer_current_card(state)
     elapsed = (_time.perf_counter() - start) * 1000.0
+    if not called:
+        return None
     state["last_hook_ms"] = elapsed
     state["awaiting"] = state.get("calls", 0) + 1
     state["calls"] = state.get("calls", 0) + 1
@@ -2999,8 +3108,15 @@ def _poll_ui_deferred_rewards(state):
             state["stage"] = "published"
             return
         if state["verify_ticks"] > 200:
+            import ankiscape
+            engine = ankiscape._EVOLVED_CTX.get("engine")
+            status = engine.projection_status() if engine is not None else {}
             _step("deferred_op_persisted_before_publish", False,
-                  f"journal={len(ops)}")
+                  f"journal={len(ops)} "
+                  f"recovery={bool(ankiscape._RECOVERY_WARNING.get('active'))} "
+                  f"msg={str(ankiscape._RECOVERY_WARNING.get('message', ''))[:100]} "
+                  f"hook_ms={state.get('last_hook_ms', -1)} "
+                  f"status={status}")
             _finish(1)
         return
     if stage == "published":
@@ -3069,30 +3185,35 @@ def _poll_ui_rebuild_review(state):
             if len(ops) > state.get("ops_baseline", 0) + state["answers_done"]:
                 state["awaiting"] = 0
         if state.get("answers_done", 0) >= 3:
-            reference = _projection()
             import ankiscape
             engine = ankiscape._EVOLVED_CTX.get("engine")
             latest = engine.projection() if engine is not None else {}
+            target = engine.journal.operation_count() if engine is not None else 0
+            state["final_ticks"] = state.get("final_ticks", 0) + 1
+            # The worker publishes the retraction rebuild asynchronously; wait
+            # (bounded) for the published revision before comparing state.
+            if engine is not None and \
+                    int(latest.get("revision", 0) or 0) < target \
+                    and state["final_ticks"] < 600:
+                return
+            reference = _projection()
             equal = all(latest.get(k) == reference.get(k)
                         for k in ("xp_micro", "inventory", "levels", "revision"))
             _step("rebuild_answer_responsive",
                   state.get("last_hook_ms", 999) < 250.0,
                   f"hook={state.get('last_hook_ms', -1):.1f}ms")
-            _step("rebuild_state_equals_reference", equal)
+            _step("rebuild_state_equals_reference", equal,
+                  f"revision={latest.get('revision')} target={target}")
             _shot("ui-rebuild-review")
             _finish(0 if not RESULT["errors"] else 1)
             return
         if state.get("awaiting"):
             return
-        from aqt import mw
-        reviewer = getattr(mw, "reviewer", None)
-        card = getattr(reviewer, "card", None) if reviewer is not None else None
-        answer = getattr(reviewer, "_answerCard", None) if reviewer is not None else None
-        if card is None or not callable(answer):
-            return
         import time as _time
         start = _time.perf_counter()
-        answer(3)
+        called = _answer_current_card(state)
+        if not called:
+            return
         state["last_hook_ms"] = (_time.perf_counter() - start) * 1000.0
         state["awaiting"] = 1
         state["answers_done"] = state.get("answers_done", 0) + 1
@@ -3207,34 +3328,43 @@ def _poll_ui_credential_fallback(state):
     import tempfile
     from ankiscape.evolved.credentials import CredentialVault
     tmp = tempfile.mkdtemp(prefix="ankiscape-vault-")
+    token = {"access_token": "fixture-access", "refresh_token": "fixture-refresh",
+             "user_id": "fixture-user"}
+    secret = "fixture-access"
     try:
         vault = CredentialVault(tmp, "https://example.invalid")
         _step("credential_vault_available", True,
               f"available={vault.available}")
-        if vault.available:
-            saved = vault.save("fixture", "s3cret-value")
-            loaded = vault.load("fixture")
-            _step("credential_vault_roundtrip",
-                  bool(saved) and loaded == "s3cret-value",
-                  f"saved={bool(saved)}")
-            vault.delete("fixture")
-            _step("credential_vault_delete", vault.load("fixture") in (None, ""))
+        wrote = vault.write(dict(token))
+        loaded = vault.read()
+        if vault.available and wrote and isinstance(loaded, dict) \
+                and loaded.get("access_token") == token["access_token"]:
+            _step("credential_vault_roundtrip", True, "secure vault")
+            vault.delete()
+            _step("credential_vault_delete", vault.read() in (None, ""))
+            _step("credential_vault_mode", True, "secure")
         else:
-            # Session-only behavior: nothing persists, no plaintext appears.
-            vault.save("fixture", "s3cret-value")
-            leaked = []
-            for base, _dirs, files in os.walk(tmp):
-                for name in files:
-                    try:
-                        with open(os.path.join(base, name), "rb") as fh:
-                            if b"s3cret-value" in fh.read():
-                                leaked.append(name)
-                    except OSError:
-                        continue
-            _step("credential_vault_no_plaintext", not leaked,
-                  f"leaked={leaked[:3]}")
-            _step("credential_vault_session_only",
-                  vault.load("fixture") in (None, ""))
+            # Vault reported available but could not persist (e.g. a locked
+            # CI keychain): the honest behavior is session-only with nothing
+            # written to disk. Both branches must pass truthfully.
+            _step("credential_vault_mode", True, "session_only")
+        leaked = []
+        for base, _dirs, files in os.walk(tmp):
+            for name in files:
+                try:
+                    with open(os.path.join(base, name), "rb") as fh:
+                        if secret.encode() in fh.read():
+                            leaked.append(name)
+                except OSError:
+                    continue
+        _step("credential_vault_no_plaintext", not leaked, f"leaked={leaked[:3]}")
+        _step("credential_vault_session_only",
+              vault.read() in (None, "") or not vault.available)
+        unavailable = CredentialVault(tmp, "https://example.invalid")
+        unavailable.available = False  # explicit unavailable-branch exercise
+        refused = unavailable.write(dict(token)) is False \
+            and unavailable.read() is None and unavailable.delete() is False
+        _step("credential_vault_unavailable_refuses", refused)
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -3263,17 +3393,18 @@ def _poll_ui_recovery(state):
         engine = ankiscape._EVOLVED_CTX.get("engine")
         if engine is None:
             return
-        state["journal_before"] = len(_journal_ops())
-        state["original_record"] = engine.journal.record_review
+        if not state.get("fault_installed"):
+            state["fault_installed"] = True
+            state["journal_before"] = len(_journal_ops())
+            state["original_record"] = engine.journal.record_review
 
-        def _failing(*_a, **_k):
-            return {"ok": False, "busy": True,
-                    "error": "interactive_write_failed:simulated"}
+            def _failing(*_a, **_k):
+                return {"ok": False, "busy": True,
+                        "error": "interactive_write_failed:simulated"}
 
-        engine.journal.record_review = _failing  # simulated fault (labeled)
-        from aqt import mw
-        reviewer = mw.reviewer
-        reviewer._answerCard(3)
+            engine.journal.record_review = _failing  # simulated fault (labeled)
+        if not _answer_current_card(state):
+            return
         state["stage"] = "verify_failure"
         return
     if stage == "verify_failure":
@@ -3294,13 +3425,10 @@ def _poll_ui_recovery(state):
     if stage == "recover":
         if not _reviewer_settled():
             return
-        from aqt import mw
-        reviewer = getattr(mw, "reviewer", None)
-        card = getattr(reviewer, "card", None) if reviewer is not None else None
-        answer = getattr(reviewer, "_answerCard", None) if reviewer is not None else None
-        if card is None or not callable(answer):
-            return
-        answer(3)
+        if not state.get("recovery_answered"):
+            if not _answer_current_card(state):
+                return
+            state["recovery_answered"] = True
         state["stage"] = "verify_recovery"
         state["recover_ticks"] = 0
         return
@@ -3497,6 +3625,423 @@ def _poll_ui_report_bug(state):
         _finish(0 if not RESULT["errors"] else 1)
 
 
+def _perf_config():
+    try:
+        with open(os.path.join(_base_dir(), "perf-config.json"),
+                  encoding="utf-8") as fh:
+            return json.load(fh) or {}
+    except Exception:
+        return {}
+
+
+def _perf_write(payload, name="perf-native.json"):
+    try:
+        with open(_out_path(name), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+    except Exception:
+        pass
+
+
+def _perf_marker(name, value=""):
+    try:
+        with open(_out_path(name), "w", encoding="utf-8") as fh:
+            fh.write(str(value))
+    except Exception:
+        pass
+
+
+def _rss_mib():
+    try:
+        import resource
+        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return round(value / (1024 * 1024), 1) if sys.platform == "darwin" \
+            else round(value / 1024, 1)
+    except Exception:
+        return 0.0
+
+
+def _process_cpu_seconds():
+    try:
+        import resource
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        return float(usage.ru_utime) + float(usage.ru_stime)
+    except Exception:
+        return 0.0
+
+
+def _lag_probe_start(state):
+    from aqt.qt import QTimer
+    import time as _time
+
+    state.setdefault("lag_samples", [])
+
+    def tick():
+        if state.get("lag_probe_off"):
+            return
+        now = _time.perf_counter()
+        expected = state.get("lag_expected")
+        if expected is not None:
+            state["lag_samples"].append(
+                round(max(0.0, now - expected) * 1000.0, 3))
+        state["lag_expected"] = now + 0.1
+        QTimer.singleShot(100, tick)
+
+    state["lag_probe_off"] = False
+    state["lag_expected"] = _time.perf_counter() + 0.1
+    QTimer.singleShot(100, tick)
+
+
+def _perf_journal_revision():
+    try:
+        import ankiscape
+        engine = ankiscape._EVOLVED_CTX.get("engine")
+        if engine is None:
+            return 0, None
+        latest = engine.projection() or {}
+        return int(latest.get("revision", 0) or 0), engine
+    except Exception:
+        return 0, None
+
+
+def _perf_reward_watch(state):
+    try:
+        import ankiscape
+        pending = getattr(ankiscape, "_PENDING_REVIEWS", None)
+        if pending:
+            return next(reversed(pending))
+    except Exception:
+        pass
+    return None
+
+
+def _poll_native_endurance(state, cfg):
+    import time as _time
+
+    stage = state.get("stage", "setup")
+    minutes = float(cfg.get("endurance_minutes", 1))
+    if stage == "setup":
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        _seed_deck(state, count=8, prefix="ENDURE")
+        if int(cfg.get("bulk_ops", 0) or 0):
+            if not _seed_bulk_ops(state, int(cfg["bulk_ops"])):
+                return
+        _open_reviewer(state, "ENDURE")
+        state["stage"] = "grow"
+        state["started_monotonic"] = _time.monotonic()
+        state["answers"] = 0
+        state["samples"] = []
+        state["next_sample"] = _time.monotonic()
+        state["grow_until"] = _time.monotonic() + max(1.0, minutes * 60.0) * 0.5
+        state["answers_per_second"] = float(cfg.get("answers_per_second", 2.0))
+        state["eligible_for_release"] = bool(cfg.get("eligible_for_release", False))
+        return
+    if stage == "grow":
+        now = _time.monotonic()
+        if now >= state.get("grow_until", 0):
+            state["stage"] = "lifecycle"
+            state["lifecycle_end"] = state.get("started_monotonic", now) + \
+                max(1.0, minutes * 60.0)
+            return
+        if now >= state.get("next_sample", 0):
+            state["next_sample"] = now + 30.0
+            state["samples"].append({
+                "at_s": round(now - state["started_monotonic"], 1),
+                "phase": "growing", "rss_mib": _rss_mib(),
+                "objects": len(gc.get_objects()),
+                "threads": threading.active_count(),
+                "answers": state["answers"]})
+        if not _answer_current_card(state):
+            return
+        state["answers"] += 1
+        interval = 1.0 / max(0.1, state.get("answers_per_second", 2.0))
+        sleep = interval - 0.0
+        if sleep > 0:
+            _time.sleep(min(sleep, 0.25))
+        return
+    if stage == "lifecycle":
+        now = _time.monotonic()
+        if now >= state.get("next_sample", 0):
+            state["next_sample"] = now + 30.0
+            state["samples"].append({
+                "at_s": round(now - state["started_monotonic"], 1),
+                "phase": "fixed", "rss_mib": _rss_mib(),
+                "objects": len(gc.get_objects()),
+                "threads": threading.active_count(),
+                "answers": state["answers"]})
+        if now >= state.get("lifecycle_end", 0):
+            state["stage"] = "finish"
+            return
+        # One UI lifecycle cycle per tick: open/close shell + section changes.
+        shell = _find_shell()
+        if shell is None:
+            _open_shell_via_menu()
+            return
+        from aqt.qt import QApplication
+        for section in ART_SECTIONS:
+            _click_rail(section)
+            QApplication.processEvents()
+        try:
+            shell.close()
+        except Exception:
+            pass
+        return
+    if stage == "finish":
+        import ankiscape
+        equivalent = False
+        try:
+            engine = ankiscape._EVOLVED_CTX.get("engine")
+            if engine is not None:
+                expected = engine.journal.operation_count()
+                deadline = _time.monotonic() + 120
+                while _time.monotonic() < deadline:
+                    latest = engine.projection() or {}
+                    if int(latest.get("revision", 0) or 0) >= expected:
+                        break
+                    _time.sleep(0.05)
+                from ankiscape.evolved.reducer import replay
+                from ankiscape.evolved.data import load_rules
+                reference = replay(engine.journal.all_operations(), load_rules(),
+                                   engine.cfg.game_uuid)
+                latest = engine.projection() or {}
+                equivalent = all(latest.get(k) == reference.get(k)
+                                 for k in ("xp_micro", "inventory", "levels",
+                                           "revision"))
+        except Exception as exc:
+            RESULT["errors"].append(f"endurance equivalence: {exc!r}")
+        payload = {"mode": "endurance", "run_id": RUN_ID,
+                   "duration_min": round(minutes, 3),
+                   "answers": state.get("answers", 0),
+                   "fixed_history": bool(cfg.get("bulk_ops")),
+                   "eligible_for_release": bool(state.get("eligible_for_release")),
+                   "equivalence": bool(equivalent),
+                   "samples": state.get("samples", []),
+                   "object_final": len(gc.get_objects()),
+                   "thread_final": threading.active_count()}
+        _perf_write(payload)
+        _step("native_endurance_completed", True,
+              f"answers={payload['answers']} samples={len(payload['samples'])}")
+        _finish(0 if not RESULT["errors"] else 1)
+
+
+def _poll_native_performance(state):
+    """Measured real reviews, shell paints, rebuilds and idle inside Anki."""
+    import time as _time
+    import gc as _gc
+
+    cfg = _perf_config()
+    if cfg.get("mode") == "endurance":
+        return _poll_native_endurance(state, cfg)
+    mode = "control" if JOURNEY.endswith("control") else "addon"
+    answers_target = int(cfg.get("answers", 30))
+    warm_opens = int(cfg.get("warm_opens", 5))
+    stage = state.get("stage", "setup")
+
+    if stage == "setup":
+        if mode == "addon":
+            if _drive_onboarding(state, "mining") is not True:
+                return
+        _seed_deck(state, count=max(8, min(answers_target + 5, 2000)),
+                   prefix="PERF")
+        _open_reviewer(state, "PERF")
+        state["mode"] = mode
+        state["stage"] = "bulk" if int(cfg.get("bulk_ops", 0) or 0) else "warmup"
+        return
+    if stage == "bulk":
+        if not _seed_bulk_ops(state, int(cfg.get("bulk_ops", 0))):
+            return
+        state["stage"] = "quiesce"
+        return
+    if stage == "quiesce":
+        # Let the projection worker finish the import/rebuild before timing
+        # ordinary reviews; import time is setup, not product responsiveness.
+        state["quiesce_ticks"] = state.get("quiesce_ticks", 0) + 1
+        revision, engine = _perf_journal_revision()
+        target = engine.journal.operation_count() if engine is not None else 0
+        if engine is not None and revision >= target:
+            state["bulk_seeded_count"] = target
+            state["stage"] = "warmup"
+            return
+        if state["quiesce_ticks"] > 3600:
+            _step("quiesce_timeout", False,
+                  f"revision={revision} target={target}")
+            state["bulk_seeded_count"] = target
+            state["stage"] = "warmup"
+            return
+        return
+    if stage == "warmup":
+        state["warmup_ticks"] = state.get("warmup_ticks", 0) + 1
+        if state["warmup_ticks"] < 3:
+            return
+        _lag_probe_start(state)
+        state["stage"] = "answers"
+        state["answers_done"] = 0
+        state["accept_ms"] = []
+        state["reward_ms"] = []
+        state["rebuilds"] = []
+        state["rebuild_watch"] = []
+        state["rebuild_at"] = [int(v) for v in (cfg.get("rebuilds_at") or [])]
+        state["answer_started"] = None
+        state["reward_watch"] = None
+        return
+    if stage == "answers":
+        if state.get("reward_watch"):
+            key = state["reward_watch"]
+            try:
+                import ankiscape
+                engine = ankiscape._EVOLVED_CTX.get("engine")
+                outcome = engine.outcome_for(key) if engine is not None else None
+            except Exception:
+                outcome = None
+            if outcome is not None:
+                started = state.get("reward_started") or _time.perf_counter()
+                state["reward_ms"].append(
+                    round((_time.perf_counter() - started) * 1000.0, 2))
+                state["reward_watch"] = None
+        for watch in list(state.get("rebuild_watch", [])):
+            revision, engine = _perf_journal_revision()
+            if engine is not None and revision >= watch["target"]:
+                state["rebuilds"].append(
+                    round((_time.perf_counter() - watch["start"]) * 1000.0, 2))
+                state["rebuild_watch"].remove(watch)
+        if state.get("answer_started") is None:
+            if state["answers_done"] >= answers_target:
+                if mode == "control":
+                    # No add-on shell exists in the control run; go straight
+                    # to the idle window so the paired CPU sample is equal.
+                    state["shell_opens_done"] = warm_opens
+                    state["stage"] = "idle"
+                else:
+                    state["stage"] = "settle"
+                    state["settle_ticks"] = 0
+                return
+            if not state.get("awaiting") and _answer_current_card(state):
+                state["answer_started"] = _time.perf_counter()
+                state["answers_done"] += 1
+                if mode == "addon":
+                    state["reward_watch"] = _perf_reward_watch(state)
+                    state["reward_immediate"] = state["reward_watch"] is None
+                    state["reward_started"] = _time.perf_counter()
+                if state["answers_done"] in state.get("rebuild_at", []) \
+                        and mode == "addon":
+                    try:
+                        import ankiscape
+                        engine = ankiscape._EVOLVED_CTX.get("engine")
+                        if engine is not None and state.get("bulk_seeded_count"):
+                            engine.retract(review_key="rk-bulk-1")
+                            state["rebuild_watch"].append({
+                                "start": _time.perf_counter(),
+                                "target": engine.journal.operation_count()})
+                    except Exception as exc:
+                        RESULT["errors"].append(f"rebuild trigger: {exc!r}")
+            return
+        # Awaiting the answer: it is complete when the reviewer moved on.
+        from aqt import mw as _mw
+        reviewer = getattr(_mw, "reviewer", None)
+        rst = getattr(reviewer, "state", "") if reviewer is not None else ""
+        if _mw.state != "review" or rst in ("answer", "transition"):
+            return
+        state["accept_ms"].append(
+            round((_time.perf_counter() - state["answer_started"]) * 1000.0, 2))
+        if state.get("reward_immediate"):
+            # No pending watch: the reward displayed synchronously inside the
+            # accepted-answer hook, so the answer completion time is the
+            # displayed-reward time.
+            state["reward_ms"].append(state["accept_ms"][-1])
+            state["reward_immediate"] = False
+        state["answer_started"] = None
+        state["awaiting"] = 0
+        return
+    if stage == "settle":
+        state["settle_ticks"] = state.get("settle_ticks", 0) + 1
+        revision, engine = _perf_journal_revision()
+        target = engine.journal.operation_count() if engine is not None else 0
+        if not state.get("rebuild_watch") and \
+                (engine is None or revision >= target):
+            state["stage"] = "shell"
+            return
+        if state["settle_ticks"] > 1200:
+            _step("settle_timeout", False,
+                  f"revision={revision} target={target} "
+                  f"watches={len(state.get('rebuild_watch') or [])}")
+            state["stage"] = "shell"
+        return
+    if stage == "shell":
+        if state.get("shell_opens_done", 0) >= warm_opens:
+            state["stage"] = "idle"
+            return
+        state["shell_ticks"] = state.get("shell_ticks", 0) + 1
+        if state["shell_ticks"] > 300:
+            _step("shell_stage_stuck", False, "no shell within 300 ticks")
+            state["shell_opens_done"] = warm_opens
+            state["stage"] = "idle"
+            return
+        if state.get("shell_open_started") is None:
+            shell = _find_shell()
+            if shell is not None:
+                try:
+                    shell.close()
+                except Exception:
+                    pass
+                return
+            state["shell_open_started"] = _time.perf_counter()
+            _open_shell_via_menu()
+            return
+        if _find_shell() is not None:
+            ms = (_time.perf_counter() - state["shell_open_started"]) * 1000.0
+            state.setdefault("shell_ms", []).append(round(ms, 2))
+            state["shell_opens_done"] = state.get("shell_opens_done", 0) + 1
+            state["shell_open_started"] = None
+            if state["shell_opens_done"] == 1:
+                state["cold_ms"] = round(ms, 2)
+        return
+    if stage == "idle":
+        if state.get("shell_opens_done", 0) < warm_opens or \
+                state.get("stage_until", 0) == 0:
+            shell = _find_shell()
+            if shell is not None:
+                try:
+                    shell.close()
+                except Exception:
+                    pass
+                return
+            state["lag_probe_off"] = True
+            state["idle_cpu_start"] = _process_cpu_seconds()
+            state["idle_wall_start"] = _time.time()
+            state["stage_until"] = _time.time() + float(
+                cfg.get("idle_seconds", 20))
+            _perf_marker("perf-idle-start", str(state["stage_until"]))
+            return
+        if _time.time() < state.get("stage_until", 0):
+            return
+        elapsed = max(0.1, _time.time() - state.get("idle_wall_start",
+                                                    _time.time()))
+        cpu_delta = _process_cpu_seconds() - state.get("idle_cpu_start", 0.0)
+        state["idle_cpu_pct"] = round((cpu_delta / elapsed) * 100.0, 4)
+        _perf_marker("perf-idle-end", str(_time.time()))
+        state["stage"] = "finish"
+        return
+    if stage == "finish":
+        payload = {"mode": "perf", "run_id": RUN_ID, "run_mode": mode,
+                   "answers": state["answers_done"],
+                   "accept_ms": state.get("accept_ms", []),
+                   "reward_ms": state.get("reward_ms", []),
+                   "lag_ms": state.get("lag_samples", []),
+                   "shell_ms": state.get("shell_ms", []),
+                   "cold_ms": state.get("cold_ms"),
+                   "rebuilds_ms": state.get("rebuilds", []),
+                   "idle_seconds": cfg.get("idle_seconds", 0),
+                   "idle_cpu_pct": state.get("idle_cpu_pct"),
+                   "eligible_for_release":
+                       bool(cfg.get("eligible_for_release", False)),
+                   "object_final": len(_gc.get_objects()),
+                   "thread_final": threading.active_count()}
+        _perf_write(payload)
+        _step("native_performance_completed", True,
+              f"answers={payload['answers']} lag={len(payload['lag_ms'])}")
+        _finish(0 if not RESULT["errors"] else 1)
+
+
 _PHASE_POLLS = {
     ("fresh", 1): _poll_fresh,
     ("upgrade", 1): _poll_upgrade_1,
@@ -3523,6 +4068,8 @@ _PHASE_POLLS = {
     ("ui-recovery", 1): _poll_ui_recovery,
     ("ui-profile-races", 1): _poll_ui_profile_races,
     ("ui-report-bug", 1): _poll_ui_report_bug,
+    ("native-performance", 1): _poll_native_performance,
+    ("native-performance-control", 1): _poll_native_performance,
 }
 
 

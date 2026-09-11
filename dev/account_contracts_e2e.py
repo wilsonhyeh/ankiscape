@@ -278,10 +278,22 @@ def main(argv=None) -> int:
         check("retried op acknowledged", journal.pending_operations() == [])
 
         # --- Restart + resumed remembered session --------------------------
+        # A no-keyring host (or a locked CI keychain) must sign in again
+        # truthfully instead of pretending the session persisted.
+        persisted = CredentialVault(profile_dir, API).read()
         resumed = ProfileSession(generation=4,
                                  vault=CredentialVault(profile_dir, API))
-        check("restart resumes the remembered session",
-              resumed.logged_in and bool(resumed.access_token))
+        if persisted is not None:
+            check("restart resumes the remembered session",
+                  resumed.logged_in and bool(resumed.access_token))
+        else:
+            check("session-only restart is not silently signed in",
+                  not resumed.logged_in)
+            result_r = login_password(post_json, endpoint, email=email_a,
+                                      password=password,
+                                      session=resumed.session)
+            check("explicit sign-in restores a session-only restart",
+                  result_r.ok and resumed.logged_in)
         resumed_rows = query_hiscores(post_json, endpoint, resumed,
                                       skill="mining")
         check("resumed session reaches the service",

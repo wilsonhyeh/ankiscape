@@ -1,7 +1,6 @@
-# Nightly: seven native targets, expanded generated properties, local backend,
-# 30-minute endurance, performance metrics and one trusted hosted fixture
-# smoke. Actions pinned by reviewed tag; replace with commit SHAs before
-# enabling hosted runs (review requirement).
+# Nightly: one production candidate, then shared/backend/native (7 targets,
+# including 30-minute native endurance) and trusted hosted roles, validated
+# by the aggregate. Actions pinned to reviewed commits.
 name: nightly
 
 on:
@@ -13,24 +12,166 @@ permissions:
   contents: read
 
 jobs:
+  build:
+    name: Build the production candidate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    outputs:
+      artifact_sha: ${{ steps.hash.outputs.artifact_sha }}
+      config_sha: ${{ steps.hash.outputs.config_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - name: Production configuration (public anon key only)
+        env:
+          ANKISCAPE_PROD_URL: ${{ secrets.ANKISCAPE_PROD_URL }}
+          ANKISCAPE_PROD_ANON_KEY: ${{ secrets.ANKISCAPE_PROD_ANON_KEY }}
+        run: |
+          python3 scripts/make_prod_config.py
+          test -f evolved/prod_config.py
+      - name: Build and audit the candidate
+        run: |
+          python3 run_tests.py
+          python3 scripts/build_addon.py
+          python3 scripts/audit_assets.py --check
+          python3 scripts/audit_assets.py --archive dist/ankiscape-3.0.0.ankiaddon
+      - name: Assert the endpoint is baked
+        run: |
+          python3 - <<'PY'
+          import json
+          record = json.load(open("dist/manifest.json"))
+          assert record.get("prod_endpoint_baked") is True, record
+          print("prod_endpoint_baked:", record["prod_endpoint_baked"])
+          PY
+      - name: Record artifact and config hashes
+        id: hash
+        run: |
+          HASH=$(python3 -c "import json;print(json.load(open('dist/manifest.json'))['artifact_sha256'])")
+          CONFIG=$(sha256sum evolved/prod_config.py | cut -d' ' -f1)
+          echo "artifact_sha=$HASH" >> "$GITHUB_OUTPUT"
+          echo "config_sha=$CONFIG" >> "$GITHUB_OUTPUT"
+      - name: Upload the candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-artifact
+          path: |
+            dist/ankiscape-3.0.0.ankiaddon
+            dist/manifest.json
+          retention-days: 30
+
+  shared:
+    name: Shared role (pure, traces, assets, engine benchmarks)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - name: Download the candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-artifact
+          path: dist
+      - name: Verify candidate bytes unchanged
+        run: |
+          ACTUAL=$(python3 -c "import json;print(json.load(open('dist/manifest.json'))['artifact_sha256'])")
+          test "$ACTUAL" = "${{ needs.build.outputs.artifact_sha }}"
+      - name: Shared role lane
+        run: |
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          python3 dev/reliability.py run-lane --stage nightly --role shared \
+            --out "artifacts/reliability/${RUN_ID}/shared"
+      - name: Bundle and upload evidence
+        if: always()
+        run: |
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          tar -C artifacts/reliability -cf "artifacts/evidence-shared.tar" "${RUN_ID}"
+          test -f "artifacts/evidence-shared.tar" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-shared
+          path: artifacts/evidence-shared.tar
+          if-no-files-found: warn
+          retention-days: 30
+
+  backend:
+    name: Linux backend role (stack, sync, mutation)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - name: Linux packages, Docker and Supabase CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd xvfb libfuse2 libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libdbus-1-3 libfontconfig1
+          docker info
+          npm install -g supabase@2.115.0
+      - name: Download the candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-artifact
+          path: dist
+      - name: Verify candidate bytes unchanged
+        run: |
+          ACTUAL=$(python3 -c "import json;print(json.load(open('dist/manifest.json'))['artifact_sha256'])")
+          test "$ACTUAL" = "${{ needs.build.outputs.artifact_sha }}"
+      - name: Install pinned Anki runtime
+        run: |
+          BIN=$(python3 dev/fetch_runtimes.py --download linux/26.8.1 \
+            --qt 6 --arch x86_64 --dest .dev/runtimes --install | tail -n1)
+          echo "ANKI_BIN=$BIN" >> "$GITHUB_ENV"
+      - name: Start the local stack
+        working-directory: server
+        run: supabase start
+      - name: Backend role lane
+        run: |
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          python3 dev/reliability.py run-lane --stage nightly --role backend \
+            --os linux --out "artifacts/reliability/${RUN_ID}/backend"
+      - name: Bundle and upload evidence
+        if: always()
+        run: |
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          tar -C artifacts/reliability -cf "artifacts/evidence-backend.tar" "${RUN_ID}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-backend
+          path: artifacts/evidence-backend.tar
+          if-no-files-found: warn
+          retention-days: 30
+
   native:
     name: ${{ matrix.label }}
+    needs: build
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { label: "macos-23.10-qt6", os: macos, runner: macos-14, anki: "23.10", qt: "6" }
-          - { label: "macos-26.8.1-qt6", os: macos, runner: macos-14, anki: "26.8.1", qt: "6" }
-          - { label: "windows-23.10-qt6", os: windows, runner: windows-2022, anki: "23.10", qt: "6" }
-          - { label: "windows-26.8.1-qt6", os: windows, runner: windows-2022, anki: "26.8.1", qt: "6" }
-          - { label: "linux-23.10-qt5", os: linux, runner: ubuntu-22.04, anki: "23.10", qt: "5" }
-          - { label: "linux-23.10-qt6", os: linux, runner: ubuntu-22.04, anki: "23.10", qt: "6" }
-          - { label: "linux-26.8.1-qt6", os: linux, runner: ubuntu-22.04, anki: "26.8.1", qt: "6" }
+          - { label: "macos-23.10-qt6", os: macos, runner: macos-14, anki: "23.10", qt: "6", arch: arm64 }
+          - { label: "macos-26.8.1-qt6", os: macos, runner: macos-14, anki: "26.8.1", qt: "6", arch: arm64 }
+          - { label: "windows-23.10-qt6", os: windows, runner: windows-2022, anki: "23.10", qt: "6", arch: x64 }
+          - { label: "windows-26.8.1-qt6", os: windows, runner: windows-2022, anki: "26.8.1", qt: "6", arch: x64 }
+          - { label: "linux-23.10-qt5", os: linux, runner: ubuntu-22.04, anki: "23.10", qt: "5", arch: x86_64 }
+          - { label: "linux-23.10-qt6", os: linux, runner: ubuntu-22.04, anki: "23.10", qt: "6", arch: x86_64 }
+          - { label: "linux-26.8.1-qt6", os: linux, runner: ubuntu-22.04, anki: "26.8.1", qt: "6", arch: x86_64 }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 240
+    timeout-minutes: 420
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
       - name: Dev dependencies
@@ -40,99 +181,58 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y zstd xvfb libfuse2 libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libdbus-1-3 libfontconfig1
+      - name: Download the candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-artifact
+          path: dist
+      - name: Verify candidate bytes unchanged
+        shell: bash
+        run: |
+          ACTUAL=$(python3 -c "import json;print(json.load(open('dist/manifest.json'))['artifact_sha256'])")
+          test "$ACTUAL" = "${{ needs.build.outputs.artifact_sha }}"
       - name: Install pinned runtime
         shell: bash
         run: |
-          BIN=$(python3 dev/fetch_runtimes.py --download ${{ matrix.os == 'macos' && 'macos' || matrix.os == 'windows' && 'windows' || 'linux' }}/${{ matrix.anki }} --dest .dev/runtimes --install | tail -n1)
+          BIN=$(python3 dev/fetch_runtimes.py --download ${{ matrix.os }}/${{ matrix.anki }} \
+            --qt ${{ matrix.qt }} --arch ${{ matrix.arch }} --dest .dev/runtimes --install | tail -n1)
           echo "ANKI_BIN=$BIN" >> "$GITHUB_ENV"
           echo "resolved runtime: $BIN"
-      - name: Build the candidate package
-        run: python3 scripts/build_addon.py
-      - name: Native packaged journeys (all scenarios)
+      - name: Native role lane (journeys, performance, 30-minute endurance)
         shell: bash
         env:
           ANKISCAPE_FIXTURE_EMAIL: ${{ secrets.ANKISCAPE_FIXTURE_EMAIL }}
           ANKISCAPE_FIXTURE_PASSWORD: ${{ secrets.ANKISCAPE_FIXTURE_PASSWORD }}
         run: |
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
           if [ "${{ matrix.os }}" = "linux" ]; then
-            xvfb-run -a python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}" --anki-actual "${{ matrix.anki }}"
+            xvfb-run -a python3 dev/reliability.py run-lane --stage nightly \
+              --role native --os "${{ matrix.os }}" --anki "${{ matrix.anki }}" \
+              --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}" \
+              --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}"
           else
-            python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}" --anki-actual "${{ matrix.anki }}"
+            python3 dev/reliability.py run-lane --stage nightly \
+              --role native --os "${{ matrix.os }}" --anki "${{ matrix.anki }}" \
+              --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}" \
+              --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}"
           fi
-      - name: Record nightly lane evidence
+      - name: Bundle and upload evidence
         if: always()
-        env:
-          ANKISCAPE_FIXTURE_EMAIL: ${{ secrets.ANKISCAPE_FIXTURE_EMAIL }}
-          ANKISCAPE_FIXTURE_PASSWORD: ${{ secrets.ANKISCAPE_FIXTURE_PASSWORD }}
         shell: bash
         run: |
-          RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            xvfb-run -a python3 dev/reliability.py run-lane --stage nightly --os "${{ matrix.os }}" \
-              --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
-              --anki-bin "${ANKI_BIN:-}" --anki-actual "${{ matrix.anki }}" \
-              --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}" || true
-          else
-            python3 dev/reliability.py run-lane --stage nightly --os "${{ matrix.os }}" \
-              --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
-              --anki-bin "${ANKI_BIN:-}" --anki-actual "${{ matrix.anki }}" \
-              --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}" || true
-          fi
-      - name: Upload lane evidence
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          tar -C artifacts/reliability -cf "artifacts/evidence-${{ matrix.label }}.tar" "${RUN_ID}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: reliability-nightly-${{ matrix.label }}
-          path: artifacts/reliability/
+          name: evidence-${{ matrix.label }}
+          path: artifacts/evidence-${{ matrix.label }}.tar
+          if-no-files-found: warn
           retention-days: 30
 
-  backend:
-    name: Local Supabase suite, parity and mutation gate (linux)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install -r dev/requirements.lock
-      - run: npm install -g supabase@2.115.0
-      - name: Local backend suite
-        working-directory: server
-        run: |
-          supabase start
-          python3 ../dev.py test --suite backend
-      - name: Scoring parity
-        run: python3 dev/scoring_parity.py --local
-      - name: Account contracts
-        run: python3 dev/account_contracts_e2e.py --local
-
-  endurance:
-    name: 30-minute endurance
-    runs-on: ubuntu-22.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install -r dev/requirements.lock
-      - name: Endurance run
-        run: |
-          RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
-          mkdir -p "artifacts/reliability/${RUN_ID}/endurance"
-          python3 dev/endurance.py --minutes 30 --answers-per-second 2 \
-            --json "artifacts/reliability/${RUN_ID}/endurance/endurance-30m.json"
-      - name: Upload endurance evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: reliability-nightly-endurance
-          path: artifacts/reliability/
-          retention-days: 30
-
-  hosted-fixtures:
-    name: Trusted hosted fixture smoke (real backend)
+  hosted:
+    name: Trusted hosted fixture role (real backend)
+    needs: build
     if: github.repository == 'wilsonhyeh/ankiscape'
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -141,27 +241,79 @@ jobs:
       group: hosted-fixtures
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
       - run: pip install -r dev/requirements.lock
-      - name: Seed/verify permanent fixtures (idempotent)
+      - name: Hosted role lane
         env:
           ANKISCAPE_PROD_URL: ${{ secrets.ANKISCAPE_PROD_URL }}
           ANKISCAPE_PROD_ANON_KEY: ${{ secrets.ANKISCAPE_PROD_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           ANKISCAPE_FIXTURE_SECRET: ${{ secrets.ANKISCAPE_FIXTURE_SECRET }}
         run: |
-          python3 dev/seed_hosted_fixtures.py --hosted --plan
-          python3 dev/seed_hosted_fixtures.py --hosted --apply
-          python3 dev/seed_hosted_fixtures.py --hosted --apply
-          python3 dev/seed_hosted_fixtures.py --hosted --verify
-          python3 dev/hosted_fixture_e2e.py --hosted
-      - name: Upload hosted fixture evidence
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          python3 dev/reliability.py run-lane --stage nightly --role hosted \
+            --trusted --out "artifacts/reliability/${RUN_ID}/hosted"
+      - name: Bundle and upload evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        run: |
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          tar -C artifacts/reliability -cf "artifacts/evidence-hosted.tar" "${RUN_ID}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
-          name: reliability-nightly-hosted
+          name: evidence-hosted
+          path: artifacts/evidence-hosted.tar
+          if-no-files-found: warn
+          retention-days: 30
+
+  aggregate:
+    name: Aggregate and validate nightly evidence
+    needs: [build, shared, backend, native, hosted]
+    if: always()
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r dev/requirements.lock
+      - name: Download candidate and evidence bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: "*"
+          merge-multiple: true
+          path: merged
+      - name: Extract evidence tars
+        run: |
+          mkdir -p dist artifacts/reliability
+          cp merged/ankiscape-3.0.0.ankiaddon dist/
+          cp merged/manifest.json dist/
+          for bundle in merged/evidence-*.tar; do
+            [ -f "$bundle" ] || continue
+            tar -xf "$bundle" -C artifacts/reliability
+          done
+          find artifacts/reliability -name record.json | sort
+      - name: Any required job failed?
+        if: needs.build.result != 'success' || needs.shared.result != 'success' || needs.backend.result != 'success' || needs.native.result != 'success' || needs.hosted.result != 'success'
+        run: |
+          echo "required job failed: build=${{ needs.build.result }} shared=${{ needs.shared.result }} backend=${{ needs.backend.result }} native=${{ needs.native.result }} hosted=${{ needs.hosted.result }}"
+          exit 1
+      - name: Strict evidence validation
+        run: |
+          python3 dev/reliability.py verify-evidence --stage nightly \
+            --matrix dev/reliability-matrix.json \
+            --evidence artifacts/reliability \
+            --expected-commit "${{ github.sha }}" \
+            --expected-artifact-sha256 "${{ needs.build.outputs.artifact_sha }}" \
+            --expected-run-id "${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Upload aggregated evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-evidence-aggregate
           path: artifacts/reliability/
           retention-days: 30

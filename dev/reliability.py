@@ -41,12 +41,14 @@ DEFAULT_EVIDENCE = os.path.join(ROOT, "artifacts", "reliability")
 DIST_DIR = os.path.join(ROOT, "dist")
 
 RECORD_SCHEMA = "ankiscape-reliability-record"
-RECORD_VERSION = 1
+RECORD_VERSION = 2
 STAGES = ("pr", "nightly", "release")
+ROLES = ("shared", "backend", "native", "hosted")
 FILE_MTIME_SLACK_S = 600
 MAX_RUN_SECONDS = 48 * 3600
 
-# Native journeys introduced by the coverage task; run on each target lane.
+# Native journeys run on every target lane (hosted login/leaderboard coverage
+# is required only on the current Qt6 target per OS; see the matrix).
 NEW_JOURNEYS = ("ui-deferred-rewards", "ui-rebuild-review", "ui-report-bug",
                 "ui-visual-polish", "ui-test-leaderboard", "ui-credential-fallback",
                 "ui-profile-races", "ui-recovery")
@@ -207,6 +209,16 @@ def resolve_artifact(dist_dir: str = DIST_DIR) -> Tuple[Dict[str, Any], str, str
 
 # ------------------------------------------------------------------- budgets
 
+def _num(value: Any, default: float = 1e9) -> float:
+    """Float coercion that treats None/invalid as "not measured"."""
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
                      enforce_samples: bool = True,
                      required: Optional[set] = None) -> List[str]:
@@ -238,9 +250,9 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
             samples = int(entry.get("samples", 0) or 0)
             if enforce_samples and samples < int(hook.get("min_samples", 0)):
                 _fail("accepted_answer_hook", f"samples:{size}:{samples}")
-            if float(entry.get("p95_ms", 1e9)) > float(hook["limit"]):
+            if _num(entry.get("p95_ms")) > _num(hook["limit"]):
                 _fail("accepted_answer_hook", f"p95:{size}:{entry.get('p95_ms')}")
-            if float(entry.get("p99_ms", 1e9)) > float(hook["p99_limit"]):
+            if _num(entry.get("p99_ms")) > _num(hook["p99_limit"]):
                 _fail("accepted_answer_hook", f"p99:{size}:{entry.get('p99_ms')}")
 
     # warm_review_scaling: derived p95 ratio 100k / 1k.
@@ -254,7 +266,7 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
             ratio = float(large) / float(small)
         if ratio is None:
             _fail("warm_review_scaling", "not_measured")
-        elif float(ratio) > float(cfg["warm_review_scaling"]["limit"]):
+        elif _num(ratio) > _num(cfg["warm_review_scaling"]["limit"]):
             _fail("warm_review_scaling", f"ratio:{round(float(ratio), 3)}")
 
     # reward_completion
@@ -267,7 +279,7 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
             if enforce_samples and int(entry.get("samples", 0)) < int(
                     cfg["reward_completion"].get("min_samples", 0)):
                 _fail("reward_completion", f"samples:{entry.get('samples')}")
-            if float(entry.get("p95_ms", 1e9)) > float(cfg["reward_completion"]["limit"]):
+            if _num(entry.get("p95_ms")) > _num(cfg["reward_completion"]["limit"]):
                 _fail("reward_completion", f"p95:{entry.get('p95_ms')}")
 
     # late_retraction_rebuild: max of runs against hard gate (target reported).
@@ -277,43 +289,55 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
             if "late_retraction_rebuild" in required:
                 _fail("late_retraction_rebuild", "not_measured")
         else:
-            worst = float(entry.get("max_ms", 1e9))
-            hard = float(cfg["late_retraction_rebuild"]["hard_limit"])
+            worst = _num(entry.get("max_ms"))
+            hard = _num(cfg["late_retraction_rebuild"]["hard_limit"])
             if worst > hard:
                 _fail("late_retraction_rebuild", f"max:{worst}")
-            elif worst > float(cfg["late_retraction_rebuild"]["target"]):
+            elif worst > _num(cfg["late_retraction_rebuild"]["target"]):
                 failures.append(
                     f"budget:late_retraction_rebuild:target_missed:{worst}")
 
-    # Native-only budgets: enforced when measured.
+    # Native-only budgets: enforced when measured, required when named.
     lag = metrics.get("event_loop_lag")
     if lag:
-        if float(lag.get("p95_ms", 1e9)) > float(cfg["event_loop_lag"]["limit"]):
+        if _num(lag.get("p95_ms")) > _num(cfg["event_loop_lag"]["limit"]):
             _fail("event_loop_lag", f"p95:{lag.get('p95_ms')}")
-        if float(lag.get("max_ms", 0)) > float(cfg["event_loop_lag"]["max_limit_ms"]):
+        if _num(lag.get("max_ms"), 0.0) > _num(cfg["event_loop_lag"]["max_limit_ms"]):
             _fail("event_loop_lag", f"max:{lag.get('max_ms')}")
+    elif "event_loop_lag" in required:
+        _fail("event_loop_lag", "not_measured")
     shell = metrics.get("warm_shell_open")
-    if shell and float(shell.get("p95_ms", 1e9)) > float(cfg["warm_shell_open"]["limit"]):
-        _fail("warm_shell_open", f"p95:{shell.get('p95_ms')}")
+    if shell:
+        if _num(shell.get("p95_ms")) > _num(cfg["warm_shell_open"]["limit"]):
+            _fail("warm_shell_open", f"p95:{shell.get('p95_ms')}")
+    elif "warm_shell_open" in required:
+        _fail("warm_shell_open", "not_measured")
     cold = metrics.get("cold_shell_appearance")
-    if cold and float(cold.get("ms", 1e9)) > float(cfg["cold_shell_appearance"]["limit"]):
-        _fail("cold_shell_appearance", f"ms:{cold.get('ms')}")
+    if cold:
+        if _num(cold.get("ms")) > _num(cfg["cold_shell_appearance"]["limit"]):
+            _fail("cold_shell_appearance", f"ms:{cold.get('ms')}")
+    elif "cold_shell_appearance" in required:
+        _fail("cold_shell_appearance", "not_measured")
     idle = metrics.get("idle_cpu")
     if idle:
-        if float(idle.get("cpu_pct_delta", 1e9)) > float(cfg["idle_cpu"]["limit"]):
+        if _num(idle.get("cpu_pct_delta")) > _num(cfg["idle_cpu"]["limit"]):
             _fail("idle_cpu", f"delta:{idle.get('cpu_pct_delta')}")
         if idle.get("network_polling") not in (None, "none", "existing_scheduled_sync"):
             _fail("idle_cpu", f"network_polling:{idle.get('network_polling')}")
         if idle.get("new_recurring_timer"):
             _fail("idle_cpu", "new_recurring_timer")
+    elif "idle_cpu" in required:
+        _fail("idle_cpu", "not_measured")
     mem = metrics.get("endurance_memory")
     if mem:
-        if float(mem.get("slope_mib_per_min", 1e9)) > float(
+        if _num(mem.get("slope_mib_per_min")) > _num(
                 cfg["endurance_memory"]["limit"]):
             _fail("endurance_memory", f"slope:{mem.get('slope_mib_per_min')}")
-        if float(mem.get("settled_increase_mib", 1e9)) > float(
+        if _num(mem.get("settled_increase_mib")) > _num(
                 cfg["endurance_memory"]["settled_limit_mib"]):
             _fail("endurance_memory", f"settled:{mem.get('settled_increase_mib')}")
+    elif "endurance_memory" in required:
+        _fail("endurance_memory", "not_measured")
     return failures
 
 
@@ -325,18 +349,34 @@ def _check(condition: bool, errors: List[str], message: str) -> bool:
     return condition
 
 
+def _role_inventory(matrix: Dict[str, Any], role: str, stage: str) -> Dict[str, Any]:
+    spec = dict((matrix.get("roles") or {}).get(role) or {})
+    spec["job"] = str((spec.get("jobs") or {}).get(stage, ""))
+    spec["workflow"] = str((spec.get("workflows") or {}).get(stage, ""))
+    return spec
+
+
+def _scenarios_for_role(matrix: Dict[str, Any], role: str,
+                        stage: str) -> List[Dict[str, Any]]:
+    return [s for s in matrix.get("scenarios", [])
+            if str(s.get("role")) == role and stage in (s.get("stages") or [])]
+
+
 def _required_scenarios(matrix: Dict[str, Any], stage: str,
                         target_os: str) -> List[str]:
-    required = []
-    for scenario in matrix.get("scenarios", []):
-        if stage not in (scenario.get("stages") or []):
-            continue
-        host = str(scenario.get("host", "any"))
-        if host in ("any", "targets") or (host == "linux" and target_os == "linux") \
-                or (host == "linux-docker" and target_os == "linux") \
-                or (host == "linux-native" and target_os == "linux"):
-            required.append(str(scenario.get("id")))
-    return required
+    """Scenario ids required for one native target lane at this stage."""
+    _ = target_os
+    return [str(s.get("id"))
+            for s in _scenarios_for_role(matrix, "native", stage)]
+
+
+def _target_matches_spec(spec: Dict[str, Any], key: Tuple[str, str, str]) -> bool:
+    want = target_key(spec or {})
+    return want == key
+
+
+def _normalize_key(key: Tuple[str, str, str]) -> Tuple[str, str, str]:
+    return (str(key[0]).lower(), normalize_version(key[1]), normalize_version(key[2]))
 
 
 def _collect_records(evidence_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
@@ -357,13 +397,116 @@ def _collect_records(evidence_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
     return found
 
 
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return not (math.isnan(float(value)) or math.isinf(float(value)))
+
+
+def _metric_sanity(metrics: Dict[str, Any], rel: str) -> List[str]:
+    """Reject NaN/infinity, wrong types and contradictory summaries."""
+    errors: List[str] = []
+
+    def bad(path: str, detail: str) -> None:
+        errors.append(f"metric_invalid:{rel}:{path}:{detail}")
+
+    summaries = []
+    for key in ("reward_completion", "warm_shell_open", "event_loop_lag",
+                "idle_cpu"):
+        entry = metrics.get(key)
+        if isinstance(entry, dict):
+            summaries.append((key, entry))
+    hook = metrics.get("accepted_answer_hook")
+    if isinstance(hook, dict):
+        for size, entry in hook.items():
+            if isinstance(entry, dict):
+                summaries.append((f"accepted_answer_hook.{size}", entry))
+    for name, entry in summaries:
+        samples = entry.get("samples")
+        if samples is not None and (not isinstance(samples, int) or samples < 0):
+            bad(name + ".samples", repr(samples))
+        for field in ("min_ms", "p50_ms", "p95_ms", "p99_ms", "max_ms"):
+            if field in entry and not _finite_number(entry[field]):
+                bad(f"{name}.{field}", repr(entry[field]))
+        order = [entry.get(f) for f in ("min_ms", "p50_ms", "p95_ms", "p99_ms",
+                                        "max_ms")]
+        vals = [v for v in order if _finite_number(v)]
+        if len(vals) > 1 and vals != sorted(vals):
+            bad(name + ".order", str(order))
+    lag = metrics.get("event_loop_lag")
+    if isinstance(lag, dict):
+        if _finite_number(lag.get("p95_ms")) and _finite_number(lag.get("max_ms")) \
+                and lag["p95_ms"] > lag["max_ms"]:
+            bad("event_loop_lag.order", "p95 > max")
+    ratio = metrics.get("warm_review_scaling")
+    if isinstance(ratio, dict):
+        value = ratio.get("p95_ratio_100000_over_1000")
+        if value is not None and not _finite_number(value):
+            bad("warm_review_scaling.ratio", repr(value))
+    mem = metrics.get("endurance_memory")
+    if isinstance(mem, dict):
+        for field in ("slope_mib_per_min", "settled_increase_mib",
+                      "duration_min", "baseline_rss_mib"):
+            if field in mem and mem[field] is not None \
+                    and not _finite_number(mem[field]):
+                bad(f"endurance_memory.{field}", repr(mem[field]))
+    rb = metrics.get("late_retraction_rebuild")
+    if isinstance(rb, dict):
+        for field in ("max_ms", "samples"):
+            if field in rb and rb[field] is not None \
+                    and not _finite_number(rb[field]):
+                bad(f"late_retraction_rebuild.{field}", repr(rb[field]))
+    return errors
+
+
+def _validate_files(record_dir: str, rel: str, entries: List[Any],
+                    *, started, finished) -> List[str]:
+    errors: List[str] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            errors.append(f"bad_file_entry:{rel}")
+            continue
+        raw_path = str(entry.get("path", ""))
+        if not raw_path or os.path.isabs(raw_path) or ".." in raw_path.split("/"):
+            errors.append(f"unsafe_file_path:{rel}:{raw_path}")
+            continue
+        file_path = os.path.join(record_dir, raw_path)
+        if not os.path.isfile(file_path):
+            errors.append(f"file_missing:{rel}:{raw_path}")
+            continue
+        if sha256_file(file_path) != str(entry.get("sha256", "")):
+            errors.append(f"file_hash_mismatch:{rel}:{raw_path}")
+        if int(entry.get("bytes", -1)) != os.path.getsize(file_path):
+            errors.append(f"file_bytes_mismatch:{rel}:{raw_path}")
+        if started and finished:
+            mtime = datetime.datetime.fromtimestamp(
+                os.path.getmtime(file_path), datetime.timezone.utc)
+            if (mtime < started - datetime.timedelta(seconds=FILE_MTIME_SLACK_S)
+                    or mtime > finished + datetime.timedelta(seconds=FILE_MTIME_SLACK_S)):
+                errors.append(f"file_stale_mtime:{rel}:{raw_path}")
+        if file_path.endswith(".json"):
+            try:
+                load_json(file_path)
+            except (OSError, ValueError):
+                errors.append(f"file_unparseable:{rel}:{raw_path}")
+    return errors
+
+
 def validate_evidence(matrix_path: str, evidence_dir: str, *,
                       budgets_path: Optional[str] = None, stage: str = "release",
                       dist_dir: str = DIST_DIR,
-                      enforce_samples: bool = True) -> Tuple[bool, List[str], Dict[str, Any]]:
-    """Validate evidence records against the matrix. Pure and unit-testable."""
+                      enforce_samples: bool = True,
+                      expected_commit: str = "",
+                      expected_artifact_sha256: str = "",
+                      expected_run_id: str = "") -> Tuple[bool, List[str], Dict[str, Any]]:
+    """Validate evidence records against the role matrix. Pure and testable.
+
+    Expected inputs bind the evidence set to one candidate: commit, artifact
+    hash and run id are not inferred from the evidence itself.
+    """
     errors: List[str] = []
-    summary: Dict[str, Any] = {"stage": stage, "targets": {}, "records": 0}
+    summary: Dict[str, Any] = {"stage": stage, "targets": {}, "records": 0,
+                               "roles": {}, "run_id": expected_run_id}
 
     if not os.path.isfile(matrix_path):
         return False, [f"matrix_missing:{matrix_path}"], summary
@@ -371,15 +514,34 @@ def validate_evidence(matrix_path: str, evidence_dir: str, *,
         matrix = load_json(matrix_path)
     except (OSError, ValueError) as exc:
         return False, [f"matrix_unreadable:{exc!r}"], summary
+    if int(matrix.get("version", 0) or 0) < 2 or not matrix.get("roles"):
+        return False, ["matrix_outdated:requires_version_2_roles"], summary
     required_targets = list(matrix.get("required_targets") or [])
     if not required_targets:
         return False, ["matrix_empty:required_targets"], summary
 
     if not os.path.isdir(evidence_dir):
         return False, [f"evidence_missing:{evidence_dir}"], summary
-    records = _collect_records(evidence_dir)
-    if not records:
+    all_records = _collect_records(evidence_dir)
+    if not all_records:
         return False, [f"no_records:{evidence_dir}"], summary
+
+    # Select exactly one run: an explicitly expected run id, or (for local
+    # maintainer runs) the single run directory present.
+    top_dirs = sorted({os.path.relpath(path, evidence_dir).split(os.sep)[0]
+                       for path, _record in all_records})
+    if expected_run_id:
+        if expected_run_id not in top_dirs:
+            errors.append(f"run_missing:{expected_run_id}")
+        records = [(path, record) for path, record in all_records
+                   if os.path.relpath(path, evidence_dir).split(os.sep)[0]
+                   == expected_run_id]
+    else:
+        if len(top_dirs) != 1:
+            errors.append(f"multiple_runs:{top_dirs}")
+        records = list(all_records)
+    if not records:
+        return False, errors + [f"no_records_in_run:{expected_run_id or '-'}"], summary
     summary["records"] = len(records)
 
     budgets = None
@@ -397,41 +559,34 @@ def validate_evidence(matrix_path: str, evidence_dir: str, *,
 
     now = datetime.datetime.now(datetime.timezone.utc)
 
-    # Index target records by normalized key.
+    by_role: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
     by_target: Dict[Tuple[str, str, str], List[Tuple[str, Dict[str, Any]]]] = {}
+    commits = set()
+    hashes = set()
+    run_ids = set()
+
     for path, record in records:
-        target = record.get("target") or {}
         if not record:
             errors.append(f"record_unreadable:{os.path.relpath(path, ROOT)}")
             continue
-        by_target.setdefault(target_key(target), []).append((path, record))
-
-    commits = set()
-    hashes = set()
-    for required in required_targets:
-        key = target_key(required)
-        matches = by_target.get(key, [])
-        rel = os.path.relpath(matches[0][0], ROOT) if matches else "-"
-        summary["targets"][f"{key[0]}/{key[1]}/qt{key[2]}"] = "missing"
-        if not matches:
-            errors.append(f"missing_target:{key}")
-            continue
-        if len(matches) > 1:
-            errors.append(f"duplicate_target:{key}")
-            continue
-        path, record = matches[0]
+        role = str(record.get("role") or "")
         rel = os.path.relpath(path, ROOT)
         record_dir = os.path.dirname(path)
+        started = parse_utc(record.get("started_at"))
+        finished = parse_utc(record.get("finished_at"))
         target = record.get("target") or {}
 
-        # Identity / provenance fields.
+        by_role.setdefault(role, []).append((path, record))
+        if role == "native":
+            by_target.setdefault(target_key(target), []).append((path, record))
+
         if record.get("schema") != RECORD_SCHEMA:
             errors.append(f"record_schema:{rel}")
         if int(record.get("version", 0) or 0) != RECORD_VERSION:
             errors.append(f"record_version:{rel}")
         for field in ("run_id", "stage", "source", "artifact", "command",
                       "started_at", "finished_at", "exit_status", "completed",
-                      "scenarios", "counts", "files"):
+                      "scenarios", "counts", "files", "role", "job"):
             if field not in record:
                 errors.append(f"missing_field:{rel}:{field}")
         if record.get("completed") is not True:
@@ -439,14 +594,31 @@ def validate_evidence(matrix_path: str, evidence_dir: str, *,
         if int(record.get("exit_status", 1) or 0) != 0:
             errors.append(f"exit_status:{rel}")
         run_id = str(record.get("run_id") or "")
+        run_ids.add(run_id)
         if not run_id or run_id not in record_dir.split(os.sep):
             errors.append(f"run_id_mismatch:{rel}")
-        if not record.get("trusted") and "trusted" in record:
-            pass  # clean untrusted lanes are fine; trusted is checked globally
+        if expected_run_id and run_id != expected_run_id:
+            errors.append(f"run_id_expected:{rel}:{run_id}!={expected_run_id}")
 
-        started = parse_utc(record.get("started_at"))
-        finished = parse_utc(record.get("finished_at"))
-        if started is None or finished is None:
+        if record.get("stage") != stage:
+            errors.append(f"stage_mismatch:{rel}:{record.get('stage')}")
+        if role not in ROLES:
+            errors.append(f"record_role:{rel}:{role!r}")
+            continue
+        inventory = _role_inventory(matrix, role, stage)
+        if stage not in ((matrix.get("roles") or {}).get(role, {})
+                         .get("stages") or []):
+            errors.append(f"role_stage:{rel}:{role}:{stage}")
+        if not inventory.get("job"):
+            errors.append(f"role_job:{rel}:{role}:{stage}")
+        elif str(record.get("job") or "") != inventory["job"]:
+            errors.append(f"job_mismatch:{rel}:{record.get('job')}"
+                          f"!={inventory['job']}")
+        if role == "hosted" and record.get("trusted") is not True:
+            errors.append(f"untrusted_role:{rel}:{role}")
+
+        started_ok = started is not None and finished is not None
+        if not started_ok:
             errors.append(f"bad_time:{rel}")
         else:
             if finished < started:
@@ -456,128 +628,240 @@ def validate_evidence(matrix_path: str, evidence_dir: str, *,
             if started > now + datetime.timedelta(minutes=10):
                 errors.append(f"future_time:{rel}")
 
-        # Target version match (normalized), actual strings retained.
-        if str(target.get("os", "")).lower() != str(required.get("os", "")).lower():
-            errors.append(f"version_mismatch:{rel}:os")
-        if normalize_version(target.get("anki")) != normalize_version(required.get("anki")):
-            errors.append(f"version_mismatch:{rel}:anki")
-        if normalize_version(target.get("qt")) != normalize_version(required.get("qt")):
-            errors.append(f"version_mismatch:{rel}:qt")
-        for field in ("arch", "python", "anki_actual"):
-            if not target.get(field):
-                errors.append(f"missing_target_field:{rel}:{field}")
+        source = record.get("source") or {}
+        commit = str(source.get("commit", ""))
+        if not commit:
+            errors.append(f"missing_source_commit:{rel}")
+        commits.add(commit)
+        if source.get("dirty") is not False:
+            errors.append(f"dirty_source:{rel}")
+        if expected_commit and commit != expected_commit:
+            errors.append(f"commit_expected:{rel}:{commit}!={expected_commit}")
 
-        # Artifact provenance.
         artifact = record.get("artifact") or {}
+        artifact_sha = str(artifact.get("sha256", ""))
+        hashes.add(artifact_sha)
         if manifest is not None:
             if str(artifact.get("file", "")) != str(manifest.get("archive")):
                 errors.append(f"artifact_name_mismatch:{rel}")
-            if str(artifact.get("sha256", "")) != dist_hash:
+            if artifact_sha != dist_hash:
                 errors.append(f"artifact_hash_mismatch:{rel}")
             if str(artifact.get("flavor", "")) != "ankiaddon":
                 errors.append(f"artifact_flavor:{rel}")
             if int(artifact.get("bytes", 0) or 0) <= 0:
                 errors.append(f"artifact_bytes:{rel}")
-        if merged := artifact.get("sha256"):
-            hashes.add(str(merged))
-        source = record.get("source") or {}
-        if str(source.get("commit", "")):
-            commits.add(str(source.get("commit")))
+        if expected_artifact_sha256 and artifact_sha != expected_artifact_sha256:
+            errors.append(f"artifact_expected:{rel}:"
+                          f"{artifact_sha[:12]}!={expected_artifact_sha256[:12]}")
 
-        # Scenarios for this stage + target.
+        # Target identity: only native records may claim a native target, and
+        # the observed handshake must match the requested target.
+        if role == "native":
+            if not str(target.get("os", "")).lower():
+                errors.append(f"missing_target_field:{rel}:os")
+            if not str(target.get("anki", "")):
+                errors.append(f"missing_target_field:{rel}:anki")
+            if not str(target.get("qt", "")):
+                errors.append(f"missing_target_field:{rel}:qt")
+            observed = str(target.get("anki_actual", ""))
+            if not observed:
+                errors.append(f"missing_observed_runtime:{rel}:anki_actual")
+            elif not version_matches(target.get("anki"), observed):
+                errors.append(f"actual_runtime_mismatch:{rel}:{observed}")
+            qt_observed = str(target.get("qt_actual", ""))
+            if not qt_observed:
+                errors.append(f"missing_observed_runtime:{rel}:qt_actual")
+            elif not qt_observed.startswith(str(target.get("qt", ""))):
+                errors.append(f"actual_qt_mismatch:{rel}:{qt_observed}")
+            if not str(target.get("arch", "")):
+                errors.append(f"missing_target_field:{rel}:arch")
+            if not str(target.get("python", "")):
+                errors.append(f"missing_target_field:{rel}:python")
+            if not str(target.get("anki_python", "")):
+                errors.append(f"missing_observed_runtime:{rel}:anki_python")
+        else:
+            if str(target.get("anki", "")) or str(target.get("qt", "")):
+                errors.append(f"role_target_impersonation:{rel}:{role}")
+
+        # Scenarios owned by this role at this stage.
         scenarios = record.get("scenarios") or []
-        seen = {}
+        seen: Dict[str, Dict[str, Any]] = {}
+        duplicates = sorted({str(item.get("id")) for item in scenarios
+                             if isinstance(item, dict)
+                             and [str(x.get("id")) for x in scenarios].count(
+                                 str(item.get("id"))) > 1})
+        if duplicates:
+            errors.append(f"duplicate_scenarios:{rel}:{duplicates}")
         for item in scenarios:
             if isinstance(item, dict):
                 seen[str(item.get("id"))] = item
-        required_scenarios = _required_scenarios(matrix, stage, key[0])
-        if not required_scenarios:
-            errors.append(f"no_scenarios:{rel}")
-        for sid in required_scenarios:
+
+        for scenario in _scenarios_for_role(matrix, role, stage):
+            sid = str(scenario.get("id"))
             item = seen.get(sid)
             if item is None:
                 errors.append(f"missing_scenario:{rel}:{sid}")
                 continue
-            status = str(item.get("status", ""))
-            if status == "fail":
-                errors.append(f"failed_scenario:{rel}:{sid}")
-            elif status in ("skip", "blocked", "not-applicable"):
-                errors.append(f"skipped_scenario:{rel}:{sid}")
-            elif status != "pass":
-                errors.append(f"unknown_status:{rel}:{sid}:{status}")
-            elif not item.get("assertions"):
+            if str(item.get("status")) != "pass":
+                errors.append(f"scenario_status:{rel}:{sid}:{item.get('status')}")
+            if int(item.get("exit_status", 1) or 0) != 0:
+                errors.append(f"scenario_exit:{rel}:{sid}:{item.get('exit_status')}")
+            assertions = item.get("assertions") or []
+            if not assertions:
                 errors.append(f"missing_assertions:{rel}:{sid}")
+            for assertion in assertions:
+                if not isinstance(assertion, dict):
+                    errors.append(f"bad_assertion:{rel}:{sid}")
+                elif assertion.get("ok") is not True:
+                    errors.append(f"assertion_failed:{rel}:{sid}:"
+                                  f"{assertion.get('name')}")
+            min_tests = int(scenario.get("min_tests", 0) or 0)
+            if min_tests:
+                passed = int((item.get("counts") or {}).get("tests_passed", 0) or 0)
+                failed = int((item.get("counts") or {}).get("tests_failed", 0) or 0)
+                skipped = int((item.get("counts") or {}).get("tests_skipped", 0) or 0)
+                if passed < min_tests:
+                    errors.append(f"too_few_tests:{rel}:{sid}:{passed}")
+                if failed:
+                    errors.append(f"test_failures:{rel}:{sid}:{failed}")
+                if skipped:
+                    errors.append(f"test_skips:{rel}:{sid}:{skipped}")
+            require_journeys = list(scenario.get("require_journeys") or [])
+            if require_journeys:
+                journeys = {str(j.get("journey")): j
+                            for j in item.get("journeys") or []
+                            if isinstance(j, dict)}
+                for journey in require_journeys:
+                    entry = journeys.get(journey)
+                    if entry is None:
+                        errors.append(f"missing_journey:{rel}:{sid}:{journey}")
+                        continue
+                    if int(entry.get("exit_status", 1) or 0) != 0:
+                        errors.append(f"journey_exit:{rel}:{sid}:{journey}")
+                    if entry.get("failed"):
+                        errors.append(f"journey_failed:{rel}:{sid}:{journey}:"
+                                      f"{entry.get('failed')}")
+                    if not entry.get("assertions"):
+                        errors.append(f"journey_assertions:{rel}:{sid}:{journey}")
+            for spec in scenario.get("target_requirements") or []:
+                if role != "native" or not _target_matches_spec(
+                        spec.get("target") or {}, target_key(target)):
+                    continue
+                journey = str(spec.get("journey"))
+                journeys = {str(j.get("journey")): j
+                            for j in item.get("journeys") or []
+                            if isinstance(j, dict)}
+                entry = journeys.get(journey) or {}
+                names = {str(a.get("name")): a
+                         for a in entry.get("assertions") or []
+                         if isinstance(a, dict)}
+                for name in spec.get("assertions") or []:
+                    found = names.get(str(name))
+                    if found is None:
+                        errors.append(f"missing_hosted_assertion:{rel}:{journey}:"
+                                      f"{name}")
+                    elif found.get("ok") is not True:
+                        errors.append(f"hosted_assertion_failed:{rel}:{journey}:"
+                                      f"{name}")
+            min_files = int(scenario.get("require_files_min", 0) or 0)
+            files = item.get("files") or []
+            if len(files) < min_files:
+                errors.append(f"scenario_files:{rel}:{sid}:{len(files)}")
+            errors.extend(_validate_files(record_dir, f"{rel}:{sid}", files,
+                                          started=started if started_ok else None,
+                                          finished=finished if started_ok else None))
+            summary["roles"].setdefault(role, []).append(sid)
 
-        # Counts must show real work; zero tests or skipped required work fails.
-        counts = record.get("counts") or {}
-        passed = int(counts.get("tests_passed", 0) or 0)
-        failed = int(counts.get("tests_failed", 0) or 0)
-        skipped = int(counts.get("tests_skipped", 0) or 0)
-        if passed + failed + skipped <= 0:
-            errors.append(f"zero_tests:{rel}")
-        if skipped > 0:
-            errors.append(f"skipped_tests:{rel}:{skipped}")
+        # Every scenario entry's log files are verified (top-level inventory).
+        errors.extend(_validate_files(record_dir, rel, record.get("files") or [],
+                                      started=started if started_ok else None,
+                                      finished=finished if started_ok else None))
 
-        # Files exist, parse, hash-match and were produced during this run.
-        for entry in record.get("files") or []:
-            if not isinstance(entry, dict):
-                errors.append(f"bad_file_entry:{rel}")
-                continue
-            file_path = os.path.join(record_dir, str(entry.get("path", "")))
-            if not os.path.isfile(file_path):
-                errors.append(f"file_missing:{rel}:{entry.get('path')}")
-                continue
-            if sha256_file(file_path) != str(entry.get("sha256", "")):
-                errors.append(f"file_hash_mismatch:{rel}:{entry.get('path')}")
-            if int(entry.get("bytes", -1)) != os.path.getsize(file_path):
-                errors.append(f"file_bytes_mismatch:{rel}:{entry.get('path')}")
-            if started and finished:
-                mtime = datetime.datetime.fromtimestamp(
-                    os.path.getmtime(file_path), datetime.timezone.utc)
-                if (mtime < started - datetime.timedelta(seconds=FILE_MTIME_SLACK_S)
-                        or mtime > finished + datetime.timedelta(seconds=FILE_MTIME_SLACK_S)):
-                    errors.append(f"file_stale_mtime:{rel}:{entry.get('path')}")
-            if file_path.endswith(".json"):
-                try:
-                    load_json(file_path)
-                except (OSError, ValueError):
-                    errors.append(f"file_unparseable:{rel}:{entry.get('path')}")
-
-        # Metrics vs budgets (nightly/release records that measured them).
-        metrics = record.get("metrics") or {}
+        # Metrics: required for the role/stage even when the object is empty.
+        metrics = record.get("metrics")
+        if not isinstance(metrics, dict):
+            errors.append(f"metrics_missing:{rel}")
+            metrics = {}
+        required_metrics = sorted({m for scenario in _scenarios_for_role(matrix, role, stage)
+                                   for m in (scenario.get("require_metrics") or [])})
+        if required_metrics:
+            for metric in required_metrics:
+                if not metrics.get(metric):
+                    errors.append(f"missing_metric:{rel}:{metric}")
         if budgets is not None and metrics:
             for failure in evaluate_budgets(metrics, budgets,
-                                            enforce_samples=enforce_samples):
+                                            enforce_samples=enforce_samples,
+                                            required=set(required_metrics) or None):
                 if ":target_missed:" in failure:
-                    continue  # target miss is reported in summary, not a gate
+                    continue  # target miss is reported, not a gate
                 errors.append(f"{failure}:{rel}")
-            summary_target = (metrics.get("late_retraction_rebuild") or {}).get("max_ms")
-            if summary_target is not None:
-                summary.setdefault("late_retraction_rebuild_ms", {})[key[0]] = summary_target
-        summary["targets"][f"{key[0]}/{key[1]}/qt{key[2]}"] = "ok"
+        errors.extend(_metric_sanity(metrics, rel))
+        for spec in _scenarios_for_role(matrix, role, stage):
+            min_minutes = spec.get("min_duration_min")
+            if min_minutes:
+                duration = (metrics.get("endurance_memory") or {}).get("duration_min")
+                if not _finite_number(duration) or float(duration) < float(min_minutes):
+                    errors.append(f"duration_short:{rel}:{spec.get('id')}:"
+                                  f"{duration}")
+            required_metrics = spec.get("require_metrics") or []
+            if required_metrics and any(not metrics.get(m) for m in required_metrics):
+                pass  # already reported per record above
 
-    # Cross-record provenance: one candidate, one source commit.
-    if len(hashes) > 1:
+        # Counts must show real work when the role owns a counted scenario.
+        counted = [s for s in _scenarios_for_role(matrix, role, stage)
+                   if s.get("counts") == "unittest"]
+        if counted:
+            counts = record.get("counts") or {}
+            passed = sum(int((item.get("counts") or {}).get("tests_passed", 0) or 0)
+                         for item in scenarios if isinstance(item, dict))
+            failed = sum(int((item.get("counts") or {}).get("tests_failed", 0) or 0)
+                         for item in scenarios if isinstance(item, dict))
+            skipped = sum(int((item.get("counts") or {}).get("tests_skipped", 0) or 0)
+                          for item in scenarios if isinstance(item, dict))
+            if passed + failed + skipped <= 0:
+                errors.append(f"zero_tests:{rel}")
+            if failed:
+                errors.append(f"failed_tests:{rel}:{failed}")
+            if skipped:
+                errors.append(f"skipped_tests:{rel}:{skipped}")
+            _ = counts
+
+    # Role completeness: one record per required role; native per target.
+    for role in ROLES:
+        role_spec = (matrix.get("roles") or {}).get(role) or {}
+        if stage not in (role_spec.get("stages") or []):
+            continue
+        role_records = by_role.get(role, [])
+        if not role_records:
+            errors.append(f"missing_role:{role}")
+            continue
+        if role == "native":
+            keys = [target_key(record.get("target") or {})
+                    for _path, record in role_records]
+            duplicates = sorted({k for k in keys if keys.count(k) > 1})
+            if duplicates:
+                errors.append(f"duplicate_targets:{duplicates}")
+            expected_keys = {_normalize_key(target_key(t)) for t in required_targets}
+            found_keys = {_normalize_key(k) for k in keys}
+            for key in sorted(expected_keys - found_keys):
+                errors.append(f"missing_target:{key}")
+            for key in sorted(found_keys - expected_keys):
+                errors.append(f"unexpected_target:{key}")
+            for key in expected_keys:
+                summary["targets"][f"{key[0]}/{key[1]}/qt{key[2]}"] = (
+                    "ok" if key in found_keys else "missing")
+        else:
+            if len(role_records) > 1:
+                errors.append(f"duplicate_role:{role}:{len(role_records)}")
+            summary["roles"][role] = "ok"
+
+    # Cross-record provenance: one candidate, one source commit, one run.
+    if len({h for h in hashes if h}) > 1:
         errors.append(f"mixed_provenance:artifact_sha256:{len(hashes)}")
-    if len(commits) > 1:
+    if len({c for c in commits if c}) > 1:
         errors.append(f"mixed_provenance:source_commit:{len(commits)}")
-
-    # Trusted-lane scenarios appear at least once (not per target).
-    trusted_required = [str(s.get("id")) for s in matrix.get("scenarios", [])
-                        if stage in (s.get("stages") or [])
-                        and str(s.get("host")) == "trusted"]
-    if trusted_required:
-        present = set()
-        for _path, record in records:
-            if not record.get("trusted"):
-                continue
-            for item in record.get("scenarios") or []:
-                if isinstance(item, dict) and str(item.get("status")) == "pass" \
-                        and item.get("assertions"):
-                    present.add(str(item.get("id")))
-        for sid in trusted_required:
-            if sid not in present:
-                errors.append(f"missing_trusted_scenario:{sid}")
+    if len({r for r in run_ids if r}) > 1:
+        errors.append(f"mixed_provenance:run_id:{len(run_ids)}")
 
     return (not errors), errors, summary
 
@@ -696,23 +980,50 @@ def _dist_version() -> str:
 
 
 def _expand_command(command: List[str], ctx: Dict[str, Any]) -> List[str]:
-    return [sys.executable if part == "python" else part for part in command]
+    profile = "release" if ctx.get("stage") == "release" else "nightly"
+    out: List[str] = []
+    for part in command:
+        if part == "python":
+            out.append(sys.executable)
+            continue
+        out.append(str(part)
+                   .replace("{stage}", str(ctx.get("stage", "")))
+                   .replace("{profile}", profile)
+                   .replace("{anki_bin}", str(ctx.get("anki_bin", "") or "")))
+    return out
+
+
+def _scenario_files(out_dir: str, names: List[str]) -> List[Dict[str, Any]]:
+    files = []
+    for name in names:
+        path = os.path.join(out_dir, name)
+        if os.path.isfile(path):
+            files.append({"path": name, "sha256": sha256_file(path),
+                          "bytes": os.path.getsize(path)})
+    return files
 
 
 def run_scenario(ctx: Dict[str, Any], scenario: Dict[str, Any],
                  stage: str, out_dir: str) -> Dict[str, Any]:
     """Execute one scenario row; returns its record entry."""
     sid = str(scenario.get("id"))
-    host = str(scenario.get("host", "any"))
-    entry: Dict[str, Any] = {"id": sid, "status": "blocked", "command": "",
-                             "exit_status": None, "detail": "", "assertions": [],
-                             "counts": {}}
-    if not _host_available(host, ctx):
-        entry["detail"] = f"host {host} unavailable on this machine"
+    role = str(scenario.get("role", ""))
+    entry: Dict[str, Any] = {"id": sid, "status": "fail", "command": "",
+                             "exit_status": 2, "detail": "", "assertions": [],
+                             "counts": {}, "files": []}
+
+    # Named prerequisites: a role missing the stack/runtime/credentials fails
+    # explicitly instead of silently skipping its required work.
+    if role == "native" and not ctx.get("anki_bin"):
+        entry["detail"] = "missing_prerequisite:anki_runtime"
+        return entry
+    if role == "backend" and not _local_stack_ready():
+        entry["detail"] = "missing_prerequisite:local_supabase_stack"
+        return entry
+    if role == "hosted" and not _hosted_credentials_ready():
+        entry["detail"] = "missing_prerequisite:hosted_credentials"
         return entry
 
-    log_path = os.path.join(out_dir, f"{sid}.log")
-    command = _expand_command(list(scenario.get("command") or []), ctx)
     if sid == "package-audit":
         return _run_package_audit(ctx, out_dir)
     if sid == "performance":
@@ -723,13 +1034,19 @@ def run_scenario(ctx: Dict[str, Any], scenario: Dict[str, Any],
         return _run_native_journeys(ctx, out_dir)
     if sid == "native-smoke":
         return _run_native_smoke(ctx, out_dir)
+    if sid == "native-performance":
+        return _run_native_performance(ctx, out_dir)
     if sid == "endurance-30m":
         return _run_endurance(ctx, 30, out_dir)
     if sid == "endurance-2h":
         return _run_endurance(ctx, 120, out_dir)
+    if sid == "sync-local":
+        return _run_sync_local(ctx, out_dir)
     if sid == "mutation-gate":
-        script = os.path.join(ROOT, "dev", "mutation_gate.py")
-        command = [sys.executable, script, "--json", os.path.join(out_dir, "mutation.json")]
+        return _run_mutation_gate(ctx, out_dir)
+    if sid == "hosted-fixtures":
+        return _run_hosted_fixtures(ctx, out_dir)
+    command = _expand_command(list(scenario.get("command") or []), ctx)
     if not command:
         entry["detail"] = "no command defined"
         return entry
@@ -739,6 +1056,10 @@ def run_scenario(ctx: Dict[str, Any], scenario: Dict[str, Any],
                 and not os.path.exists(os.path.join(ROOT, target.split(" ")[0])):
             entry["detail"] = f"missing scenario tool: {target}"
             return entry
+    log_name = f"{sid}.log"
+    log_path = os.path.join(out_dir, log_name)
+    command = list(command)
+    # Versioned command identity in the log; the record keeps the argv.
     entry["command"] = " ".join(command)
     rc, log_path = _run_command(command, log_path,
                                 env=ctx.get("env"), timeout=ctx.get("timeout"))
@@ -750,7 +1071,23 @@ def run_scenario(ctx: Dict[str, Any], scenario: Dict[str, Any],
     entry["assertions"] = [{"name": sid, "ok": rc == 0,
                             "detail": "" if rc == 0 else f"exit {rc}"}]
     entry["detail"] = f"exit {rc}"
+    entry["files"] = _scenario_files(out_dir, [log_name])
     return entry
+
+
+def _local_stack_ready() -> bool:
+    try:
+        proc = subprocess.run(["supabase", "status", "-o", "env"],
+                              capture_output=True, text=True,
+                              cwd=os.path.join(ROOT, "server"), timeout=60)
+        return proc.returncode == 0 and "ANON_KEY" in (proc.stdout or "")
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _hosted_credentials_ready() -> bool:
+    return bool(os.environ.get("ANKISCAPE_PROD_URL")
+                and os.environ.get("ANKISCAPE_PROD_ANON_KEY"))
 
 
 def _run_package_audit(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
@@ -784,36 +1121,51 @@ def _run_package_audit(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
 
 def _run_performance(ctx: Dict[str, Any], scenario: Dict[str, Any],
                      stage: str, out_dir: str) -> Dict[str, Any]:
-    metrics_path = os.path.join(out_dir, "metrics.json")
+    metrics_name = "performance-metrics.json"
+    metrics_path = os.path.join(out_dir, metrics_name)
     profile = "release" if stage == "release" else "nightly"
     command = [sys.executable, os.path.join(ROOT, "dev", "perf_runtime.py"),
                "--json", metrics_path, "--profile", profile]
-    log_path = os.path.join(out_dir, "performance.log")
+    log_name = "performance.log"
+    log_path = os.path.join(out_dir, log_name)
     rc, _ = _run_command(command, log_path, env=ctx.get("env"),
                          timeout=ctx.get("perf_timeout", 3600))
     entry = {"id": "performance", "command": " ".join(command),
              "exit_status": rc, "status": "pass" if rc == 0 else "fail",
              "detail": f"exit {rc}",
-             "assertions": [{"name": "perf_runtime", "ok": rc == 0}], "counts": {}}
+             "assertions": [{"name": "perf_runtime", "ok": rc == 0}],
+             "counts": {},
+             "files": _scenario_files(out_dir, [metrics_name, log_name]),
+             "metrics": {}}
+    metrics = {}
     if os.path.isfile(metrics_path):
         try:
-            metrics = load_json(metrics_path)
-            ctx["metrics"] = metrics
+            payload = load_json(metrics_path)
+            metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
+            entry["metrics"] = metrics
+            ctx.setdefault("metrics", {}).update(metrics)
             budgets_path = os.path.join(ROOT, "dev", "reliability-budgets.json")
+            required = set(scenario.get("require_metrics") or []) or None
             failures = evaluate_budgets(metrics, load_json(budgets_path),
-                                        enforce_samples=stage == "release")
+                                        enforce_samples=stage == "release",
+                                        required=required)
             entry["assertions"].append(
-                {"name": "budgets", "ok": not failures, "detail": "; ".join(failures)[:500]})
+                {"name": "budgets", "ok": not failures,
+                 "detail": "; ".join(failures)[:500]})
             if failures:
                 entry["status"] = "fail"
                 entry["detail"] = "; ".join(failures)[:500]
         except (OSError, ValueError) as exc:
             entry["status"] = "fail"
             entry["detail"] = f"metrics unreadable: {exc!r}"
+    else:
+        entry["status"] = "fail"
+        entry["detail"] = "metrics file missing"
     return entry
 
 
-def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str) -> Dict[str, Any]:
+def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
+                        *, scenario_id: str = "") -> Dict[str, Any]:
     import importlib.util
 
     dev_path = os.path.join(ROOT, "dev.py")
@@ -835,63 +1187,91 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str) -> Dict
         assertions = {}
     steps = assertions.get("steps", [])
     failed = [s for s in steps if not s.get("ok")]
-    shots = []
+    runtime = assertions.get("runtime") or {}
+    if runtime and not ctx.get("observed_runtime"):
+        ctx["observed_runtime"] = runtime
+    shot_names = []
     for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
         if name.startswith("e2e-") and name.endswith(".png"):
             src = os.path.join(base, name)
-            dest = os.path.join(out_dir, f"{journey}-{name[len('e2e-'):]}")
+            prefix = f"{scenario_id or journey}-"
+            dest_name = f"{prefix}{name[len('e2e-'):]}"
+            dest = os.path.join(out_dir, dest_name)
             try:
                 shutil.copyfile(src, dest)
-                shots.append(dest)
+                shot_names.append(dest_name)
             except OSError:
                 pass
     entry = {"journey": journey, "exit_status": int(rc),
-             "steps": len(steps), "failed": [s.get("name") for s in failed],
-             "screenshots": shots}
+             "steps": len(steps),
+             "failed": [s.get("name") for s in failed],
+             "assertions": [{"name": str(s.get("name")), "ok": bool(s.get("ok")),
+                             "detail": str(s.get("detail", ""))[:200]}
+                            for s in steps],
+             "screenshots": [os.path.join(out_dir, n) for n in shot_names],
+             "files": _scenario_files(out_dir, shot_names),
+             "runtime": runtime}
     return entry
 
 
 def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
-    import importlib.util
-
     if not ctx.get("anki_bin"):
-        return {"id": "native-matrix", "status": "blocked", "command": "",
-                "exit_status": None, "detail": "no Anki binary on this lane",
-                "assertions": [], "counts": {}}
+        return {"id": "native-matrix", "status": "fail", "command": "",
+                "exit_status": 2, "detail": "missing_prerequisite:anki_runtime",
+                "assertions": [], "counts": {}, "files": []}
     ui_verify = os.path.join(ROOT, "dev", "ui_ux_verify.py")
     if not os.path.exists(ui_verify):
-        return {"id": "native-matrix", "status": "blocked", "command": "",
-                "exit_status": None, "detail": "dev/ui_ux_verify.py missing",
-                "assertions": [], "counts": {}}
+        return {"id": "native-matrix", "status": "fail", "command": "",
+                "exit_status": 2, "detail": "missing tool: dev/ui_ux_verify.py",
+                "assertions": [], "counts": {}, "files": []}
     command = [sys.executable, ui_verify, "--anki", str(ctx.get("anki")),
-               "--qt", str(ctx.get("qt"))]
+               "--qt", str(ctx.get("qt")), "--group", "native"]
     if ctx.get("anki_bin"):
         command += ["--anki-bin", str(ctx["anki_bin"])]
-    if ctx.get("anki_actual"):
-        command += ["--anki-actual", str(ctx["anki_actual"])]
-    log_path = os.path.join(out_dir, "native-matrix.log")
+    log_name = "native-matrix.log"
+    log_path = os.path.join(out_dir, log_name)
     rc, _ = _run_command(command, log_path, env=ctx.get("env"),
                          timeout=ctx.get("native_timeout", 7200))
-    assertions = []
+    # Preserve the report and observed runtime identity with the lane.
     report = os.path.join(ROOT, "artifacts", "ui-ux",
                           f"report-{ctx.get('anki')}-qt{ctx.get('qt')}.md")
+    observed = os.path.join(ROOT, "artifacts", "ui-ux",
+                            f"observed-runtime-{ctx.get('anki')}-qt{ctx.get('qt')}.json")
+    files = [log_name]
     if os.path.isfile(report):
-        assertions.append({"name": "ui_ux_report", "ok": rc == 0,
-                           "detail": os.path.relpath(report, ROOT)})
+        shutil.copyfile(report, os.path.join(out_dir, "native-matrix-report.md"))
+        files.append("native-matrix-report.md")
+    if os.path.isfile(observed):
+        shutil.copyfile(observed, os.path.join(out_dir, "native-matrix-runtime.json"))
+        files.append("native-matrix-runtime.json")
+        try:
+            payload = load_json(observed)
+            runtime = (payload or {}).get("observed") or {}
+            if runtime and not ctx.get("observed_runtime"):
+                ctx["observed_runtime"] = runtime
+        except (OSError, ValueError):
+            pass
+    assertions = [{"name": "ui_ux_report", "ok": rc == 0,
+                   "detail": os.path.relpath(report, ROOT)}]
     return {"id": "native-matrix", "status": "pass" if rc == 0 else "fail",
             "command": " ".join(command), "exit_status": rc,
             "detail": f"exit {rc}",
-            "assertions": assertions or [{"name": "native-matrix", "ok": rc == 0}],
-            "counts": {}}
+            "assertions": assertions, "counts": {},
+            "files": _scenario_files(out_dir, files)}
 
 
 def _run_native_journeys(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
     if not ctx.get("anki_bin"):
-        return {"id": "native-journeys", "status": "blocked", "command": "",
-                "exit_status": None, "detail": "no Anki binary on this lane",
-                "assertions": [], "counts": {}}
-    results = [_e2e_journey_result(ctx, journey, out_dir) for journey in NEW_JOURNEYS]
+        return {"id": "native-journeys", "status": "fail", "command": "",
+                "exit_status": 2, "detail": "missing_prerequisite:anki_runtime",
+                "assertions": [], "counts": {}, "files": []}
+    results = [_e2e_journey_result(ctx, journey, out_dir,
+                                   scenario_id="native-journeys")
+               for journey in NEW_JOURNEYS]
     ok = all(item["exit_status"] == 0 and not item["failed"] for item in results)
+    files = []
+    for item in results:
+        files.extend(item.get("files") or [])
     return {"id": "native-journeys", "status": "pass" if ok else "fail",
             "command": "dev._e2e_suite x " + ",".join(NEW_JOURNEYS),
             "exit_status": 0 if ok else 1,
@@ -899,34 +1279,160 @@ def _run_native_journeys(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
             "assertions": [{"name": r["journey"], "ok": r["exit_status"] == 0
                             and not r["failed"], "detail": ",".join(r["failed"])}
                            for r in results],
-            "counts": {}, "journeys": results}
+            "counts": {}, "journeys": results,
+            "files": files}
 
 
 def _run_native_smoke(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
-    entry = _e2e_journey_result(ctx, "fresh", out_dir)
+    if not ctx.get("anki_bin"):
+        return {"id": "native-smoke", "status": "fail", "command": "",
+                "exit_status": 2, "detail": "missing_prerequisite:anki_runtime",
+                "assertions": [], "counts": {}, "files": []}
+    entry = _e2e_journey_result(ctx, "fresh", out_dir, scenario_id="native-smoke")
     ok = entry["exit_status"] == 0 and not entry["failed"]
     return {"id": "native-smoke", "status": "pass" if ok else "fail",
             "command": "dev._e2e_suite fresh",
             "exit_status": 0 if ok else 1, "detail": f"fresh:{entry['exit_status']}",
             "assertions": [{"name": "fresh", "ok": ok,
                             "detail": ",".join(entry["failed"])}],
-            "counts": {}, "journeys": [entry]}
+            "counts": {}, "journeys": [entry],
+            "files": entry.get("files") or []}
+
+
+def _run_native_performance(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
+    tool = os.path.join(ROOT, "dev", "native_performance.py")
+    if not os.path.exists(tool):
+        return {"id": "native-performance", "status": "fail", "command": "",
+                "exit_status": 2,
+                "detail": "missing tool: dev/native_performance.py",
+                "assertions": [], "counts": {}, "files": []}
+    metrics_name = "native-performance-metrics.json"
+    raw_name = "native-performance-raw.json"
+    profile = "release" if ctx.get("stage") == "release" else "nightly"
+    command = [sys.executable, tool, "--anki", str(ctx.get("anki")),
+               "--qt", str(ctx.get("qt")), "--profile", profile,
+               "--anki-bin", str(ctx.get("anki_bin", "") or ""),
+               "--json", os.path.join(out_dir, metrics_name),
+               "--raw", os.path.join(out_dir, raw_name)]
+    log_name = "native-performance.log"
+    rc, _ = _run_command(command, os.path.join(out_dir, log_name),
+                         env=ctx.get("env"),
+                         timeout=ctx.get("native_timeout", 7200))
+    entry = {"id": "native-performance", "command": " ".join(command),
+             "exit_status": rc, "status": "pass" if rc == 0 else "fail",
+             "detail": f"exit {rc}",
+             "assertions": [{"name": "native_performance", "ok": rc == 0}],
+             "counts": {},
+             "files": _scenario_files(out_dir, [metrics_name, raw_name, log_name])}
+    metrics_path = os.path.join(out_dir, metrics_name)
+    if os.path.isfile(metrics_path):
+        try:
+            payload = load_json(metrics_path)
+            metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
+            ctx.setdefault("metrics", {}).update(metrics)
+            runtime = payload.get("observed") or {}
+            if runtime and not ctx.get("observed_runtime"):
+                ctx["observed_runtime"] = runtime
+        except (OSError, ValueError):
+            entry["status"] = "fail"
+            entry["detail"] = "metrics unreadable"
+    return entry
+
+
+def _run_sync_local(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
+    entry = _e2e_journey_result(ctx, "sync", out_dir, scenario_id="sync-local")
+    ok = entry["exit_status"] == 0 and not entry["failed"]
+    return {"id": "sync-local", "status": "pass" if ok else "fail",
+            "command": "dev._e2e_suite sync",
+            "exit_status": 0 if ok else 1,
+            "detail": f"sync:{entry['exit_status']}",
+            "assertions": [{"name": "sync", "ok": ok,
+                            "detail": ",".join(entry["failed"])}],
+            "counts": {}, "journeys": [entry],
+            "files": entry.get("files") or []}
+
+
+def _run_mutation_gate(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
+    script = os.path.join(ROOT, "dev", "mutation_gate.py")
+    json_name = "mutation.json"
+    log_name = "mutation-gate.log"
+    command = [sys.executable, script, "--environment", "full",
+               "--json", os.path.join(out_dir, json_name)]
+    rc, _ = _run_command(command, os.path.join(out_dir, log_name),
+                         env=ctx.get("env"), timeout=ctx.get("perf_timeout", 3600))
+    return {"id": "mutation-gate", "status": "pass" if rc == 0 else "fail",
+            "command": " ".join(command), "exit_status": rc,
+            "detail": f"exit {rc}",
+            "assertions": [{"name": "mutation_full", "ok": rc == 0}],
+            "counts": {},
+            "files": _scenario_files(out_dir, [json_name, log_name])}
 
 
 def _run_endurance(ctx: Dict[str, Any], minutes: int, out_dir: str) -> Dict[str, Any]:
-    script = os.path.join(ROOT, "dev", "endurance.py")
-    if not os.path.exists(script):
-        return {"id": f"endurance-{minutes}m", "status": "blocked", "command": "",
-                "exit_status": None, "detail": "dev/endurance.py missing",
-                "assertions": [], "counts": {}}
-    json_path = os.path.join(out_dir, f"endurance-{minutes}m.json")
-    command = [sys.executable, script, "--minutes", str(minutes), "--json", json_path]
-    log_path = os.path.join(out_dir, f"endurance-{minutes}m.log")
-    rc, _ = _run_command(command, log_path, env=ctx.get("env"),
-                         timeout=minutes * 60 + 1800)
-    return {"id": f"endurance-{minutes}m", "status": "pass" if rc == 0 else "fail",
-            "command": " ".join(command), "exit_status": rc, "detail": f"exit {rc}",
-            "assertions": [{"name": "endurance", "ok": rc == 0}], "counts": {}}
+    tool = os.path.join(ROOT, "dev", "native_performance.py")
+    sid = f"endurance-{minutes}m"
+    if not os.path.exists(tool):
+        return {"id": sid, "status": "fail", "command": "", "exit_status": 2,
+                "detail": "missing tool: dev/native_performance.py",
+                "assertions": [], "counts": {}, "files": []}
+    metrics_name = f"{sid}-metrics.json"
+    raw_name = f"{sid}-raw.json"
+    profile = "release" if ctx.get("stage") == "release" else "nightly"
+    command = [sys.executable, tool, "--anki", str(ctx.get("anki")),
+               "--qt", str(ctx.get("qt")), "--profile", profile,
+               "--anki-bin", str(ctx.get("anki_bin", "") or ""),
+               "--endurance-minutes", str(minutes),
+               "--json", os.path.join(out_dir, metrics_name),
+               "--raw", os.path.join(out_dir, raw_name)]
+    log_name = f"{sid}.log"
+    rc, _ = _run_command(command, os.path.join(out_dir, log_name),
+                         env=ctx.get("env"), timeout=minutes * 60 + 2700)
+    entry = {"id": sid, "status": "pass" if rc == 0 else "fail",
+             "command": " ".join(command), "exit_status": rc, "detail": f"exit {rc}",
+             "assertions": [{"name": "endurance_native", "ok": rc == 0}],
+             "counts": {},
+             "files": _scenario_files(out_dir, [metrics_name, raw_name, log_name])}
+    metrics_path = os.path.join(out_dir, metrics_name)
+    if os.path.isfile(metrics_path):
+        try:
+            payload = load_json(metrics_path)
+            metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
+            ctx.setdefault("metrics", {}).update(metrics)
+        except (OSError, ValueError):
+            entry["status"] = "fail"
+            entry["detail"] = "metrics unreadable"
+    return entry
+
+
+def _run_hosted_fixtures(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
+    steps = [
+        (["dev/seed_hosted_fixtures.py", "--hosted", "--plan"],
+         "hosted_fixture_plan", 600),
+        (["dev/seed_hosted_fixtures.py", "--hosted", "--apply"],
+         "hosted_fixture_apply_1", 1800),
+        (["dev/seed_hosted_fixtures.py", "--hosted", "--apply"],
+         "hosted_fixture_apply_2_idempotent", 1800),
+        (["dev/seed_hosted_fixtures.py", "--hosted", "--verify"],
+         "hosted_fixture_verify", 1800),
+        (["dev/hosted_fixture_e2e.py", "--hosted"],
+         "hosted_fixture_e2e", 1800),
+    ]
+    assertions = []
+    files = []
+    for argv, name, timeout in steps:
+        command = [sys.executable, os.path.join(ROOT, argv[0])] + argv[1:]
+        log_name = f"hosted-fixtures-{name}.log"
+        rc, _ = _run_command(command, os.path.join(out_dir, log_name),
+                             env=ctx.get("env"), timeout=timeout)
+        assertions.append({"name": name, "ok": rc == 0, "detail": f"exit {rc}"})
+        files.append(log_name)
+    ok = all(a["ok"] for a in assertions)
+    return {"id": "hosted-fixtures", "status": "pass" if ok else "fail",
+            "command": "dev/seed_hosted_fixtures.py + dev/hosted_fixture_e2e.py",
+            "exit_status": 0 if ok else 1,
+            "detail": "; ".join(f"{a['name']}:{a['detail']}" for a in assertions),
+            "assertions": assertions, "counts": {},
+            "files": _scenario_files(out_dir, files)}
 
 
 # --------------------------------------------------------------- run-lane
@@ -953,29 +1459,49 @@ def _probe_macos_anki(anki: str) -> Tuple[str, str]:
     return "", ""
 
 
+def _observed_runtime_from(results) -> Dict[str, Any]:
+    for item in results or []:
+        runtime = item.get("runtime") or {}
+        if runtime:
+            return runtime
+        for journey in item.get("journeys") or []:
+            runtime = journey.get("runtime") or {}
+            if runtime:
+                return runtime
+    return {}
+
+
 def cmd_run_lane(args) -> int:
     stage = args.stage
+    role = args.role
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
     target_os = (args.os or platform.system().lower()).lower()
     if target_os == "darwin":
         target_os = "macos"
     started = utc_now()
+    matrix = load_json(args.matrix)
+    inventory = _role_inventory(matrix, role, stage)
+    trusted = bool(args.trusted) or role == "hosted"
     record: Dict[str, Any] = {
         "schema": RECORD_SCHEMA, "version": RECORD_VERSION, "kind": "target",
-        "stage": stage, "run_id": os.path.basename(os.path.dirname(out_dir)) or
+        "stage": stage, "role": role, "job": inventory.get("job", ""),
+        "run_id": os.path.basename(os.path.dirname(out_dir)) or
         datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
-        "trusted": bool(args.trusted),
+        "trusted": trusted,
         "target": {"os": target_os, "arch": platform.machine(),
-                   "anki": args.anki, "anki_actual": args.anki_actual or args.anki,
-                   "qt": str(args.qt), "qt_actual": args.qt_actual or str(args.qt),
                    "python": platform.python_version()},
         "source": git_source(),
-        "command": f"python3 dev/reliability.py run-lane --stage {stage} --out {args.out}",
+        "command": f"python3 dev/reliability.py run-lane --stage {stage} "
+                   f"--role {role} --out {args.out}",
         "started_at": started, "finished_at": "", "exit_status": 1,
         "completed": False, "scenarios": [], "counts": {},
         "metrics": {}, "files": [],
     }
+    if role == "native":
+        record["target"].update({"anki": args.anki, "anki_actual": "",
+                                 "qt": str(args.qt), "qt_actual": "",
+                                 "anki_python": ""})
     try:
         manifest, archive, digest = resolve_artifact()
         record["artifact"] = {"flavor": "ankiaddon", "file": manifest.get("archive"),
@@ -986,31 +1512,27 @@ def cmd_run_lane(args) -> int:
         print(f"[reliability] artifact unavailable: {exc}", file=sys.stderr)
 
     anki_bin = args.anki_bin
-    if target_os == "macos" and not anki_bin:
-        actual, anki_bin = _probe_macos_anki(args.anki)
-        if actual:
-            record["target"]["anki_actual"] = actual
-    ctx = {"os": target_os, "anki": args.anki, "anki_bin": anki_bin,
+    if role == "native" and target_os == "macos" and not anki_bin:
+        _actual, anki_bin = _probe_macos_anki(args.anki)
+    ctx = {"os": target_os, "stage": stage, "role": role, "anki": args.anki,
+           "anki_bin": anki_bin,
            "anki_actual": getattr(args, "anki_actual", ""),
-           "qt": args.qt, "trusted": bool(args.trusted), "env": os.environ.copy(),
+           "qt": args.qt, "trusted": trusted, "env": os.environ.copy(),
            "timeout": None, "native_timeout": getattr(args, "native_timeout", 7200)}
 
-    matrix = load_json(args.matrix)
     results = []
-    for scenario in matrix.get("scenarios", []):
-        if stage not in (scenario.get("stages") or []):
-            continue
-        host = str(scenario.get("host", "any"))
-        if host in ("targets", "any", "trusted") or (
-                host.startswith("linux") and target_os == "linux") or (
-                host == "targets"):
-            results.append(run_scenario(ctx, scenario, stage, out_dir))
+    for scenario in _scenarios_for_role(matrix, role, stage):
+        results.append(run_scenario(ctx, scenario, stage, out_dir))
     record["scenarios"] = results
     record["metrics"] = ctx.get("metrics", {}) or {}
-    if record["metrics"]:
-        metrics_path = os.path.join(out_dir, "metrics.json")
-        if os.path.isfile(metrics_path):
-            record["metrics"] = load_json(metrics_path)
+    if role == "native":
+        observed = ctx.get("observed_runtime") or _observed_runtime_from(results)
+        record["target"].update({
+            "anki_actual": str(observed.get("anki", "")),
+            "qt_actual": str(observed.get("qt", "")),
+            "anki_python": str(observed.get("python", "")),
+            "arch": str(observed.get("arch", "")) or platform.machine(),
+        })
 
     counts = {"tests_passed": 0, "tests_failed": 0, "tests_skipped": 0}
     for item in results:
@@ -1119,68 +1641,78 @@ def cmd_baseline(args) -> int:
 
 # ------------------------------------------------------------------- verify
 
+def _role_available_here(role: str, ctx: Dict[str, Any]) -> bool:
+    if role == "shared":
+        return True
+    if role == "backend":
+        return ctx.get("os") == "linux" and _local_stack_ready()
+    if role == "native":
+        return bool(ctx.get("anki_bin"))
+    if role == "hosted":
+        return bool(ctx.get("trusted")) and _hosted_credentials_ready()
+    return False
+
+
 def cmd_verify(args) -> int:
     stage = args.stage
     matrix = load_json(args.matrix)
-    ctx = {"os": platform.system().lower(), "anki_bin": "", "trusted": bool(args.trusted),
+    evidence_dir = os.path.abspath(args.evidence or DEFAULT_EVIDENCE)
+    aggregation = bool(args.evidence or args.expected_commit
+                       or args.expected_artifact_sha256 or args.expected_run_id)
+    if aggregation:
+        # Aggregation-only: validate the supplied evidence set without
+        # executing any scenario.
+        ok, errors, summary = validate_evidence(
+            args.matrix, evidence_dir,
+            budgets_path=DEFAULT_BUDGETS if os.path.isfile(DEFAULT_BUDGETS) else None,
+            stage=stage, enforce_samples=stage == "release",
+            expected_commit=args.expected_commit,
+            expected_artifact_sha256=args.expected_artifact_sha256,
+            expected_run_id=args.expected_run_id)
+        for err in errors:
+            print(f"[reliability] {err}", file=sys.stderr)
+        print(f"[reliability] verify aggregation {'PASS' if ok else 'FAIL'} "
+              f"({summary.get('records')} records)")
+        return 0 if ok else 1
+
+    ctx = {"os": platform.system().lower(), "stage": stage,
+           "anki_bin": "", "trusted": bool(args.trusted),
            "env": os.environ.copy(), "timeout": None}
     if ctx["os"] == "darwin":
         ctx["os"] = "macos"
-    _actual, anki_bin = _probe_macos_anki("") if ctx["os"] == "macos" else ("", "")
-    ctx["anki_bin"] = anki_bin
+        _actual, anki_bin = _probe_macos_anki("")
+        ctx["anki_bin"] = anki_bin
     run_id = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_root = os.path.abspath(args.evidence or DEFAULT_EVIDENCE)
+    out_root = evidence_dir
     out_dir = os.path.join(out_root, run_id, "local")
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"[reliability] verify stage={stage} run={run_id} on {ctx['os']}")
-    local_results = []
-    unavailable = []
-    for scenario in matrix.get("scenarios", []):
-        if stage not in (scenario.get("stages") or []):
+    local_results: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for role in ROLES:
+        scenarios = _scenarios_for_role(matrix, role, stage)
+        if not scenarios:
             continue
-        host = str(scenario.get("host", "any"))
-        if _host_available(host, ctx):
+        if not _role_available_here(role, ctx):
+            inventory = _role_inventory(matrix, role, stage)
+            errors.append(f"role_unavailable:{role}:run it in "
+                          f"{inventory.get('workflow') or 'CI'}")
+            continue
+        for scenario in scenarios:
             result = run_scenario(ctx, scenario, stage, out_dir)
             local_results.append(result)
-            print(f"[reliability] {scenario.get('id')}: {result['status']} "
+            print(f"[reliability] {role}/{scenario.get('id')}: {result['status']} "
                   f"({result.get('detail', '')})")
-        else:
-            unavailable.append(scenario)
-
-    evidence_errors: List[str] = []
-    workflow = _workflow_for(stage, matrix)
-    satisfied = set()
-    if unavailable:
-        if os.path.isdir(out_root):
-            records = _collect_records(out_root)
-            satisfied = _scenario_coverage(records, matrix, stage)
-            if stage in ("nightly", "release"):
-                ok, errors, _summary = validate_evidence(
-                    args.matrix, out_root,
-                    budgets_path=DEFAULT_BUDGETS
-                    if os.path.isfile(DEFAULT_BUDGETS) else None,
-                    stage=stage, enforce_samples=stage == "release")
-                if not ok:
-                    evidence_errors.extend(errors)
-        for scenario in unavailable:
-            sid = str(scenario.get("id"))
-            if sid not in satisfied:
-                evidence_errors.append(
-                    f"scenario_not_covered:{sid}:run it in {workflow} and pass --evidence")
-        if not os.path.isdir(out_root):
-            evidence_errors.append(f"evidence_missing:{out_root}:{workflow}")
 
     failures = [r for r in local_results if r.get("status") != "pass"]
-    overall = 1 if (failures or evidence_errors) else 0
-    for err in evidence_errors:
+    overall = 1 if (failures or errors) else 0
+    for err in errors:
         print(f"[reliability] {err}", file=sys.stderr)
 
     summary = {"run_id": run_id, "stage": stage, "os": ctx["os"],
                "local": local_results,
-               "unavailable": [str(s.get("id")) for s in unavailable],
-               "coverage_from_evidence": sorted(satisfied),
-               "evidence_errors": evidence_errors, "overall": overall}
+               "errors": errors, "overall": overall}
     summary_path = os.path.join(out_dir, f"verify-{stage}.json")
     with open(summary_path, "w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2)
@@ -1190,15 +1722,31 @@ def cmd_verify(args) -> int:
 
 def cmd_verify_evidence(args) -> int:
     budgets = args.budgets if os.path.isfile(args.budgets) else None
+    errors: List[str] = []
+    if args.stage in ("nightly", "release"):
+        if not args.expected_commit:
+            errors.append("expected_commit_required")
+        if not args.expected_artifact_sha256:
+            errors.append("expected_artifact_sha256_required")
+        if not args.expected_run_id:
+            errors.append("expected_run_id_required")
+        if errors:
+            for err in errors:
+                print(f"[reliability] evidence: {err}", file=sys.stderr)
+            return 1
     ok, errors, summary = validate_evidence(
         args.matrix, args.evidence, budgets_path=budgets, stage=args.stage,
-        enforce_samples=args.stage == "release")
+        enforce_samples=args.stage == "release",
+        expected_commit=args.expected_commit,
+        expected_artifact_sha256=args.expected_artifact_sha256,
+        expected_run_id=args.expected_run_id)
     if errors:
         for err in errors:
             print(f"[reliability] evidence: {err}", file=sys.stderr)
     if ok:
         print(f"[reliability] evidence ok: {summary.get('records')} records, "
-              f"{len(summary.get('targets', {}))} targets")
+              f"{len(summary.get('targets', {}))} targets, run "
+              f"{summary.get('run_id') or 'local'}")
     return 0 if ok else 1
 
 
@@ -1208,15 +1756,22 @@ def main(argv=None) -> int:
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("--stage", required=True, choices=STAGES)
     p_verify.add_argument("--matrix", default=DEFAULT_MATRIX)
-    p_verify.add_argument("--evidence", default=DEFAULT_EVIDENCE)
+    p_verify.add_argument("--evidence", default="")
     p_verify.add_argument("--trusted", action="store_true")
+    p_verify.add_argument("--expected-commit", default="")
+    p_verify.add_argument("--expected-artifact-sha256", default="")
+    p_verify.add_argument("--expected-run-id", default="")
     p_ve = sub.add_parser("verify-evidence")
     p_ve.add_argument("--matrix", default=DEFAULT_MATRIX)
     p_ve.add_argument("--evidence", default=DEFAULT_EVIDENCE)
     p_ve.add_argument("--budgets", default=DEFAULT_BUDGETS)
     p_ve.add_argument("--stage", default="release", choices=STAGES)
+    p_ve.add_argument("--expected-commit", default="")
+    p_ve.add_argument("--expected-artifact-sha256", default="")
+    p_ve.add_argument("--expected-run-id", default="")
     p_lane = sub.add_parser("run-lane")
     p_lane.add_argument("--stage", required=True, choices=STAGES)
+    p_lane.add_argument("--role", required=True, choices=ROLES)
     p_lane.add_argument("--out", required=True)
     p_lane.add_argument("--matrix", default=DEFAULT_MATRIX)
     p_lane.add_argument("--os", default="")

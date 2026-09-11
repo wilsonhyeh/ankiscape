@@ -1,5 +1,6 @@
-# Fast PR checks. Contents read-only. Actions pinned by reviewed tag; replace
-# tags with commit SHAs before enabling hosted runs (review requirement).
+# Fast PR checks. Contents read-only. Actions pinned to reviewed commits.
+# Roles: shared (pure/traces/assets/package) + linux backend (stack) +
+# native smoke. No secrets are required for fork PRs.
 name: pr
 
 on:
@@ -15,36 +16,27 @@ permissions:
   contents: read
 
 jobs:
-  pure:
-    name: Pure tests, generated traces, asset/package audit
+  shared:
+    name: Shared checks (pure, traces, assets, package)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
       - name: Dev dependencies
         run: pip install -r dev/requirements.lock
-      - name: Python suite
-        run: python3 run_tests.py
-      - name: Generated traces (PR scale)
-        run: python3 -m unittest tests.test_generated_sequences -v
-      - name: Asset audit
-        run: python3 scripts/audit_assets.py --check
-      - name: Package build + archive audit
+      - name: Shared role lane
         run: |
-          python3 scripts/build_addon.py
-          python3 scripts/audit_assets.py --archive dist/ankiscape-3.0.0.ankiaddon
-      - name: Performance smoke (PR budgets, no sample floor)
-        run: python3 dev/perf_runtime.py --profile nightly --no-gate
-      - name: Evidence contract self-check
-        run: python3 -m unittest tests.test_reliability_evidence -v
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          python3 dev/reliability.py run-lane --stage pr --role shared \
+            --out "artifacts/reliability/${RUN_ID}/shared"
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pr-pure-failure
+          name: pr-shared-failure
           path: artifacts/
           retention-days: 30
 
@@ -53,8 +45,8 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
       - name: Dev dependencies and tooling
@@ -68,30 +60,28 @@ jobs:
           npm install -g supabase@2.115.0
       - name: Install pinned Anki runtime
         run: |
-          BIN=$(python3 dev/fetch_runtimes.py --download linux/26.8.1 --dest .dev/runtimes --install | tail -n1)
+          BIN=$(python3 dev/fetch_runtimes.py --download linux/26.8.1 \
+            --qt 6 --arch x86_64 --dest .dev/runtimes --install | tail -n1)
           echo "ANKI_BIN=$BIN" >> "$GITHUB_ENV"
           echo "resolved runtime: $BIN"
-      - name: Build the candidate package
-        run: python3 scripts/build_addon.py
-      - name: Local backend suite (reset x2 + pgTAP + live smoke)
+      - name: Start the local stack
         working-directory: server
+        run: supabase start
+      - name: Backend role lane
         run: |
-          supabase start
-          python3 ../dev.py test --suite backend
-      - name: Native packaged smoke (Xvfb)
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          python3 dev/reliability.py run-lane --stage pr --role backend \
+            --os linux --out "artifacts/reliability/${RUN_ID}/backend"
+      - name: Native role lane (one packaged smoke)
         run: |
-          xvfb-run -a python3 dev.py test --suite e2e --anki 26.8.1 --qt 6 \
-            --anki-bin "$ANKI_BIN" --anki-actual 26.8.1 --journey fresh
-      - name: Record lane evidence
-        if: always()
-        run: |
-          RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
-          xvfb-run -a python3 dev/reliability.py run-lane --stage pr --os linux \
-            --anki 26.8.1 --qt 6 --anki-bin "${ANKI_BIN:-}" --anki-actual 26.8.1 \
-            --out "artifacts/reliability/${RUN_ID}/linux-pr" || true
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          xvfb-run -a python3 dev/reliability.py run-lane --stage pr \
+            --role native --os linux --anki 26.8.1 --qt 6 \
+            --anki-bin "${ANKI_BIN:-}" \
+            --out "artifacts/reliability/${RUN_ID}/linux-pr"
       - name: Upload PR evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: reliability-pr-linux
           path: artifacts/reliability/

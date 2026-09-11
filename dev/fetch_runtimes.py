@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 # dev/fetch_runtimes.py - Verified runtime downloads for the native matrix.
 """  python3 dev/fetch_runtimes.py --list
-  python3 dev/fetch_runtimes.py --target macos/26.8.1 --dest .dev/runtimes
-  python3 dev/fetch_runtimes.py --verify arch.tar.zst --target linux/26.8.1
+  python3 dev/fetch_runtimes.py --download macos/26.8.1 --dest .dev/runtimes
+  python3 dev/fetch_runtimes.py --download linux/23.10 --qt 6 --arch x86_64
+  python3 dev/fetch_runtimes.py --verify arch.tar.zst --target linux/26.8.1 \
+      --qt 6 --arch x86_64
 
 Fails closed when a target's URL is not marked verified or its SHA-256 pin is
 empty: CI must never download an unpinned runtime. `--allow-unpinned` exists
-for a maintainer's first local fetch and must not be used in workflows."""
+for a maintainer's first local fetch and must not be used in workflows.
+
+`--qt` and `--arch` select one exact manifest entry. OS/version shorthand is
+accepted only when the manifest is unambiguous for it: Linux 23.10 has both a
+Qt5 and a Qt6 entry, so a caller that omits --qt gets a named error instead of
+silently receiving the first match."""
 from __future__ import annotations
 
 import argparse
@@ -26,13 +33,47 @@ def load_manifest() -> dict:
         return json.load(fh)
 
 
-def find_target(manifest: dict, target: str) -> dict:
+def _norm(value) -> str:
+    """Zero-pad-insensitive comparison: 26.08.1 == 26.8.1, qt6 == 6."""
+    parts = []
+    for chunk in str(value or "").strip().lower().lstrip("qt").split("."):
+        try:
+            parts.append(str(int(chunk)))
+        except ValueError:
+            parts.append(chunk)
+    return ".".join(parts)
+
+
+def find_target(manifest: dict, target: str, *, qt=None, arch=None) -> dict:
     os_name, _sep, rest = target.partition("/")
-    anki = rest
-    for entry in manifest["targets"]:
-        if entry["os"] == os_name and entry["anki"] == anki:
-            return entry
-    raise SystemExit(f"fetch_runtimes: unknown target {target!r}")
+    if not os_name or not rest:
+        raise SystemExit(
+            f"fetch_runtimes: target must be OS/ANKI, got {target!r}")
+    matches = [entry for entry in manifest["targets"]
+               if entry["os"] == os_name and _norm(entry["anki"]) == _norm(rest)]
+    if qt not in (None, ""):
+        matches = [entry for entry in matches
+                   if _norm(entry.get("qt")) == _norm(qt)]
+    if arch not in (None, ""):
+        matches = [entry for entry in matches
+                   if str(entry.get("arch", "")) == str(arch)]
+    if not matches:
+        raise SystemExit(
+            f"fetch_runtimes: no manifest target matches {target!r} "
+            f"qt={qt!r} arch={arch!r}")
+    if len(matches) > 1:
+        options = ", ".join(
+            f"qt{entry.get('qt')}/{entry.get('arch', '?')}" for entry in matches)
+        raise SystemExit(
+            f"fetch_runtimes: ambiguous target {target!r}; supply --qt/--arch "
+            f"(matches: {options})")
+    return matches[0]
+
+
+def runtime_dir(dest_dir: str, entry: dict) -> str:
+    """Qt/arch-qualified install path so linux Qt5 and Qt6 never share."""
+    return os.path.join(dest_dir, entry["os"], entry["anki"],
+                        f"qt{entry.get('qt', '?')}-{entry.get('arch', '?')}")
 
 
 def sha256_file(path: str) -> str:
@@ -184,6 +225,8 @@ def main(argv=None) -> int:
     sub.add_argument("--download", metavar="OS/ANKI")
     sub.add_argument("--verify", metavar="ARCHIVE")
     parser.add_argument("--target", default="", help="OS/ANKI for --verify")
+    parser.add_argument("--qt", default="", help="Qt major to select exactly")
+    parser.add_argument("--arch", default="", help="architecture to select exactly")
     parser.add_argument("--dest", default=os.path.join(ROOT, ".dev", "runtimes"))
     parser.add_argument("--extract", action="store_true")
     parser.add_argument("--install", action="store_true",
@@ -196,19 +239,21 @@ def main(argv=None) -> int:
             state = ("pinned" if entry.get("sha256") else "UNPINNED")
             url = "verified" if entry.get("url_verified") else "unverified-url"
             print(f"{entry['os']:<8} {entry['anki']:<8} qt{entry['qt']} "
-                  f"{entry['kind']:<8} {state} {url}")
+                  f"{entry.get('arch', '?'):<8} {entry['kind']:<8} "
+                  f"{state} {url}")
         return 0
     if args.verify:
         if not args.target:
             raise SystemExit("fetch_runtimes: --verify needs --target OS/ANKI")
-        entry = find_target(manifest, args.target)
+        entry = find_target(manifest, args.target, qt=args.qt, arch=args.arch)
         digest = verify_archive(args.verify, entry,
                                 require_pin=not args.allow_unpinned)
-        print(f"fetch_runtimes: verified {args.target} sha256={digest[:16]}…")
+        print(f"fetch_runtimes: verified {args.target} qt{entry.get('qt')} "
+              f"{entry.get('arch', '?')} sha256={digest[:16]}…")
         return 0
-    entry = find_target(manifest, args.download)
+    entry = find_target(manifest, args.download, qt=args.qt, arch=args.arch)
     path = download(entry, args.dest, allow_unpinned=args.allow_unpinned)
-    target_dir = os.path.join(args.dest, entry["os"], entry["anki"])
+    target_dir = runtime_dir(args.dest, entry)
     if args.install:
         print(install(entry, path, target_dir))
         return 0

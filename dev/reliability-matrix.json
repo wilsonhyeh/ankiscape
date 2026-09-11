@@ -1,7 +1,7 @@
 {
   "schema": "ankiscape-reliability-matrix",
-  "version": 1,
-  "note": "Scenario/target inventory for dev/reliability.py. Versions are compared with zero-pad normalization (26.08.1 == 26.8.1) but records keep actual strings. host: any = executable anywhere, linux-docker = Linux with Docker, linux-native = Linux with Anki + Xvfb, targets = every required target, trusted = one trusted lane in the evidence set.",
+  "version": 2,
+  "note": "Scenario/role inventory for dev/reliability.py. Every required scenario has exactly one owning role; version strings are compared with zero-pad normalization (26.08.1 == 26.8.1) but records keep observed strings. Records claim a role + the protected workflow job from `roles`; the validator derives required jobs from this file, not from the record.",
   "required_targets": [
     { "os": "macos", "anki": "23.10", "qt": "6" },
     { "os": "macos", "anki": "26.8.1", "qt": "6" },
@@ -11,99 +11,213 @@
     { "os": "linux", "anki": "23.10", "qt": "6" },
     { "os": "linux", "anki": "26.8.1", "qt": "6" }
   ],
+  "roles": {
+    "shared": {
+      "title": "Shared candidate checks",
+      "host": "any",
+      "stages": ["pr", "nightly", "release"],
+      "jobs": { "pr": "pure", "nightly": "shared", "release": "shared" },
+      "workflows": {
+        "pr": ".github/workflows/pr.yml",
+        "nightly": ".github/workflows/nightly.yml",
+        "release": ".github/workflows/release-verify.yml"
+      }
+    },
+    "backend": {
+      "title": "Linux backend (Docker + Anki/Xvfb)",
+      "host": "linux-docker",
+      "stages": ["pr", "nightly", "release"],
+      "jobs": { "pr": "linux-native", "nightly": "backend", "release": "backend" },
+      "workflows": {
+        "pr": ".github/workflows/pr.yml",
+        "nightly": ".github/workflows/nightly.yml",
+        "release": ".github/workflows/release-verify.yml"
+      }
+    },
+    "native": {
+      "title": "Native target (seven pinned targets)",
+      "host": "targets",
+      "stages": ["pr", "nightly", "release"],
+      "jobs": { "pr": "linux-native", "nightly": "native", "release": "lanes" },
+      "workflows": {
+        "pr": ".github/workflows/pr.yml",
+        "nightly": ".github/workflows/nightly.yml",
+        "release": ".github/workflows/release-verify.yml"
+      }
+    },
+    "hosted": {
+      "title": "Trusted hosted backend",
+      "host": "trusted",
+      "trusted": true,
+      "stages": ["nightly", "release"],
+      "jobs": { "nightly": "hosted-fixtures", "release": "hosted" },
+      "workflows": {
+        "nightly": ".github/workflows/nightly.yml",
+        "release": ".github/workflows/release-verify.yml"
+      }
+    }
+  },
   "scenarios": [
     {
       "id": "python-suite",
       "title": "Python test suite",
+      "role": "shared",
       "stages": ["pr", "nightly", "release"],
-      "host": "any",
       "command": ["python", "run_tests.py"],
-      "counts": "unittest"
+      "counts": "unittest",
+      "min_tests": 1
     },
     {
       "id": "generated-small",
       "title": "Generated traces, PR scale (>=100 sequences of <=100 ops)",
+      "role": "shared",
       "stages": ["pr"],
-      "host": "any",
       "command": ["python", "-m", "unittest", "tests.test_generated_sequences", "-v"],
-      "counts": "unittest"
+      "counts": "unittest",
+      "min_tests": 1
     },
     {
       "id": "generated-expanded",
       "title": "Generated traces, nightly/release scale (>=1000 sequences; >=5000 on release)",
+      "role": "shared",
       "stages": ["nightly", "release"],
-      "host": "any",
-      "command": ["python", "dev/generated_traces.py", "--stage"],
+      "command": ["python", "dev/generated_traces.py", "--stage", "{stage}"],
       "counts": "script"
     },
     {
       "id": "asset-audit",
       "title": "Asset manifest/offline audit",
+      "role": "shared",
       "stages": ["pr", "nightly", "release"],
-      "host": "any",
       "command": ["python", "scripts/audit_assets.py", "--check"]
     },
     {
       "id": "package-audit",
       "title": "Add-on package build check and archive audit",
+      "role": "shared",
       "stages": ["pr", "nightly", "release"],
-      "host": "any",
       "command": ["python", "scripts/build_addon.py", "--check"]
+    },
+    {
+      "id": "performance",
+      "title": "Pure-engine performance metrics vs dev/reliability-budgets.json",
+      "role": "shared",
+      "stages": ["nightly", "release"],
+      "require_metrics": ["accepted_answer_hook", "warm_review_scaling",
+                          "reward_completion", "late_retraction_rebuild"]
     },
     {
       "id": "backend-local",
       "title": "Local Supabase reset x2 + pgTAP + live Auth/RPC smoke",
+      "role": "backend",
       "stages": ["pr", "nightly", "release"],
-      "host": "linux-docker",
-      "command": ["python", "dev.py", "test", "--suite", "backend"]
+      "command": ["python", "dev.py", "test", "--suite", "backend"],
+      "counts": "unittest",
+      "min_tests": 1
+    },
+    {
+      "id": "scoring-parity",
+      "title": "Client/server scoring parity against the local stack",
+      "role": "backend",
+      "stages": ["pr", "nightly", "release"],
+      "command": ["python", "dev/scoring_parity.py", "--local"]
+    },
+    {
+      "id": "account-contracts",
+      "title": "Real account/service contract journey (local stack)",
+      "role": "backend",
+      "stages": ["pr", "nightly", "release"],
+      "command": ["python", "dev/account_contracts_e2e.py", "--local"]
+    },
+    {
+      "id": "sync-local",
+      "title": "Real local-stack sync journey (Anki + Xvfb)",
+      "role": "backend",
+      "stages": ["pr", "nightly", "release"]
+    },
+    {
+      "id": "mutation-gate",
+      "title": "Full mutation gate on reward/cohort/diagnostic guards",
+      "role": "backend",
+      "stages": ["release"]
     },
     {
       "id": "native-smoke",
-      "title": "One current Linux native packaged journey",
-      "stages": ["pr", "nightly", "release"],
-      "host": "linux-native"
+      "title": "One current Linux native packaged journey (PR gate)",
+      "role": "native",
+      "stages": ["pr"]
     },
     {
       "id": "native-matrix",
       "title": "Native packaged journeys on this target",
+      "role": "native",
       "stages": ["nightly", "release"],
-      "host": "targets"
+      "require_files_min": 1
     },
     {
       "id": "native-journeys",
       "title": "New native journeys (deferred rewards, rebuild, reporting, polish, test leaderboard, credentials, profile races, recovery)",
+      "role": "native",
       "stages": ["nightly", "release"],
-      "host": "targets"
+      "require_journeys": ["ui-deferred-rewards", "ui-rebuild-review",
+                           "ui-report-bug", "ui-visual-polish",
+                           "ui-test-leaderboard", "ui-credential-fallback",
+                           "ui-profile-races", "ui-recovery"],
+      "target_requirements": [
+        {
+          "target": { "os": "macos", "anki": "26.8.1", "qt": "6" },
+          "journey": "ui-test-leaderboard",
+          "assertions": ["test_leaderboard_login", "test_leaderboard_labeled",
+                         "test_leaderboard_public_isolated"]
+        },
+        {
+          "target": { "os": "windows", "anki": "26.8.1", "qt": "6" },
+          "journey": "ui-test-leaderboard",
+          "assertions": ["test_leaderboard_login", "test_leaderboard_labeled",
+                         "test_leaderboard_public_isolated"]
+        },
+        {
+          "target": { "os": "linux", "anki": "26.8.1", "qt": "6" },
+          "journey": "ui-test-leaderboard",
+          "assertions": ["test_leaderboard_login", "test_leaderboard_labeled",
+                         "test_leaderboard_public_isolated"]
+        }
+      ]
     },
     {
-      "id": "performance",
-      "title": "Performance metrics vs dev/reliability-budgets.json",
+      "id": "native-performance",
+      "title": "Native responsiveness, event-loop lag, idle CPU and rebuild behavior",
+      "role": "native",
       "stages": ["nightly", "release"],
-      "host": "targets"
+      "require_metrics": ["event_loop_lag", "warm_shell_open",
+                          "cold_shell_appearance", "idle_cpu",
+                          "reward_completion", "late_retraction_rebuild"],
+      "require_files_min": 1
     },
     {
       "id": "endurance-30m",
-      "title": "30-minute active endurance run",
+      "title": "30-minute native endurance trend (not release evidence)",
+      "role": "native",
       "stages": ["nightly"],
-      "host": "targets"
+      "require_metrics": ["endurance_memory"],
+      "require_files_min": 1,
+      "min_duration_min": 30
     },
     {
       "id": "endurance-2h",
-      "title": "Two-hour active endurance run",
+      "title": "Two-hour native endurance per target (release evidence)",
+      "role": "native",
       "stages": ["release"],
-      "host": "targets"
-    },
-    {
-      "id": "mutation-gate",
-      "title": "Targeted mutation gate on reward/cohort/diagnostic guards",
-      "stages": ["release"],
-      "host": "any"
+      "require_metrics": ["endurance_memory"],
+      "require_files_min": 1,
+      "min_duration_min": 120
     },
     {
       "id": "hosted-fixtures",
-      "title": "Hosted permanent fixture smoke (trusted lane, real backend)",
+      "title": "Hosted permanent fixture verify + real hosted RPC checks",
+      "role": "hosted",
       "stages": ["nightly", "release"],
-      "host": "trusted"
+      "require_files_min": 1
     }
   ],
   "workflows": {

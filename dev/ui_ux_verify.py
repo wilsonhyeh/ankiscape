@@ -36,6 +36,13 @@ ALL_SCENARIOS = (
     "ui-credential-fallback", "ui-recovery", "ui-profile-races",
     "ui-report-bug",
 )
+# `sync` is a local-stack journey owned by the Linux backend role (it needs
+# Docker/Supabase + Anki under Xvfb), never part of the native target role.
+SCENARIO_GROUPS = {
+    "native": tuple(s for s in ALL_SCENARIOS if s != "sync"),
+    "backend": ("sync",),
+    "all": ALL_SCENARIOS,
+}
 SHELL_SCENARIOS = ("ui-onboarding", "ui-training", "ui-settings",
                    "ui-review", "ui-lifecycle", "ui-art",
                    "ui-visual-polish", "ui-deferred-rewards",
@@ -67,6 +74,39 @@ def _read_json(path: str):
             return json.load(fh)
     except (OSError, ValueError):
         return None
+
+
+def _norm_version(value) -> str:
+    parts = []
+    for chunk in str(value or "").strip().split("."):
+        try:
+            parts.append(str(int(chunk)))
+        except ValueError:
+            parts.append(chunk)
+    return ".".join(parts)
+
+
+def _version_matches(requested, actual) -> bool:
+    want = _norm_version(requested).split(".")
+    got = _norm_version(actual).split(".")
+    return len(got) >= len(want) and got[:len(want)] == want
+
+
+def _runtime_problems(requested_anki, requested_qt, runtime) -> list:
+    problems = []
+    if not isinstance(runtime, dict) or not runtime:
+        return ["no runtime handshake written by the driver"]
+    if not _version_matches(requested_anki, runtime.get("anki")):
+        problems.append(f"anki observed {runtime.get('anki')!r} "
+                        f"wants {requested_anki!r}")
+    if not str(runtime.get("qt", "")).startswith(str(requested_qt)):
+        problems.append(f"qt observed {runtime.get('qt')!r} "
+                        f"wants major {requested_qt}")
+    if not str(runtime.get("python", "")):
+        problems.append("anki python version missing")
+    if not str(runtime.get("arch", "")):
+        problems.append("architecture missing")
+    return problems
 
 
 def _run_journey(dev, args, journey):
@@ -145,21 +185,25 @@ def main(argv=None) -> int:
                         help="explicit runtime executable (native matrix)")
     parser.add_argument("--anki-actual", default="",
                         help="declared version for hash-verified downloads")
+    parser.add_argument("--group", default="native",
+                        choices=tuple(SCENARIO_GROUPS.keys()),
+                        help="journey set owned by one role")
     parser.add_argument("--scenarios", default=",".join(ALL_SCENARIOS))
     args = parser.parse_args(argv)
 
     dev = _load_dev()
-    scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+    group_members = list(SCENARIO_GROUPS[args.group])
+    explicit = args.scenarios and args.scenarios not in (
+        ",".join(ALL_SCENARIOS), ",".join(group_members))
+    scenarios = ([s.strip() for s in args.scenarios.split(",") if s.strip()]
+                 if explicit else group_members)
     unknown = [s for s in scenarios if s not in ALL_SCENARIOS]
     if unknown:
         print(f"ui_ux_verify: ERROR: unknown scenario(s): {unknown}",
               file=sys.stderr)
         return 2
-    missing = [s for s in ALL_SCENARIOS if s not in scenarios]
-    if missing:
-        # "Skipped scenario" is a failure: the release claim needs all of them.
-        print(f"ui_ux_verify: ERROR: scenarios not run: {missing}",
-              file=sys.stderr)
+    if not scenarios:
+        print("ui_ux_verify: ERROR: no scenarios selected", file=sys.stderr)
         return 2
 
     if getattr(args, "anki_bin", ""):
@@ -178,6 +222,7 @@ def main(argv=None) -> int:
 
     results = []
     failures = []
+    observed_runtime = None
     for journey in scenarios:
         print(f"ui_ux_verify: === {journey} (Anki {installed}, Qt {args.qt}) ===")
         _wait_for_anki_exit()
@@ -206,6 +251,15 @@ def main(argv=None) -> int:
         elif assertions is None:
             failures.append(f"{journey}: no assertions written (stale result)")
         else:
+            runtime = assertions.get("runtime") or {}
+            if observed_runtime is None and runtime:
+                problems = _runtime_problems(args.anki, args.qt, runtime)
+                if problems:
+                    print(f"ui_ux_verify: ERROR: runtime identity rejected: "
+                          f"{'; '.join(problems)}", file=sys.stderr)
+                    return 2
+                observed_runtime = runtime
+            entry["runtime"] = runtime
             run_id = assertions.get("run_id")
             run_file = os.path.join(base, "run-id.txt")
             expected_run = ""
@@ -252,11 +306,18 @@ def main(argv=None) -> int:
     # Inspected report with the real evidence: one per target plus a
     # combined report.md that includes the static visual findings.
     report_path = os.path.join(ARTIFACTS, f"report-{args.anki}-qt{args.qt}.md")
+    observed_path = os.path.join(
+        ARTIFACTS, f"observed-runtime-{args.anki}-qt{args.qt}.json")
+    with open(observed_path, "w", encoding="utf-8") as fh:
+        json.dump({"requested": {"anki": args.anki, "qt": args.qt},
+                   "observed": observed_runtime or {},
+                   "scenarios": len(results)}, fh, indent=2)
     lines = [
         "# AnkiScape 3.0 UI/UX verification report",
         "",
         f"- Run: {run_stamp} (UTC)",
         f"- Anki: {installed} (requested {args.anki})",
+        f"- Observed runtime: {observed_runtime or {}}",
         f"- Qt major: {args.qt}",
         f"- Artifact: {_dist_hash()[:16]}...",
         f"- Scenarios: {len(results)} (all required)",

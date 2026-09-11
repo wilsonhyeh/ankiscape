@@ -803,7 +803,10 @@ def _kill_owned_child(child, base: str) -> None:
 
 def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
                anki_bin_override: str = "",
-               anki_actual: str = "") -> int:
+               anki_actual: str = "",
+               install_addon: bool = True,
+               extra_config: dict = None,
+               phase_timeout_s: int = 240) -> int:
     import zipfile
 
     journeys = ("fresh", "upgrade", "undo", "catchup", "sync", "dialogs",
@@ -811,7 +814,8 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
                 "ui-lifecycle", "ui-art", "ui-visual-polish",
                 "ui-deferred-rewards", "ui-rebuild-review",
                 "ui-test-leaderboard", "ui-credential-fallback",
-                "ui-recovery", "ui-profile-races", "ui-report-bug")
+                "ui-recovery", "ui-profile-races", "ui-report-bug",
+                "native-performance", "native-performance-control")
     if journey not in journeys:
         return _fail(f"unknown journey {journey!r}", f"choose from {journeys}")
     print(f"dev: (e2e) journey={journey} target Anki={anki or '?'} Qt={qt or '?'}")
@@ -832,8 +836,18 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
     if _refuse_running_anki("e2e"):
         return 1
     # Build the exact artifact under test (installed from zip, not symlink).
-    proc = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "build_addon.py")])
-    if proc.returncode != 0:
+    # Reuse a candidate whose bytes already match this source (CI consumers
+    # must never rebuild the artifact they were handed); rebuild only when
+    # --check reports stale.
+    check = subprocess.run([sys.executable, os.path.join(ROOT, "scripts",
+                                                         "build_addon.py"),
+                            "--check"], capture_output=True, text=True)
+    if check.returncode == 1:
+        proc = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "build_addon.py")])
+        if proc.returncode != 0:
+            return 1
+    elif check.returncode != 0:
+        print(f"dev: build --check failed: {check.stderr[:300]}", file=sys.stderr)
         return 1
     import json as _json
     with open(os.path.join(ROOT, "dist", "manifest.json"), encoding="utf-8") as fh:
@@ -867,13 +881,18 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
         fh.write(run_id)
     addons = os.path.join(base, "addons21")
     os.makedirs(addons, exist_ok=True)
-    with zipfile.ZipFile(artifact) as archive:
-        archive.extractall(os.path.join(addons, "ankiscape"))
+    if install_addon:
+        with zipfile.ZipFile(artifact) as archive:
+            archive.extractall(os.path.join(addons, "ankiscape"))
     # Dev-only driver (never shipped: outside the package allowlist).
     shutil.copytree(os.path.join(ROOT, "dev", "e2e", "driver_addon"),
                     os.path.join(addons, "e2e_driver"))
     with open(os.path.join(base, "artifact_sha256.txt"), "w", encoding="utf-8") as fh:
         fh.write(artifact_sha)
+    if extra_config:
+        with open(os.path.join(base, "perf-config.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(extra_config, fh)
 
     profile = f"e2e-{journey}"
     # Anki will not auto-create a -p profile (profile manager instead), so
@@ -910,7 +929,8 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
                                          stdout=log, stderr=subprocess.STDOUT, env=env)
             except OSError as exc:
                 return _fail(f"could not launch Anki: {exc!r}")
-        outcome = _wait_e2e_phase(child, base, run_id, log_path)
+        outcome = _wait_e2e_phase(child, base, run_id, log_path,
+                                  timeout_s=phase_timeout_s)
         if outcome == "timeout":
             return 1
         if outcome == "relaunch":
@@ -963,7 +983,10 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
         print(f"dev: (e2e) FAILED step: {step}", file=sys.stderr)
     if child.returncode != 0:
         print(f"dev: (e2e) Anki exit code {child.returncode}", file=sys.stderr)
-    if (failed or child.returncode != 0 or not last_result.get("screenshots")
+    perf_journey = journey in ("native-performance",
+                               "native-performance-control")
+    if (failed or child.returncode != 0
+            or (not perf_journey and not last_result.get("screenshots"))
             or last_result.get("journey") != journey):
         return 1
     print(f"dev: (e2e) {journey} journey PASS on Anki {installed} "
@@ -971,14 +994,15 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
     return 0
 
 
-def _wait_e2e_phase(child, base: str, run_id: str, log_path: str) -> str:
+def _wait_e2e_phase(child, base: str, run_id: str, log_path: str,
+                    timeout_s: int = 240) -> str:
     """Wait for final assertions ('done'), a relaunch request ('relaunch'),
     or failure ('timeout')."""
     import json as _json
 
     assertions = os.path.join(base, "e2e-assertions.json")
     relaunch = os.path.join(base, "relaunch.json")
-    deadline = time.time() + 240
+    deadline = time.time() + max(30, int(timeout_s))
     while time.time() < deadline:
         if os.path.exists(assertions):
             try:
