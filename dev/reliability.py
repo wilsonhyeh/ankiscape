@@ -1093,9 +1093,20 @@ def _hosted_credentials_ready() -> bool:
 def _run_package_audit(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
     log_path = os.path.join(out_dir, "package-audit.log")
     steps = []
-    rc, _ = _run_command([sys.executable, os.path.join(ROOT, "scripts", "build_addon.py"),
-                          "--check"], log_path, env=ctx.get("env"))
+    build_script = os.path.join(ROOT, "scripts", "build_addon.py")
+    rc, _ = _run_command([sys.executable, build_script, "--check"], log_path,
+                         env=ctx.get("env"))
     steps.append(("build_addon_check", rc))
+    if rc == 1:
+        # No current artifact in this checkout (PR/local role without a
+        # distributed candidate): build one, then re-check.
+        rc_build, _ = _run_command([sys.executable, build_script], log_path,
+                                   env=ctx.get("env"))
+        steps.append(("build_addon", rc_build))
+        rc_check, _ = _run_command([sys.executable, build_script, "--check"],
+                                   log_path, env=ctx.get("env"))
+        steps.append(("build_addon_recheck", rc_check))
+        rc = rc_check
     if rc == 0:
         try:
             manifest, archive, digest = resolve_artifact()
