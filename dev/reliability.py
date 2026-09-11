@@ -822,7 +822,8 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str) -> Dict
     spec.loader.exec_module(module)
     try:
         rc = module._e2e_suite(str(ctx.get("anki", "")), str(ctx.get("qt", "")),
-                               journey, str(ctx.get("anki_bin", "") or ""))
+                               journey, str(ctx.get("anki_bin", "") or ""),
+                               str(ctx.get("anki_actual", "") or ""))
     except Exception as exc:  # noqa: BLE001
         rc = 1
         print(f"[reliability] journey {journey} raised {exc!r}", file=sys.stderr)
@@ -866,6 +867,8 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
                "--qt", str(ctx.get("qt"))]
     if ctx.get("anki_bin"):
         command += ["--anki-bin", str(ctx["anki_bin"])]
+    if ctx.get("anki_actual"):
+        command += ["--anki-actual", str(ctx["anki_actual"])]
     log_path = os.path.join(out_dir, "native-matrix.log")
     rc, _ = _run_command(command, log_path, env=ctx.get("env"),
                          timeout=ctx.get("native_timeout", 7200))
@@ -988,6 +991,7 @@ def cmd_run_lane(args) -> int:
         if actual:
             record["target"]["anki_actual"] = actual
     ctx = {"os": target_os, "anki": args.anki, "anki_bin": anki_bin,
+           "anki_actual": getattr(args, "anki_actual", ""),
            "qt": args.qt, "trusted": bool(args.trusted), "env": os.environ.copy(),
            "timeout": None, "native_timeout": getattr(args, "native_timeout", 7200)}
 

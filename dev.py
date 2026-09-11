@@ -231,7 +231,7 @@ def _install_addon(addons_dir: str, *, symlink: bool, prebuilt: bool = False) ->
     return f"zip {record['archive']} ({record['artifact_sha256'][:12]}...)"
 
 
-def _resolve_runtime(anki: str, anki_bin: str = ""):
+def _resolve_runtime(anki: str, anki_bin: str = "", anki_actual: str = ""):
     """Resolve (app, binary, version) through dev/runtime_adapter.py, keeping
     the macOS Info.plist path and honoring an explicit --anki-bin."""
     import importlib.util as _ilu
@@ -248,7 +248,7 @@ def _resolve_runtime(anki: str, anki_bin: str = ""):
         sys.modules.pop(spec.name, None)
         raise
     if anki_bin:
-        info = adapter.resolve_anki(anki, anki_bin)
+        info = adapter.resolve_anki(anki, anki_bin, anki_actual)
         if info is None:
             return "", "", "?"
         ok, detail = adapter.verify_runtime(info, anki)
@@ -682,7 +682,8 @@ def cmd_test(args) -> int:
     if suite == "e2e":
         return _e2e_suite(getattr(args, "anki", ""), getattr(args, "qt", ""),
                           getattr(args, "journey", "fresh"),
-                          getattr(args, "anki_bin", ""))
+                          getattr(args, "anki_bin", ""),
+                          getattr(args, "anki_actual", ""))
     return _fail(f"unknown suite {suite!r}")
 
 
@@ -801,7 +802,8 @@ def _kill_owned_child(child, base: str) -> None:
 
 
 def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
-               anki_bin_override: str = "") -> int:
+               anki_bin_override: str = "",
+               anki_actual: str = "") -> int:
     import zipfile
 
     journeys = ("fresh", "upgrade", "undo", "catchup", "sync", "dialogs",
@@ -817,7 +819,8 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
         # Live local-stack journey (needs Docker + Supabase): serviced sync
         # against the real local Auth/RPCs through the new service layer.
         return _e2e_sync_suite(anki)
-    _app, anki_bin, installed = _resolve_runtime(anki, anki_bin_override)
+    _app, anki_bin, installed = _resolve_runtime(anki, anki_bin_override,
+                                                 anki_actual)
     if not anki_bin or str(installed).startswith("unverified:"):
         if anki:
             return _fail(f"no verified Anki runtime matches {anki}",
@@ -1132,6 +1135,9 @@ def main(argv=None) -> int:
     p_test.add_argument("--anki", default="")
     p_test.add_argument("--anki-bin", default="",
                         help="explicit runtime executable (native matrix)")
+    p_test.add_argument("--anki-actual", default="",
+                        help="declared version for hash-verified downloads "
+                             "that cannot be probed")
     p_test.add_argument("--qt", default="")
     p_test.add_argument("--journey", default="fresh",
                         choices=("fresh", "upgrade", "undo", "catchup", "sync",

@@ -56,13 +56,48 @@ def _probe_version(binary: str) -> str:
     for args in (["--version"], ["-V"]):
         try:
             proc = subprocess.run([binary, *args], capture_output=True,
-                                  text=True, timeout=25)
+                                  text=True, timeout=20)
         except (OSError, subprocess.SubprocessError):
             continue
         text = f"{proc.stdout}\n{proc.stderr}"
         match = re.search(r"\b(\d{2,4}\.\d{1,2}(?:\.\d{1,2})?)\b", text)
         if proc.returncode == 0 and match:
             return match.group(1)
+    return _probe_version_from_files(binary)
+
+
+def _probe_version_from_files(binary: str) -> str:
+    """Version from the release layout, no process launch (works headless):
+    macOS bundle Info.plist, Linux anki-<v>.dist-info, or a version file."""
+    base = os.path.dirname(os.path.abspath(binary))
+    plist = os.path.join(base, "..", "Info.plist")
+    if os.path.isfile(plist):
+        try:
+            with open(plist, "rb") as fh:
+                version = plistlib.load(fh).get("CFBundleShortVersionString", "")
+            if version:
+                return str(version)
+        except OSError:
+            pass
+    for folder in (base, os.path.join(base, "app")):
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            match = re.match(r"anki-(\d+(?:\.\d+)+)\.dist-info$", name)
+            if match:
+                return match.group(1)
+        for filename in ("version", "VERSION"):
+            candidate = os.path.join(folder, filename)
+            if os.path.isfile(candidate):
+                try:
+                    with open(candidate, encoding="utf-8") as fh:
+                        value = fh.read().strip()
+                    if re.match(r"^\d+(?:\.\d+)+$", value):
+                        return value
+                except OSError:
+                    pass
     return ""
 
 
@@ -115,15 +150,25 @@ def _linux_candidates(requested: str):
     return None
 
 
-def resolve_anki(requested: str = "", binary: str = "") -> Optional[RuntimeInfo]:
-    """Resolve the runtime for this host. Explicit binary wins and is probed;
-    unprobeable explicit binaries record the requested version string."""
+def resolve_anki(requested: str = "", binary: str = "",
+                 declared_version: str = "") -> Optional[RuntimeInfo]:
+    """Resolve the runtime for this host. An explicit binary wins; its
+    version comes from probing (process, then release layout). A declared
+    version is only accepted together with an explicit binary and is
+    recorded as 'declared' so evidence never implies a probe that did not
+    happen (the hash-verified download is the real version guarantee)."""
     if binary:
         if not os.path.isfile(binary):
             return None
         version = _probe_version(binary)
-        return RuntimeInfo(binary=binary, version=version or requested,
-                           version_source="probe" if version else "requested")
+        if version:
+            return RuntimeInfo(binary=binary, version=version,
+                               version_source="probe")
+        if declared_version:
+            return RuntimeInfo(binary=binary, version=declared_version,
+                               version_source="declared")
+        return RuntimeInfo(binary=binary, version=requested,
+                           version_source="requested")
     if host_os() == "macos":
         return _macos_candidates(requested)
     if host_os() == "win":

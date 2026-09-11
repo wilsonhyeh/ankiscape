@@ -55,9 +55,9 @@ jobs:
           ANKISCAPE_FIXTURE_PASSWORD: ${{ secrets.ANKISCAPE_FIXTURE_PASSWORD }}
         run: |
           if [ "${{ matrix.os }}" = "linux" ]; then
-            xvfb-run -a python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}"
+            xvfb-run -a python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}" --anki-actual "${{ matrix.anki }}"
           else
-            python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}"
+            python3 dev/ui_ux_verify.py --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" --anki-bin "${ANKI_BIN:-}" --anki-actual "${{ matrix.anki }}"
           fi
       - name: Record nightly lane evidence
         if: always()
@@ -70,12 +70,12 @@ jobs:
           if [ "${{ matrix.os }}" = "linux" ]; then
             xvfb-run -a python3 dev/reliability.py run-lane --stage nightly --os "${{ matrix.os }}" \
               --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
-              --anki-bin "${ANKI_BIN:-}" \
+              --anki-bin "${ANKI_BIN:-}" --anki-actual "${{ matrix.anki }}" \
               --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}" || true
           else
             python3 dev/reliability.py run-lane --stage nightly --os "${{ matrix.os }}" \
               --anki "${{ matrix.anki }}" --qt "${{ matrix.qt }}" \
-              --anki-bin "${ANKI_BIN:-}" \
+              --anki-bin "${ANKI_BIN:-}" --anki-actual "${{ matrix.anki }}" \
               --out "artifacts/reliability/${RUN_ID}/${{ matrix.label }}" || true
           fi
       - name: Upload lane evidence
