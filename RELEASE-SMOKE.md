@@ -165,12 +165,15 @@ Local implementation for the reliability/support plan is recorded in
 - Evidence: `dev/reliability.py` validates provenance/scenarios/budgets;
   `dev/matrix.json`/`dev/reliability-matrix.json` still require all seven
   targets; local `verify --stage pr` fails naming the CI workflow (expected).
-- Platforms: seven-target lanes are prepared but **not run** — pinned runtime
-  downloads fail closed until `dev/runtime_manifest.json` records verified
-  URLs and SHA-256 pins, and `.github/workflows/*` are not pushed.
-- Migration `0006_test_cohorts.sql` and `0004_test_cohorts.test.sql` are
-  prepared, **not deployed**; hosted fixture seeding is **blocked** until an
-  authorized execution session supplies credentials and applies it.
+- Platforms: the seven-target lanes are pushed; runtime pins are recorded.
+  The PR gate is green on CI (packaged Linux Anki journey included). The
+  nightly matrix is running: hosted lane green, macOS/Linux in progress,
+  Windows blocked by an MSI install-path bug (fixed after the dispatch),
+  local backend red on two pre-existing account-contract e2e assertions.
+- Migration `0006_test_cohorts.sql` (plus append-only `0007`) is **deployed**
+  to the hosted project and verified; the permanent hosted fixture cohort is
+  seeded, idempotent on rerun, and its verify/e2e pass (2026-09-11). See the
+  plan execution log.
 - Support: Report a bug dialog and GitHub templates/configuration script are
   in place; hosted label/issue-form/vulnerability-reporting changes are
   **blocked** on `scripts/configure_github.py --apply` authorization.

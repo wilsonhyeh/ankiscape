@@ -22,9 +22,12 @@ overwrite its date): `python3 dev/reliability.py baseline`.
 - Python 3.9+ for local gates; CI uses 3.11. Dev-only pins: `dev/requirements.lock`
   (supabase CLI, hypothesis).
 - Docker Desktop + Supabase CLI 2.115.0 for the local backend/pgTAP lane.
-- Pinned Anki runtimes: `python3 dev/fetch_runtimes.py --list`; downloads fail
-  closed until a maintainer records `url_verified` and `sha256` in
-  `dev/runtime_manifest.json`. Never install a different version silently.
+- Pinned Anki runtimes: `python3 dev/fetch_runtimes.py --list`; all seven
+  targets are pinned (26.08.1 asset digests, 23.10 signed checksums) and
+  `--install` mounts/installs the runtime and prints its binary. Never install
+  a different version silently. Headless probes read the release layout
+  (Info.plist, `anki-<v>.dist-info`); hash-verified downloads may declare
+  `--anki-actual`, recorded as `declared` in evidence.
 - Linux native lanes need Xvfb and a real desktop session; an offscreen Qt
   platform is refused (`dev/runtime_adapter.requires_desktop`).
 - Hosted fixture lanes need `ANKISCAPE_PROD_URL`, `ANKISCAPE_PROD_ANON_KEY`,
