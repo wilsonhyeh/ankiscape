@@ -4,7 +4,7 @@
 -- authorization, ties/limits/banned, safe profile allowlist, grants and
 -- direct-write denial.
 begin;
-select plan(33);
+select plan(34);
 
 -- ---------------------------------------------------------------------------
 -- Fixtures: reservations exist BEFORE any account (born classified).
@@ -251,7 +251,7 @@ reset role;
 -- Banned fixture rows are excluded from test paths too.
 -- Clear the request claims first: privileged updates run as the test runner
 -- with auth.uid() null (the guard is exactly what blocks authenticated flags).
-select set_config('request.jwt.claims', '', true);
+select set_config('request.jwt.claims', '{}', true);
 update public.players set is_test = true where username_norm = 'banneduser';
 update public.players set status = 'banned' where username_norm = 'banneduser';
 select set_config('request.jwt.claims',
