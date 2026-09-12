@@ -76,6 +76,8 @@ jobs:
         env:
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
+          QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu"
+          QTWEBENGINE_DISABLE_SANDBOX: "1"
         run: |
           RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
           xvfb-run -a python3 dev/reliability.py run-lane --stage pr \

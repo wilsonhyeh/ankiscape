@@ -204,6 +204,11 @@ jobs:
           ANKISCAPE_CANDIDATE_LOCKED: "1"
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
+          # Headless CI has no usable GPU: the QtWebEngine GPU fallback path
+          # crashed during scale changes (0xC0000005 / kTransientFailure).
+          # Confined to CI test runners; never shipped.
+          QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu"
+          QTWEBENGINE_DISABLE_SANDBOX: "1"
           ANKISCAPE_FIXTURE_EMAIL: ${{ secrets.ANKISCAPE_FIXTURE_EMAIL }}
           ANKISCAPE_FIXTURE_PASSWORD: ${{ secrets.ANKISCAPE_FIXTURE_PASSWORD }}
         run: |

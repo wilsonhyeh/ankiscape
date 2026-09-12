@@ -3370,12 +3370,27 @@ def _poll_ui_test_leaderboard(state):
         # Record once: a missing shell is open_hiscores' job, not a reason to
         # sign in again on the next tick.
         state["stage"] = "open_hiscores"
+        state["shell_wait_ticks"] = 0
         return
     if stage == "open_hiscores":
         shell = _find_shell()
         if shell is None:
+            # Sign-in happens while the reviewer is up; the shell must be
+            # re-opened (this fallback used to live in the login stage and
+            # was lost when duplicate logins were removed).
+            state["shell_wait_ticks"] = state.get("shell_wait_ticks", 0) + 1
+            if state["shell_wait_ticks"] % 30 == 1:
+                _open_shell_via_menu()
+            if state["shell_wait_ticks"] > 300:
+                _step("hiscores_shell_open", False,
+                      f"shell not visible after {state['shell_wait_ticks']} ticks")
+                _finish(1)
             return
         if not _click_rail("hiscores"):
+            state["rail_wait_ticks"] = state.get("rail_wait_ticks", 0) + 1
+            if state["rail_wait_ticks"] > 300:
+                _step("hiscores_rail_click", False, "rail never activated")
+                _finish(1)
             return
         from aqt.qt import QApplication
         QApplication.processEvents()
@@ -3786,9 +3801,20 @@ def _rss_mib():
 
             counters = _PMC()
             counters.cb = ctypes.sizeof(counters)
-            ok = ctypes.windll.psapi.GetProcessMemoryInfo(
-                ctypes.windll.kernel32.GetCurrentProcess(),
-                ctypes.byref(counters), counters.cb)
+            process = ctypes.windll.kernel32.GetCurrentProcess()
+            ok = 0
+            for lib, fn in (("psapi", "GetProcessMemoryInfo"),
+                            ("kernel32", "K32GetProcessMemoryInfo")):
+                try:
+                    func = getattr(getattr(ctypes.windll, lib), fn)
+                    func.argtypes = [ctypes.c_void_p,
+                                     ctypes.POINTER(_PMC), _wt.DWORD]
+                    func.restype = _wt.BOOL
+                    ok = func(process, ctypes.byref(counters), counters.cb)
+                    if ok:
+                        break
+                except Exception:
+                    continue
             if not ok:
                 return None
             return round(counters.WorkingSetSize / (1024 * 1024), 1)
@@ -3801,12 +3827,41 @@ def _rss_mib():
 
 
 def _process_cpu_seconds():
+    """Process CPU seconds, or None when the platform cannot measure it.
+
+    Never a fake zero: a missing measurement must fail the idle budget
+    explicitly, and Windows previously reported 0.0 for every run."""
     try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes as _wt
+
+            kernel32 = ctypes.windll.kernel32
+            creation = _wt.FILETIME()
+            exit_time = _wt.FILETIME()
+            kernel = _wt.FILETIME()
+            user = _wt.FILETIME()
+            kernel32.GetProcessTimes.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_wt.FILETIME),
+                ctypes.POINTER(_wt.FILETIME), ctypes.POINTER(_wt.FILETIME),
+                ctypes.POINTER(_wt.FILETIME)]
+            kernel32.GetProcessTimes.restype = _wt.BOOL
+            ok = kernel32.GetProcessTimes(
+                kernel32.GetCurrentProcess(), ctypes.byref(creation),
+                ctypes.byref(exit_time), ctypes.byref(kernel),
+                ctypes.byref(user))
+            if not ok:
+                return None
+
+            def _ticks(ft):
+                return (int(ft.dwHighDateTime) << 32) | int(ft.dwLowDateTime)
+
+            return round((_ticks(kernel) + _ticks(user)) / 1e7, 6)
         import resource
         usage = resource.getrusage(resource.RUSAGE_SELF)
         return float(usage.ru_utime) + float(usage.ru_stime)
     except Exception:
-        return 0.0
+        return None
 
 
 def _lag_probe_start(state):
@@ -4228,8 +4283,13 @@ def _poll_native_performance(state):
             return
         elapsed = max(0.1, _time.time() - state.get("idle_wall_start",
                                                     _time.time()))
-        cpu_delta = _process_cpu_seconds() - state.get("idle_cpu_start", 0.0)
-        state["idle_cpu_pct"] = round((cpu_delta / elapsed) * 100.0, 4)
+        cpu_now = _process_cpu_seconds()
+        cpu_start = state.get("idle_cpu_start")
+        if cpu_now is None or cpu_start is None:
+            state["idle_cpu_pct"] = None
+        else:
+            state["idle_cpu_pct"] = round(
+                ((cpu_now - cpu_start) / elapsed) * 100.0, 4)
         _perf_marker("perf-idle-end", str(_time.time()))
         state["stage"] = "finish"
         return

@@ -1253,8 +1253,19 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
     # Include the journey name: a scenario running several journeys must not
     # have each tail overwrite the previous one.
     extra_names = []
+    prefix = f"{scenario_id + '-' if scenario_id else ''}{journey}"
+    for src_name, suffix in (("e2e-heartbeat.json", "heartbeat.json"),
+                             ("e2e-fatal.txt", "fatal.txt")):
+        src = os.path.join(base, src_name)
+        dest_name = f"{prefix}-{suffix}"
+        if os.path.isfile(src):
+            try:
+                shutil.copyfile(src, os.path.join(out_dir, dest_name))
+                extra_names.append(dest_name)
+            except OSError:
+                pass
     log_src = os.path.join(base, "anki-stdout.log")
-    tail_name = f"{scenario_id + '-' if scenario_id else ''}{journey}-anki-stdout-tail.log"
+    tail_name = f"{prefix}-anki-stdout-tail.log"
     if os.path.isfile(log_src) and _copy_log_tail(
             log_src, os.path.join(out_dir, tail_name)):
         extra_names.append(tail_name)
