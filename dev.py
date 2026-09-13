@@ -24,6 +24,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -701,15 +702,30 @@ def _backend_suite() -> int:
         if proc.returncode != 0:
             print(f"dev: (backend) db reset #{i} FAILED", file=sys.stderr)
             return 1
-    proc = subprocess.run(["supabase", "test", "db"], cwd=server_dir, timeout=300)
+    proc = subprocess.run(["supabase", "test", "db"], cwd=server_dir,
+                          timeout=300, capture_output=True, text=True)
+    tap_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    print(tap_text.rstrip())
     if proc.returncode != 0:
         print("dev: (backend) pgTAP FAILED", file=sys.stderr)
         return 1
+    tap_results = re.findall(r"^(ok|not ok)\b", tap_text, re.MULTILINE)
+    pgtap_passed = tap_results.count("ok")
+    pgtap_failed = tap_results.count("not ok")
     proc = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "auth_smoke.py")],
-                          cwd=ROOT, timeout=600)
+                          cwd=ROOT, timeout=600, capture_output=True, text=True)
+    smoke_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    print(smoke_text.rstrip())
     if proc.returncode != 0:
         print("dev: (backend) auth smoke FAILED", file=sys.stderr)
         return 1
+    # Machine-readable totals for the reliability record (nonzero real test
+    # counts; pgTAP emits TAP, the smoke prints one PASS line per check).
+    smoke_passed = len(re.findall(r"^PASS\b", smoke_text, re.MULTILINE))
+    smoke_failed = len(re.findall(r"^FAIL\b", smoke_text, re.MULTILINE))
+    print(f"dev: (backend) counts: passed={pgtap_passed + smoke_passed} "
+          f"failed={pgtap_failed + smoke_failed} skipped=0 "
+          f"(pgtap={pgtap_passed} smoke={smoke_passed})")
     print("dev: (backend) reset x2 + pgTAP + live Auth/RPC smoke PASS")
     return 0
 

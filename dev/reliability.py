@@ -467,10 +467,15 @@ def _validate_files(record_dir: str, rel: str, entries: List[Any],
             errors.append(f"bad_file_entry:{rel}")
             continue
         raw_path = str(entry.get("path", ""))
-        if not raw_path or os.path.isabs(raw_path) or ".." in raw_path.split("/"):
+        # Records produced on Windows carry backslash-separated relative
+        # paths; validation runs on Linux in the aggregate job. Resolve the
+        # same entry on any host (falsified by the Windows lane evidence on
+        # nightly 34741568295 before this normalization).
+        host_path = raw_path.replace("\\", "/")
+        if not raw_path or os.path.isabs(raw_path) or ".." in host_path.split("/"):
             errors.append(f"unsafe_file_path:{rel}:{raw_path}")
             continue
-        file_path = os.path.join(record_dir, raw_path)
+        file_path = os.path.join(record_dir, *host_path.split("/"))
         if not os.path.isfile(file_path):
             errors.append(f"file_missing:{rel}:{raw_path}")
             continue
@@ -954,6 +959,16 @@ def _parse_unittest_counts(log_path: str) -> Dict[str, int]:
             text = fh.read()
     except OSError:
         return counts
+    # Backend suite: pgTAP + live smoke totals (dev.py prints the summary;
+    # the unittest line is absent, which previously recorded a fake zero).
+    backend = re.search(
+        r"dev: \(backend\) counts: passed=(\d+) failed=(\d+) skipped=(\d+)",
+        text)
+    if backend:
+        counts["tests_passed"] = int(backend.group(1))
+        counts["tests_failed"] = int(backend.group(2))
+        counts["tests_skipped"] = int(backend.group(3))
+        return counts
     match = re.search(r"Ran (\d+) tests?", text)
     if match:
         total = int(match.group(1))
@@ -1240,7 +1255,12 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
     for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
         if name.startswith("e2e-") and name.endswith(".png"):
             src = os.path.join(base, name)
-            prefix = f"{scenario_id or journey}-"
+            # Qualify by journey as well as scenario: shared capture names
+            # (e2e-onboarding-*.png) repeat across the journeys of one
+            # multi-journey scenario, and the later copy overwrote the
+            # earlier record's hashed file (falsified on nightly
+            # 34741568295, macos-23.10-qt6).
+            prefix = f"{scenario_id + '-' if scenario_id else ''}{journey}-"
             dest_name = f"{prefix}{name[len('e2e-'):]}"
             dest = os.path.join(out_dir, dest_name)
             try:

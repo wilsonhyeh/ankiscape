@@ -529,6 +529,24 @@ class ReliabilityEvidenceTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any(e.startswith("unsafe_file_path") for e in errors), errors)
 
+    def test_windows_style_relative_path_resolves(self):
+        # Windows lanes record backslash-separated relative paths; the
+        # aggregate validates them on Linux (nightly 34741568295 falsified
+        # this before the normalization fix).
+        self.fx.add_valid_set()
+        lane_dir = os.path.dirname(self.fx.records[1])
+        sub = os.path.join(lane_dir, "sub")
+        os.makedirs(sub, exist_ok=True)
+        payload = _write(os.path.join(sub, "file.json"), {"ok": True})
+        path = self.fx.records[1]
+        record = _read_json(path)
+        record["scenarios"][0]["files"] = [
+            {"path": "sub\\file.json", "sha256": _sha(payload),
+             "bytes": os.path.getsize(payload)}]
+        _write(path, record)
+        ok, errors, _ = self.fx.validate()
+        self.assertTrue(ok, errors)
+
     def test_missing_hosted_native_assertion_fails(self):
         journeys = [
             _journey("ui-deferred-rewards", [("deferred", True)]),
@@ -931,6 +949,32 @@ class BaselineAndPerfRuntimeTests(unittest.TestCase):
                          [0, 1000, 10000, 100000])
         self.assertEqual(
             budgets["budgets"]["accepted_answer_hook"]["min_samples"], 500)
+
+
+class CountParsingTests(unittest.TestCase):
+    def test_backend_summary_counts_are_recorded(self):
+        # The backend suite emits pgTAP + smoke totals, not a unittest line;
+        # before this the record carried a fake zero and strict validation
+        # failed with zero_tests (nightly 34741568295).
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "backend-local.log")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("ok 1 - players table\nnot ok 2 - broken\n"
+                         "dev: (backend) counts: passed=31 failed=1 skipped=0 "
+                         "(pgtap=20 smoke=11)\n")
+            counts = REL._parse_unittest_counts(path)
+        self.assertEqual(counts["tests_passed"], 31)
+        self.assertEqual(counts["tests_failed"], 1)
+        self.assertEqual(counts["tests_skipped"], 0)
+
+    def test_unittest_counts_still_parse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "python.log")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("Ran 414 tests in 18.7s\n\nOK (skipped=2)\n")
+            counts = REL._parse_unittest_counts(path)
+        self.assertEqual(counts["tests_passed"], 412)
+        self.assertEqual(counts["tests_skipped"], 2)
 
 
 if __name__ == "__main__":
