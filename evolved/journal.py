@@ -351,6 +351,16 @@ class Journal:
                 (limit,)).fetchall()
         return [dict(r) for r in rows]
 
+    def count_pending_operations(self) -> int:
+        """Outbox size for status display. Count only: the JOIN+ORDER BY
+        form sorts the whole operations table (measured ~250 ms at 100k on
+        the review path); COUNT over the outbox primary key is ~8 ms and is
+        the only thing the pending label needs."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM outbox").fetchone()
+        return int(row["n"]) if row is not None else 0
+
     def observe_review(self, review_key: str, revlog_id: int, card_id: int, fingerprint: str) -> None:
         with self._lock:
             self._conn.execute(

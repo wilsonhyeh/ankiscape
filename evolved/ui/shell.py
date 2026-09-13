@@ -135,10 +135,21 @@ def release_shell(mw) -> None:
 
 
 def refresh_shell(mw) -> bool:
-    """Publish a projection/status change to the open window (no reopening)."""
+    """Publish a projection/status change to the open window (no reopening).
+
+    A hidden shell is marked stale instead of rebuilt: the per-answer refresh
+    cost (status + pending count over the whole journal) has no user-visible
+    effect while the window is closed, and showEvent refreshes on next open.
+    """
     widget = _attr(mw, "ankiscape_evolved_shell")
     if widget is None:
         return False
+    try:
+        if not widget.isVisible():
+            widget._stale = True
+            return True
+    except Exception:
+        pass
     try:
         widget.refresh()
         return True
@@ -562,6 +573,15 @@ def _shell_class():
         def closeEvent(self, event):  # noqa: N802
             event.ignore()
             self.hide()
+
+        def showEvent(self, event):  # noqa: N802
+            super().showEvent(event)
+            if getattr(self, "_stale", False):
+                self._stale = False
+                try:
+                    self.refresh()
+                except Exception:
+                    pass
 
         def keyPressEvent(self, event):  # noqa: N802
             try:

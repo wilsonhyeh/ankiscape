@@ -30,13 +30,16 @@ class TestJournal(unittest.TestCase):
         self.j.append_operation(self._op())
         pending = self.j.pending_operations()
         self.assertEqual(len(pending), 1)
+        self.assertEqual(self.j.count_pending_operations(), 1)
         self.j.close()
         j2 = Journal(self.path)
         try:
             pending2 = j2.pending_operations()
             self.assertEqual(len(pending2), 1)
+            self.assertEqual(j2.count_pending_operations(), 1)
             j2.mark_acked(["op-1"])
             self.assertEqual(j2.pending_operations(), [])
+            self.assertEqual(j2.count_pending_operations(), 0)
         finally:
             j2.close()
 

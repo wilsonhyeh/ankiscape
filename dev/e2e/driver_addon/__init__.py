@@ -22,6 +22,9 @@ RESULT = {"journey": "fresh", "phase": 1, "run_id": None, "steps": [],
 RUN_ID = None
 JOURNEY = "fresh"
 PHASE = 1
+# Set once a phase decides its outcome; stops the poll timer and popup
+# watchdog from scheduling further work while Anki tears down.
+_QUITTING = False
 
 
 def _load_run_id():
@@ -147,6 +150,10 @@ def _runtime_identity():
 def _finish(exit_code):
     RESULT["finished"] = time.time()
     try:
+        _profile_stop()
+    except Exception:
+        pass
+    try:
         from aqt.qt import qVersion
         RESULT["qt_version"] = str(qVersion())
     except Exception:
@@ -181,6 +188,16 @@ def _finish_phase(next_phase):
 
 
 def _quit(exit_code):
+    """End the phase without raising out of a Qt slot.
+
+    Raising SystemExit inside the tick slot hands the exception to PyQt's
+    slot wrapper, which prints it and calls Py_Exit mid-event-loop; Python
+    finalization then runs PyQt's sip cleanup while Qt is half torn down and
+    intermittently segfaults (crash report 2026-09-12:
+    cleanup_on_exit -> cleanup_qobject -> EXC_BAD_ACCESS). Stop our own
+    timers, ask the app to exit with the journey's code and return."""
+    global _QUITTING
+    _QUITTING = True
     try:
         import faulthandler
         faulthandler.cancel_dump_traceback_later()
@@ -190,10 +207,11 @@ def _quit(exit_code):
         from aqt.qt import QApplication
         from aqt import mw
         mw.close()
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.exit(int(exit_code))
     except Exception:
         pass
-    raise SystemExit(exit_code)
 
 
 def _fail(msg, full_detail=""):
@@ -229,6 +247,8 @@ def run():
     # journey tick until someone clicks OK. This repeating timer fires in
     # nested modal loops too, so dismissal never depends on the stuck tick.
     def _popup_watchdog():
+        if _QUITTING:
+            return
         try:
             _dismiss_updater()
             _dismiss_product_popups(state)
@@ -301,17 +321,29 @@ def run():
                         extra["eng_id"] = id(_eng)
                         extra["eng_game"] = (_eng.cfg.game_uuid or "")[:8]
                         extra["eng_processed"] = len(_eng.state.processed_keys)
-                        try:
-                            _ops = _eng.journal.operation_count()
-                        except Exception:
-                            _ops = -1
+                        # The count is a full-table COUNT over the journal.
+                        # At 100k ops it measured ~3.7 ms; at the 10 Hz beat
+                        # cadence that is addon-only idle CPU and lag noise
+                        # the control never pays. Refresh every ~5 s and
+                        # serve the cached value in between.
+                        _ops = state.get("eng_ops_cache", -1)
+                        if state["ticks"] < 5 or state["ticks"] % 50 == 0:
+                            try:
+                                _ops = _eng.journal.operation_count()
+                                state["eng_ops_cache"] = _ops
+                            except Exception:
+                                _ops = -1
                         extra["eng_ops"] = _ops
                     extra["undo_fn"] = getattr(getattr(_mw, "undo", None),
                                               "__name__", "?")
                     # Direct reconcile probe: same product path the mw.undo
                     # wrapper calls. Distinguishes wrapper wiring faults from
-                    # engine input faults.
-                    if _eng is not None and _mw.col is not None:
+                    # engine input faults. Five revlog lookups per beat is
+                    # steerable noise during timing runs; sample it at the
+                    # same 5 s cadence as the operation count.
+                    if (_eng is not None and _mw.col is not None
+                            and (state["ticks"] < 5
+                                 or state["ticks"] % 50 == 0)):
                         _db = _mw.col.db
                         _detail = {}
                         for _k, (_rid, _cid) in list(_eng.state.recent.items())[:5]:
@@ -350,6 +382,8 @@ def run():
             pass
 
     def tick():
+        if _QUITTING:
+            return
         try:
             state["ticks"] += 1
             if state["ticks"] == 1:
@@ -364,14 +398,13 @@ def run():
             if state["ticks"] % 150 == 0:
                 _shot(f"stuck-{state['ticks']}")
             poll()
-        except SystemExit:
-            raise
         except Exception:
             full = traceback.format_exc()
             _fail("driver exception: " + full[-2000:], full_detail=full)
         else:
             _beat("poll_ok")
-            QTimer.singleShot(100, tick)
+            if not _QUITTING:
+                QTimer.singleShot(100, tick)
 
     def poll():
         _dismiss_updater()
@@ -1126,6 +1159,27 @@ def _wait_journal_kinds(state, kinds, what):
               f"have={have} want={sorted(kinds)} revlog={_revlog_count()}")
         return None  # failed
     return False  # keep waiting
+
+
+def _wait_projection_settled(max_s: float = 30.0) -> bool:
+    """Bounded settle wait: project rows only after the rebuild worker is
+    idle, so a slow publish cannot change counts inside a measurement."""
+    import time as _time
+    from aqt.qt import QApplication
+    import ankiscape
+    deadline = _time.time() + float(max_s)
+    while True:
+        try:
+            engine = ankiscape._EVOLVED_CTX.get("engine")
+            status = engine.projection_status() if engine is not None else {}
+        except Exception:
+            status = {}
+        if not status.get("busy"):
+            return True
+        if _time.time() >= deadline:
+            return False
+        QApplication.processEvents()
+        _time.sleep(0.05)
 
 
 def _game_uuid():
@@ -2990,6 +3044,11 @@ def _visual_polish_checks(state):
 
     # 4. Bounded rows after 100 section changes.
     try:
+        # A late projection publish (100k rebuilds land in seconds; slower
+        # Windows runners can outlast the tab tour) rebuilds the visible
+        # screen and changes row counts mid-probe. Wait for the worker to
+        # settle first so the probe measures bounded rows, not a race.
+        settled = _wait_projection_settled()
         # The screen lookup requires a visible widget: show each section
         # before grabbing its root so the row-count probe is real.
         _click_rail("bank")
@@ -3010,7 +3069,7 @@ def _visual_polish_checks(state):
               bank_before >= 0 and bank_after == bank_before
               and ach_before >= 0 and ach_after == ach_before,
               f"bank {bank_before}->{bank_after} "
-              f"achievements {ach_before}->{ach_after}")
+              f"achievements {ach_before}->{ach_after} settled={settled}")
     except Exception as exc:
         _step("visual_bounded_rows", False, repr(exc))
 
@@ -3898,15 +3957,44 @@ def _perf_journal_revision():
         return 0, None
 
 
-def _perf_reward_watch(state):
+def _perf_resolve_rebuild_watches(state):
+    """Record rebuild durations once the published revision catches up.
+
+    Runs in the answers and settle stages: a rebuild triggered by one of the
+    last answers can still be running when the answer loop ends, and settle
+    must be able to observe it finish instead of timing out."""
+    for watch in list(state.get("rebuild_watch", [])):
+        revision, engine = _perf_journal_revision()
+        if engine is not None and revision >= watch["target"]:
+            state["rebuilds"].append(
+                round((time.perf_counter() - watch["start"]) * 1000.0, 2))
+            state["rebuild_watch"].remove(watch)
+
+
+def _perf_register_reward_watches(state):
+    """Watch every deferred reward that appeared since the last answer.
+
+    Reading ``_PENDING_REVIEWS`` immediately after ``_answerCard`` races the
+    accepted-answer hook: when the hook had not run yet the old probe marked
+    the reward "immediate" and recorded only the answer-transition time, so
+    ``reward_completion`` mostly mirrored ``accepted_answer_completion``.
+    Instead, watch keys as they appear and start each watch at the answer
+    that produced it (the durable append happens inside the hook, ms later).
+    """
     try:
         import ankiscape
-        pending = getattr(ankiscape, "_PENDING_REVIEWS", None)
-        if pending:
-            return next(reversed(pending))
+        pending = getattr(ankiscape, "_PENDING_REVIEWS", None) or {}
     except Exception:
-        pass
-    return None
+        pending = {}
+    known = state.setdefault("watch_keys", set())
+    start = state.pop("watch_answer_start", None)
+    for key in pending:
+        if key in known:
+            continue
+        known.add(key)
+        state.setdefault("reward_watches", []).append(
+            {"key": key,
+             "start": start if start is not None else time.perf_counter()})
 
 
 def _resolve_reward_watches(state):
@@ -4154,13 +4242,9 @@ def _poll_native_performance(state):
         state["reward_watches"] = []
         return
     if stage == "answers":
+        _perf_register_reward_watches(state)
         _resolve_reward_watches(state)
-        for watch in list(state.get("rebuild_watch", [])):
-            revision, engine = _perf_journal_revision()
-            if engine is not None and revision >= watch["target"]:
-                state["rebuilds"].append(
-                    round((_time.perf_counter() - watch["start"]) * 1000.0, 2))
-                state["rebuild_watch"].remove(watch)
+        _perf_resolve_rebuild_watches(state)
         if state.get("answer_started") is None:
             if state["answers_done"] >= answers_target:
                 if mode == "control":
@@ -4176,12 +4260,10 @@ def _poll_native_performance(state):
                 state["answer_started"] = _time.perf_counter()
                 state["answers_done"] += 1
                 if mode == "addon":
-                    key = _perf_reward_watch(state)
-                    state["reward_immediate"] = key is None
-                    if key is not None:
-                        state.setdefault("reward_watches", []).append(
-                            {"key": key, "start": _time.perf_counter()})
-                    state["reward_started"] = _time.perf_counter()
+                    # A watch registered for this answer consumes the start
+                    # marker; if none ever appears, the reward was displayed
+                    # synchronously and the completion time is the reward time.
+                    state["watch_answer_start"] = state["answer_started"]
                 if state["answers_done"] in state.get("rebuild_at", []) \
                         and mode == "addon":
                     try:
@@ -4203,18 +4285,18 @@ def _poll_native_performance(state):
             return
         state["accept_ms"].append(
             round((_time.perf_counter() - state["answer_started"]) * 1000.0, 2))
-        if state.get("reward_immediate"):
-            # No pending watch: the reward displayed synchronously inside the
-            # accepted-answer hook, so the answer completion time is the
-            # displayed-reward time.
+        if state.pop("watch_answer_start", None) is not None:
+            # No pending key ever appeared for this answer: the reward was
+            # displayed synchronously inside the accepted-answer hook.
             state["reward_ms"].append(state["accept_ms"][-1])
-            state["reward_immediate"] = False
         state["answer_started"] = None
         state["awaiting"] = 0
         return
     if stage == "settle":
         state["settle_ticks"] = state.get("settle_ticks", 0) + 1
+        _perf_register_reward_watches(state)
         _resolve_reward_watches(state)
+        _perf_resolve_rebuild_watches(state)
         revision, engine = _perf_journal_revision()
         target = engine.journal.operation_count() if engine is not None else 0
         pending_rewards = len(state.get("reward_watches") or [])
@@ -4348,7 +4430,43 @@ _PHASE_POLLS = {
 try:
     from anki.hooks import addHook
 
+    _PROFILER = None
+
+    def _profile_stop():
+        profiler = _PROFILER
+        if profiler is None:
+            return
+        try:
+            import pstats
+            profiler.disable()
+            with open(os.path.join(_base_dir(), "e2e-profile.txt"),
+                      "w", encoding="utf-8") as fh:
+                stats = pstats.Stats(profiler, stream=fh)
+                stats.sort_stats("cumulative").print_stats(60)
+            with open(os.path.join(_base_dir(), "e2e-profile-callers.txt"),
+                      "w", encoding="utf-8") as fh:
+                stats = pstats.Stats(profiler, stream=fh)
+                for name in ("apply_winner", "pending_operations",
+                             "operation_count", "_recompute_sync",
+                             "_evolved_status", "_evolved_pending",
+                             "_evolved_after_review_event", "refresh",
+                             "hydrate"):
+                    try:
+                        stats.print_callers(name)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def _on_profile_loaded():
+        global _PROFILER
+        if os.environ.get("ANKISCAPE_E2E_PROFILE") and _PROFILER is None:
+            try:
+                import cProfile
+                _PROFILER = cProfile.Profile()
+                _PROFILER.enable()
+            except Exception:
+                _PROFILER = None
         try:
             import faulthandler
             fh = open(os.path.join(_base_dir(), "e2e-faulthandler.log"),
@@ -4357,6 +4475,9 @@ try:
             # Short timeout: a healthy phase always finishes or quits first
             # (cancelled in _quit), so any dump here is a real wedge.
             faulthandler.dump_traceback_later(45, file=fh)
+            # Fatal-signal stack (SIGSEGV/SIGABRT during Qt teardown) never
+            # reaches the watchdog dump; send it to the captured stderr.
+            faulthandler.enable()
         except Exception:
             pass
         from aqt.qt import QTimer

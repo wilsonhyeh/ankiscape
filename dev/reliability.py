@@ -1255,7 +1255,8 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
     extra_names = []
     prefix = f"{scenario_id + '-' if scenario_id else ''}{journey}"
     for src_name, suffix in (("e2e-heartbeat.json", "heartbeat.json"),
-                             ("e2e-fatal.txt", "fatal.txt")):
+                             ("e2e-fatal.txt", "fatal.txt"),
+                             ("relaunch.json", "relaunch.json")):
         src = os.path.join(base, src_name)
         dest_name = f"{prefix}-{suffix}"
         if os.path.isfile(src):
@@ -1264,6 +1265,14 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
                 extra_names.append(dest_name)
             except OSError:
                 pass
+    # A multi-phase journey that fails its first phase never writes final
+    # assertions; without the relaunch request the failing step's counts
+    # vanished from the evidence. Surface them on the journey entry.
+    relaunch = {}
+    try:
+        relaunch = load_json(os.path.join(base, "relaunch.json")) or {}
+    except (OSError, ValueError):
+        relaunch = {}
     log_src = os.path.join(base, "anki-stdout.log")
     tail_name = f"{prefix}-anki-stdout-tail.log"
     if os.path.isfile(log_src) and _copy_log_tail(
@@ -1278,6 +1287,12 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
              "screenshots": [os.path.join(out_dir, n) for n in shot_names],
              "files": _scenario_files(out_dir, shot_names + extra_names),
              "runtime": runtime}
+    if relaunch.get("ok") is False:
+        entry["relaunch_failed"] = [
+            {"name": str(s.get("name")), "detail": str(s.get("detail", ""))[:200]}
+            for s in relaunch.get("failed_details") or []
+            if isinstance(s, dict)
+        ]
     return entry
 
 

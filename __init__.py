@@ -2085,7 +2085,7 @@ def _evolved_pending() -> int:
         engine = _EVOLVED_CTX.get("engine")
         if engine is None:
             return 0
-        return len(engine.journal.pending_operations(limit=1000))
+        return int(engine.journal.count_pending_operations())
     except Exception:
         return 0
 
