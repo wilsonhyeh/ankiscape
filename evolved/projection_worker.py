@@ -19,7 +19,6 @@ Contract:
 from __future__ import annotations
 
 import os
-import sys
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
@@ -129,16 +128,7 @@ class ProjectionWorker:
         with self._lock:
             self._status["busy"] = True
         try:
-            # A full 100k replay is CPU-bound Python. Yield the GIL more
-            # often while it runs so the Qt main thread stays schedulable
-            # inside the event-loop stall budget; restore on exit.
-            previous_interval = sys.getswitchinterval()
-            if previous_interval > 0.002:
-                sys.setswitchinterval(0.002)
-            try:
-                checkpoint = self._build(journal)
-            finally:
-                sys.setswitchinterval(previous_interval)
+            checkpoint = self._build(journal)
             now = time.monotonic()
             wait = self._last_publish + self._publish_interval - now
             if wait > 0:
