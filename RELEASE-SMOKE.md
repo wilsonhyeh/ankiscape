@@ -229,15 +229,16 @@ access or real inbox are marked BLOCKED/PENDING and must not be read as done.
 | Ten-second first-pending scheduling, single-flight coalescing, permanent-state pause, rate-limit deadline | PASS (local) | `tests/test_scheduler.py` |
 | Public browsing logged out; five labeled demos; allowlisted responses; test/legacy rows never leak | PASS (unit/fixture) | `tests/test_account_journey_fixture.py`; `0005_public_board.test.sql` written, CI-run pending |
 | Five public demos generated, deterministic, every-skill coverage, reproducible tie | PASS (local) | `dev/demo_traces.py --write-fixture`; `tests/test_demo_traces.py`; `tests/test_fixture_plans.py` |
-| Hosted migrations 0008/0009 + `account-status` function deploy | BLOCKED — authorization | hosted runbook in the repair plan |
-| Hosted public-demo apply + verify (retiring the surplus 24) | BLOCKED — authorization | `dev/demo_players.py --hosted --plan/--apply/--verify` |
+| Hosted migrations 0008/0009 + `account-status`/`username-login` deploy | PASS (2026-09-13) | `supabase db push` applied both; functions deployed; HMAC secret set; live probes return new/taken/invalid correctly |
+| Hosted public-demo apply + verify (retiring the surplus 24) | PASS (2026-09-13) | `demo_players --hosted` plan/apply/verify: 5 demos seeded, 24 hosted-v1 fixtures retired, rerun idempotent, verify PASS (5 demos, 6 skills) |
+| Production public board shows five labeled demos | PASS (2026-09-13) | anon `hiscores` returns 5 demo rows with allowlisted keys; `ui-test-leaderboard` PASS on 26.08.1 |
 | Packaged `ui-account-lifecycle` native journey | PASS on 26.08.1 and 23.10.1 (Qt6 macOS); other five targets PENDING | 23 steps/0 failures on artifact `da9600cf03…`; `dev/account_journey_e2e.py --require-all-targets` in CI |
 | Public browsing against production (rows load, legacy fixtures absent) | PASS | `ui-test-leaderboard` steps 1–7 on 26.08.1; demo-label step pending hosted apply |
 | Local backend suite + account-contracts e2e + demo verify | BLOCKED — Docker Desktop VM read-only wedge on this Mac (containerd metadata fs read-only) | rerun after Docker disk repair |
 | Real-inbox signup/recovery/resend (Wilson) | BLOCKED — human only; no agent sends email | `docs/account-repair/FINDINGS.md` |
 | 71 preserved pending reviews safe and drainable | CONFIRMED locally (read-only + SQLite backup) | `artifacts/account-repair/baseline.json` |
 
-Local build gates run on this change: `run_tests.py` (509 tests), package
+Local build gates run on this change: `run_tests.py` (511 tests), package
 build + `--check` (171 members, prod endpoint baked, sha256 `da9600cf03…`),
 `audit_assets.py --check` (100 assets). No hosted user was created, modified
 or deleted; no email was sent.
