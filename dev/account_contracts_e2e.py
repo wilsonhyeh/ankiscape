@@ -269,7 +269,7 @@ def _deletion_contract_checks(*, anon, service, endpoint, check, stamp,
                                      f"rk-delete-{stamp}"))
         _svc(game, journal, transport, memory).force_sync()
         checkpoint = _service(service, "POST", "/rest/v1/game_checkpoints",
-                              {"game_uuid": game, "revision": 1, "state": {}})
+                              {"game_uuid": game, "revision": 999, "state": {}})
         audit = _service(service, "POST", "/rest/v1/moderation_audit",
                          {"target_user_id": user_id, "action": "note",
                           "reason": "e2e-delete"})
