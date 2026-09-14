@@ -46,6 +46,13 @@ seed = _load("ankiscape_seed_hosted", os.path.join(ROOT, "dev",
 
 
 def main(argv=None) -> int:
+    print("hosted_fixture_e2e: RETIRED — the hosted-v1 24-account suite is "
+          "gone. Use dev/demo_players.py --hosted --verify (public demo "
+          "players) instead.", file=sys.stderr)
+    return 2
+
+
+def _legacy_main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="hosted_fixture_e2e.py")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--local", action="store_true")

@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-JOURNAL_SCHEMA_VERSION = 2
+JOURNAL_SCHEMA_VERSION = 3
 SYNC_POINTER_MAX_BYTES = 8 * 1024
 # Interactive accepted-answer writes must never sit behind a long lock: 25 ms
 # busy budget, then fail fast so the caller can show recovery instead of
@@ -82,6 +82,27 @@ CREATE TABLE IF NOT EXISTS known_review_keys (
 );
 """
 
+# v3: rejected operations leave the outbox but are counted separately so the
+# UI can say "N changes couldn't sync" instead of pretending everything is
+# synced or showing them as still pending.
+_SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS rejected_operations (
+  op_id TEXT PRIMARY KEY,
+  reason TEXT NOT NULL DEFAULT '',
+  rejected_at INTEGER NOT NULL
+);
+"""
+
+
+class JournalProtocolError(Exception):
+    """A remote page violated the sync protocol. Nothing from that page is
+    committed and the server cursor does not advance."""
+
+    def __init__(self, code: str, detail: str = ""):
+        super().__init__(code)
+        self.code = str(code)[:80]
+        self.detail = str(detail)[:200]
+
 
 def canonical_json(obj: Any) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -109,6 +130,7 @@ class Journal:
         fresh = cur.fetchone() is None
         self._conn.executescript(_SCHEMA_V1)
         self._conn.executescript(_SCHEMA_V2)
+        self._conn.executescript(_SCHEMA_V3)
         row = self._conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
         if row is None:
             self._conn.execute("INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
@@ -146,6 +168,8 @@ class Journal:
                         " VALUES(?,?,?,?,?,?)",
                         (str(key), int(row["lamport"]), str(row["device_id"]),
                          int(row["device_seq"]), str(row["op_id"]), now))
+        if from_v < 3:
+            self._conn.executescript(_SCHEMA_V3)
         self._conn.execute("UPDATE metadata SET value=? WHERE key='schema_version'",
                            (str(JOURNAL_SCHEMA_VERSION),))
 
@@ -544,13 +568,190 @@ class Journal:
                 " updated_at=excluded.updated_at",
                 (game_uuid, str(cursor), int(time.time())))
 
-    def quarantine(self, game_uuid: str, op_ids: List[str]) -> None:
+    def quarantine(self, game_uuid: str, op_ids: List[str],
+                   reason: str = "") -> None:
         # Permanent invalid ops leave the outbox but stay in operations for
-        # diagnostics; they are never retried forever.
+        # diagnostics; they are never retried forever. They are counted in
+        # rejected_operations so "all synced" stays truthful.
         _ = game_uuid
+        now = int(time.time())
         with self._lock:
-            for oid in op_ids:
-                self._conn.execute("DELETE FROM outbox WHERE op_id=?", (oid,))
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                for oid in op_ids:
+                    self._conn.execute(
+                        "INSERT INTO rejected_operations(op_id, reason,"
+                        " rejected_at) VALUES(?,?,?)"
+                        " ON CONFLICT(op_id) DO UPDATE SET"
+                        " reason=excluded.reason, rejected_at=excluded.rejected_at",
+                        (str(oid), str(reason)[:120], now))
+                    self._conn.execute("DELETE FROM outbox WHERE op_id=?", (oid,))
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def count_rejected_operations(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM rejected_operations").fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    def ingest_remote_page(self, game_uuid: str, page: Any, *,
+                           cursor: str = "") -> Dict[str, Any]:
+        """Persist one downloaded page and its cursor in ONE transaction.
+
+        Validates every row before committing anything: game/operation ids,
+        sequence/lamport shapes, payload type and payload hashes. Exact
+        duplicates are idempotent no-ops. An id reuse with changed content, a
+        malformed row or a non-advancing cursor with more pages raises
+        JournalProtocolError and commits NOTHING (the cursor must not move).
+        Remote rows never enter the upload outbox.
+
+        `page` may be either the transport dict
+        {"operations": [...], "next_cursor": ..., "has_more": ...} or an
+        explicit operations list. `cursor` overrides the page's next cursor
+        when provided.
+        """
+        if isinstance(page, dict):
+            raw_ops = page.get("operations", [])
+            next_cursor = cursor or str(page.get("next_cursor", "") or "")
+            has_more = bool(page.get("has_more"))
+        else:
+            raw_ops = page or []
+            next_cursor = str(cursor or "")
+            has_more = False
+        if not isinstance(raw_ops, list):
+            raise JournalProtocolError("malformed_page", "operations not a list")
+
+        prepared: List[Dict[str, Any]] = []
+        for index, row in enumerate(raw_ops):
+            if not isinstance(row, dict):
+                raise JournalProtocolError("malformed_row", f"row {index}")
+            op_id = str(row.get("op_id", "") or "")
+            kind = str(row.get("kind", "") or "")
+            payload = row.get("payload")
+            if not op_id or len(op_id) > 64:
+                raise JournalProtocolError("malformed_row", f"op_id row {index}")
+            if not kind or len(kind) > 40:
+                raise JournalProtocolError("malformed_row", f"kind row {index}")
+            if not isinstance(payload, dict):
+                raise JournalProtocolError("malformed_row",
+                                           f"payload row {index}")
+            row_game = str(row.get("game_uuid", "") or game_uuid)
+            if row_game != str(game_uuid):
+                raise JournalProtocolError("foreign_game", f"row {index}")
+            try:
+                device_seq = int(row.get("device_seq", 0) or 0)
+                lamport = int(row.get("lamport", 0) or 0)
+            except (TypeError, ValueError):
+                raise JournalProtocolError("malformed_row",
+                                           f"sequence row {index}")
+            if device_seq < 0 or lamport < 0:
+                raise JournalProtocolError("malformed_row",
+                                           f"negative sequence row {index}")
+            prepared.append({
+                "op_id": op_id, "game_uuid": str(game_uuid),
+                "device_id": str(row.get("device_id", "remote") or "remote"),
+                "device_seq": device_seq, "lamport": lamport, "kind": kind,
+                "payload": payload, "payload_hash": payload_hash(payload)})
+
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                stored = 0
+                duplicates = 0
+                for op in prepared:
+                    existing = self._conn.execute(
+                        "SELECT payload_hash FROM operations WHERE op_id=?",
+                        (op["op_id"],)).fetchone()
+                    if existing is not None:
+                        if existing["payload_hash"] == op["payload_hash"]:
+                            duplicates += 1
+                            continue
+                        raise JournalProtocolError("id_conflict", op["op_id"])
+                    try:
+                        self._conn.execute(
+                            "INSERT INTO operations(op_id, game_uuid, device_id,"
+                            " device_seq, lamport, kind, payload_json, payload_hash,"
+                            " created_at, acked) VALUES(?,?,?,?,?,?,?,?,?,1)",
+                            (op["op_id"], op["game_uuid"], op["device_id"],
+                             op["device_seq"], op["lamport"], op["kind"],
+                             canonical_json(op["payload"]).decode("utf-8"),
+                             op["payload_hash"], int(time.time())))
+                    except sqlite3.IntegrityError as exc:
+                        raise JournalProtocolError("sequence_conflict",
+                                                   str(exc)[:120])
+                    self._register_known_keys(op)
+                    stored += 1
+                if next_cursor:
+                    current = self._current_cursor_locked(game_uuid)
+                    try:
+                        new_value = int(next_cursor)
+                        old_value = int(current or 0)
+                    except (TypeError, ValueError):
+                        raise JournalProtocolError("malformed_cursor",
+                                                   str(next_cursor)[:60])
+                    if new_value < old_value:
+                        raise JournalProtocolError("cursor_regressed",
+                                                   f"{new_value} < {old_value}")
+                    if has_more and new_value <= old_value:
+                        raise JournalProtocolError("cursor_not_advanced",
+                                                   f"{new_value}")
+                    self._conn.execute(
+                        "INSERT INTO server_checkpoints(game_uuid, server_cursor,"
+                        " revision, updated_at) VALUES(?,?,0,?)"
+                        " ON CONFLICT(game_uuid) DO UPDATE SET"
+                        " server_cursor=excluded.server_cursor,"
+                        " updated_at=excluded.updated_at",
+                        (str(game_uuid), str(next_cursor), int(time.time())))
+                self._conn.execute("COMMIT")
+            except Exception:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        return {"stored": stored, "duplicates": duplicates,
+                "cursor": str(next_cursor or cursor or "")}
+
+    def _current_cursor_locked(self, game_uuid: str) -> str:
+        row = self._conn.execute(
+            "SELECT server_cursor FROM server_checkpoints WHERE game_uuid=?",
+            (game_uuid,)).fetchone()
+        return str(row["server_cursor"]) if row else ""
+
+    def set_sync_success(self, endpoint_project: str, ts: float) -> None:
+        """Persist the last successful pass per endpoint project so the status
+        survives restart without leaking credentials."""
+        import json as _json
+
+        try:
+            self.set_metadata("sync_last_success", _json.dumps({
+                "endpoint_project": str(endpoint_project or ""),
+                "last_success": float(ts)}))
+        except Exception:
+            pass
+
+    def get_sync_success(self, endpoint_project: str) -> Optional[float]:
+        import json as _json
+
+        try:
+            raw = self.get_metadata("sync_last_success")
+            if not raw:
+                return None
+            data = _json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        if str(data.get("endpoint_project", "")) != str(endpoint_project or ""):
+            return None
+        value = data.get("last_success")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def export_game(self, game_uuid: str) -> Dict[str, Any]:
         """Full operation + observation dump for Export Game Backup."""

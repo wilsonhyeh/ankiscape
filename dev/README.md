@@ -60,6 +60,10 @@ Journeys: `--journey fresh|upgrade|undo|catchup` (real-Anki Qt),
 installs the package, denies and records image network access, asserts every
 manifest asset decodes with visible alpha at real slot sizes, visits every
 tab, and re-checks after a restart with an unchanged installed tree).
+`--journey ui-account-lifecycle` drives the real account window (register,
+verify, link, review, drain, recovery, logged-out browsing) against a
+deterministic loopback fixture by default, or against the real local Auth
+stack + captured loopback OTP when `ANKISCAPE_ACCOUNT_JOURNEY_MODE=auth`.
 `python3 dev/account_contracts_e2e.py --local` runs the real account/service
 journey (ProfileSession + vault + real transport) against the local stack.
 
@@ -95,9 +99,9 @@ macOS double-click: `Launch AnkiScape.command` — production rehearsal picker
 | `mutation_gate.py` | Injects defects into temp copies; owning tests must fail |
 | `runtime_adapter.py` | Platform runtime resolution, owned-process policy, path normalization |
 | `fetch_runtimes.py` | Verified official runtime downloads (fails closed on unpinned targets) |
-| `fixture_traces.py` | Deterministic hosted fixture traces (24 players) |
-| `seed_hosted_fixtures.py` | Provision/seed/verify the permanent test cohort |
-| `hosted_fixture_e2e.py` | Hosted leaderboards, lookup, retry stability |
+| `demo_traces.py` | Deterministic traces for the five public demo players |
+| `demo_players.py` | Plan/apply/verify the five public demo players + retire surplus fixtures |
+| `account_journey_e2e.py` | Per-target account-journey records and `--require-all-targets` aggregation |
 | `ui_ux_verify.py` | Runs every UI scenario on a managed runtime |
 
 See `docs/RELIABILITY.md` for commands, prerequisites and triage.

@@ -399,7 +399,8 @@ class TestShellCopy(unittest.TestCase):
         self.assertIn("Server update required",
                       status_text({"logged_in": True,
                                    "last_error": "Server update required"}))
-        self.assertIn("pending", status_text({"logged_in": True, "pending": 2}))
+        self.assertIn("waiting to sync",
+                      status_text({"logged_in": True, "pending": 2}))
         self.assertIn("synced", status_text({"logged_in": True,
                                              "last_success": 1}))
 

@@ -118,7 +118,7 @@ class TestSyncJob(unittest.TestCase):
         self.assertIn("op-remote-1", self.journal.operation_ids())
         self.assertEqual(self.journal.get_server_cursor("game-sync-1"), "7")
 
-    def test_remote_id_conflict_quarantined_not_reuploaded(self):
+    def test_remote_id_conflict_is_protocol_error_and_keeps_cursor(self):
         mine = self._op("op-shared", 1)
         self.journal.append_operation(mine)
         poisoned = dict(self._op("op-shared", 9), device_id="dev-b",
@@ -128,21 +128,19 @@ class TestSyncJob(unittest.TestCase):
             return {"status": "ok", "operations": [poisoned],
                     "next_cursor": "1"}
 
-        seen = {}
-
-        def _upload(batch):
-            seen["batch"] = list(batch)
-            return {"status": "ok", "acked": [op["op_id"] for op in batch]}
-
         job = SyncJob(generation=7, game_uuid="game-sync-1", user_id="u1",
-                      journal=self.journal, upload=_upload,
+                      journal=self.journal, upload=self.net.upload,
                       download=_download, apply_remote=lambda page: None)
-        out = job.run_once(generation=7, user_id="u1")
-        self.assertTrue(out["ok"])
-        # Original payload preserved; poisoned op left the outbox (quarantined).
+        with self.assertRaises(Exception) as ctx:
+            job.run_once(generation=7, user_id="u1")
+        # A reused id with changed content is a typed protocol failure: the
+        # page commits nothing, the cursor does not advance, the local op is
+        # preserved and nothing is quarantined or silently skipped.
+        self.assertEqual(type(ctx.exception).__name__, "JournalProtocolError")
         self.assertEqual(self.journal.find_operation_payload("op-shared"),
                          {"review_key": "rk-op-shared"})
-        self.assertEqual(self.journal.pending_operations(), [])
+        self.assertEqual(len(self.journal.pending_operations()), 1)
+        self.assertEqual(self.journal.get_server_cursor("game-sync-1"), "")
 
     def test_wire_projection_never_ships_storage_columns(self):
         op = dict(self._op("op-wire", 3), payload_json='{"review_key": "rk-x"}',

@@ -976,20 +976,32 @@ def _evolved_selections() -> dict:
 def _evolved_status() -> dict:
     sess = _evolved_profile_session()
     svc = _EVOLVED_CTX.get("sync_service")
+    logged_in = bool(sess is not None and sess.logged_in)
     status = {
-        "logged_in": bool(sess is not None and sess.logged_in),
+        "logged_in": logged_in,
         "pending": _evolved_pending(),
+        "rejected": 0,
         "last_success": None,
         "last_error": "",
         "updating": False,
+        "sync_state": "local_only",
+        "link_state": str(_EVOLVED_CTX.get("link_state", "") or ""),
+        "link_message": str(_EVOLVED_CTX.get("link_message", "") or ""),
     }
     try:
         if svc is not None:
-            status["last_success"] = svc.job.state.last_success
-            last_error = str(svc.job.state.last_error or "")
+            line = svc.status_line()
+            status["last_success"] = line.get("last_success")
+            status["rejected"] = int(line.get("rejected", 0) or 0)
+            last_error = str(line.get("last_error") or "")
             if "server_update_required" in last_error:
                 last_error = "Server update required"
             status["last_error"] = last_error
+            status["sync_state"] = str(line.get("state", "pending"))
+        if not logged_in:
+            status["sync_state"] = "local_only"
+        elif not status["link_state"]:
+            status["link_state"] = "linking"
     except Exception:
         pass
     try:
@@ -1750,7 +1762,8 @@ def _evolved_lookup_async(username: str, skill: str, on_done,
         try:
             return query_public_profile(_post, endpoint, sess,
                                         username=username, skill=selected,
-                                        limit=50, cohort=cohort)
+                                        limit=50, cohort=cohort,
+                                        public=not cohort)
         except Exception as exc:
             return {"ok": False, "error": str(exc)[:200]}
 
@@ -1788,62 +1801,147 @@ def _evolved_lookup_async(username: str, skill: str, on_done,
         _deliver({"ok": False, "error": repr(exc)[:200]})
 
 
-def _evolved_register_dialog_flow() -> None:
-    """Create account -> email code -> linked-game result -> back to origin."""
+def _evolved_account_runner(work, deliver):
+    """Run account/sync work off the Qt thread; deliver on the main thread."""
+    taskman = getattr(mw, "taskman", None)
+    if taskman is not None:
+        try:
+            def _bg(value):
+                try:
+                    if hasattr(value, "result"):
+                        value = value.result()
+                except Exception as exc:
+                    value = exc
+                deliver(value)
+            taskman.run_in_background(work, _bg)
+            return
+        except Exception:
+            pass
     try:
-        from .evolved.ui import dialogs as _dlg
+        from .evolved.ui.account import default_runner
+        default_runner()(work, deliver)
+    except Exception:
+        try:
+            deliver(work())
+        except Exception as exc:
+            deliver(exc)
+
+
+def _evolved_account_context():
+    """One AccountContext for the one account window."""
+    try:
+        from .evolved.account_flow import AccountContext
         from .evolved import accounts as _accounts
         from .evolved.net import post_json as _post
         sess = _evolved_profile_session()
         endpoint = _evolved_endpoint()
         if sess is None or endpoint is None:
-            return
-        state = {"username": "", "email": ""}
+            return None
+        try:
+            rt = _runtime_mod.get_runtime()
+            generation = lambda: int(rt.generation or 0)
+        except Exception:
+            generation = lambda: 0
 
-        def _on_register(fields):
-            state["username"] = fields.get("username", "")
-            state["email"] = fields.get("email", "")
-            result = _accounts.register(_post, endpoint,
-                                        username=state["username"],
-                                        email=state["email"],
-                                        password=fields.get("password", ""))
-            if not result.ok:
-                return {"ok": False, "error": result.error}
-            return {"ok": True}
-
-        if not _dlg.show_register_dialog(
-                getattr(mw, "app", None) and mw or None, _on_register):
-            return
-
-        def _on_code(code):
-            result = _accounts.verify_code(_post, endpoint, email=state["email"],
-                                           code=code, kind="signup",
-                                           session=sess.session)
-            if not result.ok:
-                return {"ok": False, "error": result.error}
-            _EVOLVED_CTX["user_id"] = sess.user_id
+        def _on_remember(remember: bool) -> None:
             try:
-                svc = _evolved_sync_service()
-                if svc is not None:
-                    svc.maybe_sync(on_login=True)
+                sess.remember = bool(remember and sess.vault
+                                     and getattr(sess.vault, "available", False))
             except Exception:
                 pass
-            return {"ok": True}
 
-        result = _dlg.show_code_dialog(
-            getattr(mw, "app", None) and mw or None,
-            title="AnkiScape — Verify email",
-            object_name="ankiscape-verify-dialog", on_submit=_on_code)
-        if result:
-            try:
-                from aqt.utils import showInfo
-                showInfo("Email verified. Your progress can sync "
-                         "from Account & Sync.", parent=getattr(mw, "ankiscape_evolved_shell", None) or mw)
-            except Exception:
-                pass
-        _evolved_refresh_views()
+        return AccountContext(
+            post=_post, endpoint=endpoint, accounts=_accounts,
+            profile_session=sess, runner=_evolved_account_runner,
+            generation=generation, user_id=lambda: sess.user_id,
+            on_remember=_on_remember,
+            on_close=lambda result: _evolved_refresh_views(),
+            on_verified=lambda: _evolved_post_auth_coordinator("verified"),
+            on_password_updated=_evolved_show_password_updated,
+            on_reset_done=lambda: _evolved_post_auth_coordinator("reset"),
+        )
+    except Exception:
+        return None
+
+
+def _evolved_account_window(page: str = "login") -> dict:
+    """Open the single account window on the requested page."""
+    from .evolved.account_flow import AccountFlow
+    from .evolved.ui.account import open_account_window
+    ctx = _evolved_account_context()
+    if ctx is None:
+        return {"ok": False, "error": "Account service is not configured."}
+    flow = AccountFlow(ctx)
+    parent = getattr(mw, "ankiscape_evolved_shell", None) or mw
+    result = open_account_window(parent, flow, runner=ctx.runner,
+                                 start_page=page)
+    _evolved_refresh_views()
+    return result if isinstance(result, dict) else {"ok": False}
+
+
+def _evolved_show_password_updated() -> None:
+    """Nonmodal 'Password updated' notice; never blocks the event loop."""
+    try:
+        from aqt.utils import tooltip
+        tooltip("Password updated. Syncing your progress in the background.")
     except Exception:
         pass
+    try:
+        from .evolved.ui.shell import refresh_shell
+        if getattr(mw, "ankiscape_evolved_shell", None) is not None:
+            refresh_shell(mw)
+    except Exception:
+        pass
+
+
+def _evolved_post_auth_coordinator(reason: str = "login") -> None:
+    """The one post-auth path for signup verification, login, reset and
+    remembered-session restoration: verify the session, link the game with
+    the authoritative idempotent RPC, persist the local binding, then request
+    sync. Login success stays success even when linkage fails."""
+    try:
+        engine = _ensure_evolved_engine()
+        if engine is None:
+            return
+        game_uuid = engine.cfg.game_uuid
+        journal = engine.journal
+    except Exception:
+        return
+    _EVOLVED_CTX["link_state"] = "linking"
+    _EVOLVED_CTX["link_message"] = "Linking this game to your account\u2026"
+    _evolved_refresh_views()
+
+    def work():
+        from .evolved.net import post_json as _post
+        from .evolved.link import ensure_link, persist_binding
+        sess = _EVOLVED_CTX.get("profile_session")
+        endpoint = _evolved_endpoint()
+        if sess is None or endpoint is None or not sess.logged_in:
+            return {"state": "logged_out",
+                    "message": "Not signed in; progress is saved here."}
+        result = ensure_link(_post, endpoint, sess, game_uuid=game_uuid,
+                             refresh=lambda: sess.refresh_once())
+        if result.linked:
+            persist_binding(journal, result, game_uuid=game_uuid,
+                            user_id=sess.user_id or "",
+                            endpoint_project=endpoint.base_url)
+        return {"state": result.state, "message": result.message,
+                "linked": result.linked, "reason": reason}
+
+    def deliver(out):
+        out = out if isinstance(out, dict) else {"state": "service_error"}
+        _EVOLVED_CTX["link_state"] = str(out.get("state", "service_error"))
+        _EVOLVED_CTX["link_message"] = str(out.get("message", ""))
+        if out.get("linked"):
+            _evolved_request_sync(reason="link", immediate=True)
+        _evolved_refresh_views()
+
+    _evolved_account_runner(work, deliver)
+
+
+def _evolved_register_dialog_flow() -> None:
+    """Create-account entry point → the account window's registration page."""
+    _evolved_account_window("register")
 
 
 def _evolved_logout() -> dict:
@@ -1852,8 +1950,16 @@ def _evolved_logout() -> dict:
         if sess is not None:
             from .evolved import accounts as _accounts
             _accounts.logout(sess.session)
+        # Stop new network work; journal, binding and progress are preserved.
+        try:
+            _evolved_cancel_timer()
+        except Exception:
+            pass
         _EVOLVED_CTX["user_id"] = None
         _EVOLVED_CTX["sync_service"] = None
+        _EVOLVED_CTX["link_state"] = "logged_out"
+        _EVOLVED_CTX["link_message"] = ""
+        _EVOLVED_CTX["remote_ops_dirty"] = False
         _evolved_refresh_views()
         return {"ok": True}
     except Exception as exc:
@@ -2011,7 +2117,8 @@ def _evolved_sync_service():
     """SyncService for this profile+game (one per game; rebuilt on switch).
 
     Returns None when logged out or unconfigured — callers treat that as
-    offline, never as an error popup.
+    offline, never as an error popup. Last-success survives restart per
+    endpoint project (journal metadata; no credentials).
     """
     try:
         engine = _ensure_evolved_engine()
@@ -2029,24 +2136,179 @@ def _evolved_sync_service():
         cached = _EVOLVED_CTX.get("sync_service")
         if (cached is not None
                 and _EVOLVED_CTX.get("sync_service_game") == game_uuid
-                and _EVOLVED_CTX.get("sync_service_user") == sess.user_id):
+                and _EVOLVED_CTX.get("sync_service_user") == sess.user_id
+                and _EVOLVED_CTX.get("sync_service_endpoint") == endpoint.base_url):
             return cached
         journal = engine.journal
         cfg = ServiceConfig(endpoint=endpoint, game_uuid=game_uuid, post=_post)
         transport = make_transport(cfg, sess)
         rt = _runtime_mod.get_runtime()
         gen = int(rt.generation or 0)
+        try:
+            initial_last_success = journal.get_sync_success(endpoint.base_url)
+        except Exception:
+            initial_last_success = None
         svc = SyncService(
             generation=gen, game_uuid=game_uuid, journal=journal,
             transport=transport,
-            apply_remote=lambda page: _evolved_apply_remote(page),
-            get_user_id=lambda: (sess.user_id if sess.logged_in else None))
+            apply_remote=lambda page: _evolved_mark_remote(page),
+            get_user_id=lambda: (sess.user_id if sess.logged_in else None),
+            endpoint_project=endpoint.base_url,
+            initial_last_success=initial_last_success)
         _EVOLVED_CTX["sync_service"] = svc
         _EVOLVED_CTX["sync_service_game"] = game_uuid
         _EVOLVED_CTX["sync_service_user"] = sess.user_id
+        _EVOLVED_CTX["sync_service_endpoint"] = endpoint.base_url
         return svc
     except Exception:
         return None
+
+
+def _evolved_mark_remote(page) -> None:
+    """Thread-safe marker from the sync worker: journal persistence already
+    happened in one transaction; the UI refresh is delivered on the main
+    thread after the pass (never Qt from the worker)."""
+    try:
+        _EVOLVED_CTX["remote_ops_dirty"] = True
+    except Exception:
+        pass
+
+
+def _evolved_apply_remote_delivery() -> None:
+    """Main-thread publication after a sync pass that ingested remote ops."""
+    if not _EVOLVED_CTX.pop("remote_ops_dirty", False):
+        return
+    try:
+        engine = _EVOLVED_CTX.get("engine")
+        if engine is not None and hasattr(engine, "invalidate_projection"):
+            engine.invalidate_projection()
+        from .evolved.session_summary import note_remote
+        note_remote(_EVOLVED_CTX.get("session"),
+                    "Remote progress arrived in a separate update.")
+    except Exception:
+        pass
+    try:
+        from .evolved.ui.shell import refresh_shell
+        if getattr(mw, "ankiscape_evolved_shell", None) is not None:
+            refresh_shell(mw)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- scheduler
+_EVOLVED_SYNC_TIMER: dict = {"timer": None, "scheduler": None, "svc": None}
+
+
+def _evolved_arm_timer(delay_s: float, callback) -> None:
+    """Arm the single-shot sync timer on the main thread (Qt)."""
+    try:
+        from aqt.qt import QTimer
+        timer = _EVOLVED_SYNC_TIMER.get("timer")
+        if timer is not None:
+            try:
+                timer.stop()
+                timer.deleteLater()
+            except Exception:
+                pass
+        timer = QTimer(mw)
+        timer.setSingleShot(True)
+        timer.setInterval(max(0, int(float(delay_s) * 1000)))
+        timer.timeout.connect(callback)
+        _EVOLVED_SYNC_TIMER["timer"] = timer
+        timer.start()
+    except Exception:
+        pass
+
+
+def _evolved_cancel_timer() -> None:
+    timer = _EVOLVED_SYNC_TIMER.get("timer")
+    if timer is not None:
+        try:
+            timer.stop()
+        except Exception:
+            pass
+    _EVOLVED_SYNC_TIMER["timer"] = None
+
+
+def _evolved_scheduler():
+    """One scheduler per live service. None when logged out/unconfigured."""
+    svc = _evolved_sync_service()
+    if svc is None:
+        return None
+    cached = _EVOLVED_SYNC_TIMER.get("scheduler")
+    if cached is not None and _EVOLVED_SYNC_TIMER.get("svc") is svc:
+        return cached
+    from .evolved.scheduler import SyncScheduler
+
+    def _sync_runner(work, deliver):
+        def _wrapped(value):
+            try:
+                _evolved_after_sync(value)
+            except Exception:
+                pass
+            deliver(value)
+        _evolved_account_runner(work, _wrapped)
+
+    sched = SyncScheduler(svc, arm=_evolved_arm_timer,
+                          cancel_arm=_evolved_cancel_timer,
+                          run_async=_sync_runner)
+    _EVOLVED_SYNC_TIMER.update({"scheduler": sched, "svc": svc})
+    return sched
+
+
+def _evolved_note_pending_review(count: int = 1) -> None:
+    """A new locally-persisted operation: arm the 10-second maximum wait."""
+    try:
+        sched = _evolved_scheduler()
+        if sched is None:
+            return
+        svc = _EVOLVED_SYNC_TIMER.get("svc")
+        if svc is not None:
+            svc.note_reviews(count)
+        sched.note_pending()
+    except Exception:
+        pass
+
+
+def _evolved_request_sync(*, reason: str = "event",
+                          immediate: bool = True) -> None:
+    """Immediate sync request: link completion, remembered login, manual
+    Sync, leaderboard open."""
+    try:
+        sched = _evolved_scheduler()
+        if sched is None:
+            return
+        sched.request(reason=reason, immediate=immediate)
+    except Exception:
+        pass
+
+
+def _evolved_after_sync(result) -> None:
+    """Main-thread follow-up after one scheduler-driven pass."""
+    _evolved_apply_remote_delivery()
+    _evolved_refresh_views()
+
+
+def _evolved_manual_sync() -> dict:
+    """Manual Sync button: request immediate work; never block the UI thread
+    on networking."""
+    try:
+        if not _evolved_logged_in():
+            return {"ok": False, "error": "logged_out_no_network",
+                    "status": "logged_out"}
+        sched = _evolved_scheduler()
+        if sched is None:
+            return {"ok": False, "error": "sync_unconfigured"}
+        sched.request(reason="manual", immediate=True)
+        svc = _EVOLVED_SYNC_TIMER.get("svc")
+        pending = 0
+        try:
+            pending = svc.job.state.pending_count if svc else 0
+        except Exception:
+            pending = _evolved_pending()
+        return {"ok": True, "queued": True, "pending": pending}
+    except Exception as exc:
+        return {"ok": False, "error": repr(exc)[:200]}
 
 
 def _evolved_apply_remote(page) -> None:
@@ -2131,33 +2393,38 @@ def _evolved_query_hiscores(skill: str, limit: int = 50,
         from .evolved.net import post_json as _post
         sess = _EVOLVED_CTX.get("profile_session")
         endpoint = _evolved_endpoint()
-        if sess is None or not sess.logged_in or endpoint is None:
-            raise RuntimeError("offline — log in to sync and view hiscores")
-        return query_hiscores(_post, endpoint, sess, skill=skill, limit=limit,
-                              cohort=cohort)
+        if endpoint is None:
+            raise RuntimeError("sync is not configured in this build")
+        if cohort:
+            if sess is None or not sess.logged_in:
+                raise RuntimeError("log in to view the test leaderboard")
+            return query_hiscores(_post, endpoint, sess, skill=skill,
+                                  limit=limit, cohort=True)
+        # Public board: anonymous read with no bearer token, even signed in.
+        return query_hiscores(_post, endpoint, sess, skill=skill,
+                              limit=limit, public=True)
     except Exception as exc:
         raise RuntimeError(str(exc)[:200])
 
 
 def _evolved_account_dialog() -> None:
-    """Account button: login/logout/recovery entry (explicit user action)."""
+    """Account button: one account window for login; a signed-in click shows
+    status instead of silently signing the user out (logout is explicit in
+    Settings → Account)."""
     try:
-        from .evolved.ui import dialogs as _dlg
-        from .evolved import accounts as _accounts
-        from .evolved.net import post_json as _post
         sess = _evolved_profile_session()
-        endpoint = _evolved_endpoint()
-        if sess is None or endpoint is None:
+        if sess is None or _evolved_endpoint() is None:
             return
         if sess.logged_in:
-            _evolved_logout()
+            name = getattr(sess, "username", None) or "your account"
+            try:
+                from aqt.utils import tooltip
+                tooltip(f"Signed in as {name}. "
+                        "Log out from Settings \u2192 Account.")
+            except Exception:
+                pass
             return
-        _dlg.show_login_dialog(
-            getattr(mw, "app", None) and mw or None,
-            lambda fields: _evolved_login_submit(
-                fields, sess, endpoint, _accounts, _post),
-            on_recovery=_evolved_recovery_flow)
-        _evolved_refresh_views()
+        _evolved_account_window("login")
     except Exception:
         pass
 
@@ -2268,36 +2535,10 @@ def _evolved_diagnostics_payload() -> dict:
 
 
 def _evolved_recovery_flow():
-    from .evolved.ui.dialogs import show_recovery_dialog
-    from .evolved import accounts
-    from .evolved.net import post_json
-    sess, endpoint = _evolved_profile_session(), _evolved_endpoint()
-    if sess is None or endpoint is None:
-        return {"ok": False, "error": "Account service is not configured."}
-    def request(email):
-        result = accounts.request_recovery(post_json, endpoint, email=email)
-        return {"ok": result.ok, "error": result.error}
-    from .evolved.auth import MemorySession
-    recovery_session = MemorySession()
-    def confirm(fields):
-        if len(fields["new_password"]) < 6:
-            return {"ok": False, "error": "Use at least 6 characters for your new password."}
-        if not recovery_session.logged_in:
-            result = accounts.verify_code(post_json, endpoint, email=fields["email"],
-                code=fields["code"], kind="recovery", session=recovery_session)
-            if not result.ok:
-                return {"ok": False, "error": result.error}
-        result = accounts.set_new_password(post_json, endpoint,
-            access_token=recovery_session.access_token, new_password=fields["new_password"])
-        if result.ok:
-            sess.session.set(access_token=recovery_session.access_token,
-                refresh_token=recovery_session.refresh_token,
-                user_id=recovery_session.user_id, username=recovery_session.username)
-            _EVOLVED_CTX["user_id"] = sess.user_id
-        return {"ok": result.ok, "error": result.error}
-    result = show_recovery_dialog(getattr(mw, "ankiscape_evolved_shell", None) or mw, request, confirm)
-    _evolved_refresh_views()
-    return result
+    """Reset password entry point → the account window's recovery pages.
+    The window verifies into a temporary session, PUTs the password, installs
+    a live session, closes and only then links/syncs in the background."""
+    return _evolved_account_window("recovery_request")
 
 
 def _evolved_login_submit(fields, sess, endpoint, accounts_mod, post_fn) -> dict:
@@ -2626,6 +2867,37 @@ def _begin_runtime_with(requested: str, *, run_catchup: bool = True):
             debug_log(f"evolved: load catch-up failed: {exc!r}")
     except Exception:
         pass
+    _evolved_maybe_restore_session()
+
+
+def _evolved_maybe_restore_session() -> None:
+    """Remembered sign-in on profile load: run the one post-auth path once
+    per generation (link + persist binding + request sync)."""
+    try:
+        if not _RUNTIME_AVAILABLE:
+            return
+        rt = _runtime_mod.get_runtime()
+        gen = int(rt.generation or 0)
+        if not gen:
+            return
+        if _EVOLVED_CTX.get("restored_generation") == gen:
+            return
+        sess = _evolved_profile_session()
+        if sess is None or not sess.logged_in:
+            return
+        _EVOLVED_CTX["restored_generation"] = gen
+        _EVOLVED_CTX["link_state"] = "linking"
+        _EVOLVED_CTX["link_message"] = "Linking this game to your account\u2026"
+    except Exception:
+        return
+    try:
+        from aqt.qt import QTimer
+        QTimer.singleShot(1500,
+                          lambda: _evolved_post_auth_coordinator("restored"))
+        return
+    except Exception:
+        pass
+    _evolved_post_auth_coordinator("restored")
 
 
 def _evolved_reviewer_active() -> bool:
@@ -2718,6 +2990,7 @@ def _switch_mode_now(mode: str, *, open_onboarding: bool = False) -> dict:
                     run_catchup(col, engine, engine.journal, full=False)
             except Exception:
                 pass
+        _evolved_maybe_restore_session()
         try:
             from aqt.qt import QTimer
             QTimer.singleShot(0, lambda: _open_evolved_shell())
@@ -2806,13 +3079,8 @@ def _on_collection_sync_finished():
         if isinstance(result, dict) and result.get("made"):
             debug_log(f"evolved: catch-up +{result['made']} (after sync)")
             try:
-                svc = _evolved_sync_service()
-                if svc is not None:
-                    svc.note_reviews(int(result["made"]))
-                    if svc.due(on_anki_sync=True):
-                        import threading as _th
-                        _th.Thread(target=_evolved_background_sync,
-                                   args=(svc,), daemon=True).start()
+                _evolved_note_pending_review(int(result["made"]))
+                _evolved_request_sync(reason="anki_sync", immediate=True)
             except Exception as exc:
                 debug_log(f"evolved: post-sync sync failed: {exc!r}")
     except Exception as exc:
@@ -2820,19 +3088,10 @@ def _on_collection_sync_finished():
 
 
 def _evolved_background_sync(svc) -> None:
-    """Run one sync off the main thread; journal SQLite is serialized.
-
-    Contract: no collection/Qt objects cross into workers. The SyncJob only
-    touches the journal (thread-safe) and immutable HTTP payloads; the UI
-    re-reads status on next menu open / Hiscores refresh.
-    """
-    try:
-        rt = _runtime_mod.get_runtime()
-        gen = int(rt.generation or 0)
-        user = svc.job.user_id
-        svc.job.run_once(generation=gen or svc.job.generation, user_id=user)
-    except Exception as exc:
-        debug_log(f"evolved: background sync: {exc!r}")
+    """Compatibility shim: route background sync requests through the one
+    scheduler (single-flight, coalescing, off the UI thread)."""
+    _ = svc
+    _evolved_request_sync(reason="background", immediate=True)
 
 
 def _routing_on_profile_close():
@@ -2865,6 +3124,18 @@ def _routing_on_profile_close():
     _PENDING_REVIEWS.clear()
     _PENDING_POLLS["count"] = 0
     _RECOVERY_WARNING.update({"active": False, "message": "", "since": 0.0})
+    # Stop scheduling: a closed profile leaves no polling timer.
+    try:
+        _evolved_cancel_timer()
+    except Exception:
+        pass
+    try:
+        sched = _EVOLVED_SYNC_TIMER.get("scheduler")
+        if sched is not None:
+            sched.cancel()
+    except Exception:
+        pass
+    _EVOLVED_SYNC_TIMER.update({"timer": None, "scheduler": None, "svc": None})
     # Release Evolved widgets/HUD after generation invalidation.
     try:
         from .evolved.ui.shell import release_shell
@@ -2902,10 +3173,13 @@ def _routing_on_profile_close():
                          "generation": 0, "user_id": None,
                          "profile_session": None, "sync_service": None,
                          "sync_service_game": None, "sync_service_user": None,
+                         "sync_service_endpoint": None,
                          "endpoint": None, "endpoint_dev": None,
                          "onboarding": None, "session": None,
                          "hiscores_cache": None, "preselect": None,
-                         "self_context": None})
+                         "self_context": None, "link_state": "",
+                         "link_message": "", "restored_generation": None,
+                         "remote_ops_dirty": False})
     try:
         from .evolved.ui.hud import HudOwner  # noqa: F401 (owner release point)
     except Exception:
@@ -3170,9 +3444,7 @@ def _evolved_record_outcome(engine, key: str, outcome: str, awarded: bool,
         pass
     if awarded:
         try:
-            svc = _EVOLVED_CTX.get("sync_service")
-            if svc is not None:
-                svc.note_reviews(1)
+            _evolved_note_pending_review(1)
         except Exception:
             pass
 

@@ -1,0 +1,44 @@
+# AnkiScape 3.0.0 — Evolved
+
+Same AnkiWeb listing (1808450369) as the 2.x Classic releases. One-time
+choice on first launch: **Try Evolved** or **Continue Classic**. Classic
+stays frozen; Evolved starts fresh at level 1 / 0 XP (no stat transfer, for
+hiscore fairness). Paths can be switched later in Settings → Advanced.
+
+## Added
+
+- **Evolved game**: six skills (Mining, Woodcutting, Smithing, Crafting,
+  Fishing, Cooking), materials, a read-only Bank, achievements, level-ups and
+  an anchored XP HUD, all driven by real card answers.
+- **Guided setup** that resumes after restarts until it is committed.
+- **Nonmodal game shell** with icon rail: Training, Skills, Bank,
+  Achievements, Hiscores, Settings, plus an offline Guide covering every
+  resource, recipe, XP formula and level.
+- **Server-authoritative hiscores** (optional account): one account links one
+  Evolved game; desktop progress merges through the journal/outbox; scores
+  are recomputed from stored operations.
+- **Mobile review catch-up**: reviews synced from AnkiMobile/AnkiDroid earn
+  catch-up rewards on desktop under the gathering preset.
+- **Offline art**: all item/skill/nav imagery ships inside the add-on; no
+  image requests while you play.
+- **Backups & recovery**: Export/Restore Game Backup, persistent write-failure
+  warning, and Undo/Redo retraction of rewards.
+- **Support**: Report a bug from the Guide with an allowlisted diagnostic
+  preview; GitHub issue templates.
+
+## Changed
+
+- Rewards are credited on accepted answers only; production pauses (zero
+  reward, review still observed) when materials run out or a level is lost.
+- XP retune: every eligible review earns XP; resource tiers scale it.
+- Remembered sign-in uses the OS credential vault when one is available,
+  otherwise session-only. Passwords are never stored.
+- Anki compatibility remains 23.10+ on Qt5/Qt6 (macOS/Linux/Windows).
+
+## Fixed
+
+- Sync/hiscores contract failures found after 2.x: array-mode Hiscores,
+  wrapper access-token delegation, player lookup, and rank handling.
+- Mined gems are written to the Bank (jewelry crafting reachable); cooking
+  obeys its level gate in every replay path.
+- Recovery warning clears after a successful pending write.

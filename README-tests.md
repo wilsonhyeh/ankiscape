@@ -58,5 +58,9 @@ python3 dev/mutation_gate.py --environment pure
 - Requirement-to-test mapping: `docs/TEST-MATRIX.md`.
 - Native journeys (all run on the packaged artifact): `ui-visual-polish`,
   `ui-deferred-rewards`, `ui-rebuild-review`, `ui-test-leaderboard`,
-  `ui-credential-fallback`, `ui-recovery`, `ui-profile-races`, `ui-report-bug`.
-- Hosted fixtures: `dev/seed_hosted_fixtures.py` + `dev/hosted_fixture_e2e.py`.
+  `ui-account-lifecycle`, `ui-credential-fallback`, `ui-recovery`,
+  `ui-profile-races`, `ui-report-bug`.
+- Public demos: `dev/demo_players.py` (plan/apply/verify). The old
+  hosted-v1 seeding tools refuse to run.
+- Account journeys: `dev/account_journey_e2e.py --local` writes a
+  per-target record; `--collect --require-all-targets` aggregates.

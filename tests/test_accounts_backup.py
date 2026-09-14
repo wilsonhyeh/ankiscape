@@ -35,11 +35,16 @@ class TestAccounts(unittest.TestCase):
                        email="w@example.com", password="correct horse 9")
         self.assertTrue(out.ok and out.needs_code)
 
-    def test_register_bad_input_generic(self):
+    def test_register_bad_input_typed(self):
         out = register(_ok({}), self.ep, username="ab", email="w@example.com",
                        password="x" * 300)
         self.assertFalse(out.ok)
-        self.assertEqual(out.error, "invalid username or password")
+        self.assertEqual(out.status, "invalid_username")
+        self.assertTrue(out.error)
+        weak = register(_ok({}), self.ep, username="wilson_hyeh",
+                        email="w@example.com", password="short")
+        self.assertFalse(weak.ok)
+        self.assertEqual(weak.status, "weak_password")
 
     def test_login_stores_memory_session_and_gates_verification(self):
         out = login_password(_ok({"access_token": "a", "refresh_token": "r",
@@ -55,11 +60,12 @@ class TestAccounts(unittest.TestCase):
                                       session=self.session)
         self.assertTrue(verified.ok and not verified.needs_code)
 
-    def test_login_wrong_credentials_generic(self):
+    def test_login_wrong_credentials_typed(self):
         out = login_password(_fail("unauthorized"), self.ep, email="w@example.com",
                              password="pw123456", session=self.session)
         self.assertFalse(out.ok)
-        self.assertEqual(out.error, "invalid username or password")
+        self.assertEqual(out.status, "invalid_credentials")
+        self.assertTrue(out.error)
         self.assertFalse(self.session.logged_in)
 
     def test_username_login_uses_edge(self):

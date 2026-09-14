@@ -27,8 +27,9 @@ Qt5/Qt6, macOS/Linux/Windows.
   history syncs to desktop, under your desktop gathering preset
   (Mining/Woodcutting/Fishing, default Mining; Settings -> preset).
 - A free account syncs one Evolved game across desktops (one account links
-  to one game; synced copies share it). All legitimate progress — including
-  play before registration, while logged out, or offline — uploads later.
+  to one game; the link is immutable in 3.0 and synced copies share it).
+  Progress uploads within about ten seconds of a new change while online;
+  play before registration, while logged out, or offline uploads later.
   Offline results are provisional until reconciliation; concurrent
   ingredient conflicts resolve to zero reward for the losing action (policy
   2), and reconciliation says so.
@@ -72,8 +73,9 @@ Qt5/Qt6, macOS/Linux/Windows.
 - Email is required for verification/recovery and is never shown on
   hiscores. Tokens/passwords never enter collection config, journals, or
   logs.
-- Hiscores (in-add-on, per-skill) show username + XP only. No friends,
-  clans, comparison UI, or public site.
+- Hiscores (in-add-on, per-skill) are browsable without an account: username
+  + XP only. Signing in adds your own score and live sync. Five permanent
+  sample players appear labeled "Demo". No friends, clans or public site.
 - Free-backend note: the sync backend runs on Supabase Free (pauses after
   a week idle; finite storage). At capacity the add-on stops online writes
   safely and keeps local pending operations — no paid upgrade, no

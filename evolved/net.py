@@ -7,7 +7,6 @@ with credentials. Bounded response reads + strict JSON shape checks.
 """
 from __future__ import annotations
 
-import io
 import json
 import urllib.error
 import urllib.parse
@@ -31,12 +30,16 @@ class Endpoint:
 
 class NetError(Exception):
     def __init__(self, kind: str, detail: str = "", status: int = 0,
-                 retry_after: Optional[int] = None):
+                 retry_after: Optional[int] = None, code: str = ""):
         super().__init__(f"{kind}: {detail}")
         self.kind = kind
         self.detail = detail
         self.status = status
         self.retry_after = retry_after
+        # Bounded machine-readable code parsed from a JSON error body, when
+        # present. Never rendered to users; callers classify against an
+        # allowlist and keep unknown values out of copy.
+        self.code = code
 
 
 def _check_url(endpoint: Endpoint, path: str) -> str:
@@ -105,12 +108,33 @@ def post_json(endpoint: Endpoint, path: str, payload: Dict[str, Any],
     return data
 
 
+def _extract_error_code(raw: bytes) -> str:
+    """Pull one allowlisted-shape code field from a JSON error body.
+
+    Returns a short lowercase token only; anything larger or non-string is
+    ignored so body text can never leak into user-visible copy or telemetry.
+    """
+    try:
+        data = json.loads(raw[:4096].decode("utf-8", "replace"))
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    for key in ("error_code", "code", "error", "error_description", "msg",
+                "message"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()[:120]
+    return ""
+
+
 def _map_http_error(exc: urllib.error.HTTPError) -> NetError:
     try:
         raw = exc.read(MAX_RESPONSE_BYTES)
     except Exception:
         raw = b""
     detail = raw[:500].decode("utf-8", "replace")
+    code = _extract_error_code(raw)
     retry_after = None
     try:
         ra = exc.headers.get("Retry-After") if exc.headers else None
@@ -120,7 +144,9 @@ def _map_http_error(exc: urllib.error.HTTPError) -> NetError:
     kinds = {400: "invalid", 401: "unauthorized", 403: "forbidden", 404: "not_found",
              409: "conflict", 422: "invalid", 429: "rate_limited"}
     if exc.code in kinds:
-        return NetError(kinds[exc.code], detail, status=exc.code, retry_after=retry_after)
+        return NetError(kinds[exc.code], detail, status=exc.code,
+                        retry_after=retry_after, code=code)
     if 500 <= exc.code < 600:
-        return NetError("server", detail, status=exc.code, retry_after=retry_after)
-    return NetError("http", detail, status=exc.code)
+        return NetError("server", detail, status=exc.code,
+                        retry_after=retry_after, code=code)
+    return NetError("http", detail, status=exc.code, code=code)

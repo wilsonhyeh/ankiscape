@@ -3359,10 +3359,9 @@ def _poll_ui_rebuild_review(state):
         return
 
 
-# Display names of the permanent hosted-v1 fixture cohort
-# (dev/fixtures/hosted-v1.json). Any of these appearing in non-cohort
-# standings is a public isolation failure.
-FIXTURE_NAMES = {
+# Retired hosted-v1 fixture display names (dev/fixtures/hosted-v1.json). Any
+# of these appearing in public standings is an isolation failure.
+LEGACY_FIXTURE_NAMES = {
     "WillowMere", "FlintHarbor", "Mosswarden", "RowanVale",
     "CopperFinch", "AlderTrail", "PebbleFox", "EmberBrook",
     "BirchRook", "HazelForge", "FernVoyager", "AshenPike",
@@ -3370,6 +3369,10 @@ FIXTURE_NAMES = {
     "QuietAnvil", "BrambleWren", "SilverNettle", "CedarTern",
     "RiverKestrel", "DawnThistle", "MistBadger", "DuskHeron",
 }
+
+# The five permanent public demo players (dev/fixtures/public-demo-v1.json).
+DEMO_NAMES = {"DemoWillow", "DemoFlint", "DemoMoss", "DemoRowan",
+              "DemoCopper"}
 
 
 def _logged_in_via_fixture(state):
@@ -3404,104 +3407,703 @@ def _logged_in_via_fixture(state):
 
 
 def _poll_ui_test_leaderboard(state):
-    """Real-hosted login + labeled Test leaderboard (trusted lanes)."""
+    """Public board browsing with demo labels and legacy isolation.
+
+    The old 24-name hosted test cohort is retired: the public board now
+    carries the five permanent demo players labeled "Demo". This journey
+    browses logged out through the real shell and asserts the labeled demo
+    rows and the absence of the retired hosted-v1 identities."""
     stage = state.get("stage", "setup")
     if stage == "setup":
         if _drive_onboarding(state, "mining") is not True:
             return
-        state["stage"] = "login"
+        state["stage"] = "open"
         return
-    if stage == "login":
-        result = _logged_in_via_fixture(state)
-        if result is None:
-            # Hosted coverage is required on this lane; missing credentials
-            # are a failure, never a silently different test.
-            _step("test_leaderboard_credentials", False,
-                  "missing fixture credentials (hosted coverage required)")
-            _finish(1)
-            return
-        ok, detail = result
-        if not ok:
-            _step("test_leaderboard_login", False, detail)
-            _finish(1)
-            return
-        _step("test_leaderboard_login", True, detail)
-        # Record once: a missing shell is open_hiscores' job, not a reason to
-        # sign in again on the next tick.
-        state["stage"] = "open_hiscores"
-        state["shell_wait_ticks"] = 0
+    if stage == "open":
+        _open_shell_via_menu()
+        state["stage"] = "rail"
+        state["wait_ticks"] = 0
         return
-    if stage == "open_hiscores":
+    if stage == "rail":
         shell = _find_shell()
         if shell is None:
-            # Sign-in happens while the reviewer is up; the shell must be
-            # re-opened (this fallback used to live in the login stage and
-            # was lost when duplicate logins were removed).
-            state["shell_wait_ticks"] = state.get("shell_wait_ticks", 0) + 1
-            if state["shell_wait_ticks"] % 30 == 1:
+            state["wait_ticks"] = state.get("wait_ticks", 0) + 1
+            if state["wait_ticks"] % 30 == 1:
                 _open_shell_via_menu()
-            if state["shell_wait_ticks"] > 300:
-                _step("hiscores_shell_open", False,
-                      f"shell not visible after {state['shell_wait_ticks']} ticks")
+            if state["wait_ticks"] > 300:
+                _step("test_leaderboard_shell_open", False, "shell never opened")
                 _finish(1)
             return
         if not _click_rail("hiscores"):
-            state["rail_wait_ticks"] = state.get("rail_wait_ticks", 0) + 1
-            if state["rail_wait_ticks"] > 300:
-                _step("hiscores_rail_click", False, "rail never activated")
-                _finish(1)
             return
         from aqt.qt import QApplication
         QApplication.processEvents()
-        state["stage"] = "toggle"
-        state["toggle_ticks"] = 0
+        state["stage"] = "wait_rows"
+        state["wait_ticks"] = 0
         return
-    if stage == "toggle":
-        state["toggle_ticks"] = state.get("toggle_ticks", 0) + 1
+    if stage == "wait_rows":
+        from aqt.qt import QApplication, QLabel, QListWidget, QWidget
         shell = _find_shell()
         if shell is None:
             return
-        from aqt.qt import QApplication, QCheckBox, QLabel, QListWidget
-        toggle = shell.findChild(QCheckBox, "ankiscape-hiscores-test-toggle")
-        if not state.get("toggle_visible_reported"):
-            state["toggle_visible_reported"] = True
-            _step("test_leaderboard_toggle_visible",
-                  toggle is not None and toggle.isVisible())
-        if toggle is None:
-            _finish(0 if not RESULT["errors"] else 1)
-            return
-        if not toggle.isChecked():
-            toggle.setChecked(True)
-            QApplication.processEvents()
-            # Reset the wait budget only when the check actually flips.
-            state["toggle_ticks"] = 0
-            return
         status = shell.findChild(QLabel, "ankiscape-hiscores-status")
         text = str(status.text()) if status is not None else ""
-        loading = (not text) or text.startswith("Loading")
-        if loading and state["toggle_ticks"] <= 300:
-            return  # allow the asynchronous hosted fetch to settle
         listing = shell.findChild(QListWidget, "ankiscape-hiscores-list")
         rows = [listing.item(i).text() for i in range(listing.count())] \
             if listing is not None else []
-        labeled = "Test leaderboard" in text
-        _step("test_leaderboard_labeled", labeled, text[:160])
-        rows_ok = bool(rows) and not any("Nothing to show" in r for r in rows)
-        _step("test_leaderboard_test_rows",
-              rows_ok and any(n in " ".join(rows) for n in FIXTURE_NAMES),
-              f"rows={len(rows)} first={rows[0][:80] if rows else ''}")
-        # Public (non-cohort) standings must exclude test names, while the
-        # labeled cohort view above includes them. Both run while signed in.
-        try:
-            import ankiscape
-            public = ankiscape._evolved_query_hiscores("mining", 100)
-            leaked = FIXTURE_NAMES & {str(r.get("username")) for r in public}
-            _step("test_leaderboard_public_isolated", not leaked,
-                  f"public_rows={len(public)} leaked={sorted(leaked)}")
-        except Exception as exc:
-            _step("test_leaderboard_public_isolated", False, repr(exc)[:160])
+        loading = (not text) or text.startswith("Loading")
+        if (loading or not rows) and state.get("wait_ticks", 0) <= 400:
+            state["wait_ticks"] = state.get("wait_ticks", 0) + 1
+            QApplication.processEvents()
+            return
+        cta = shell.findChild(QWidget, "ankiscape-hiscores-cta")
+        _step("test_leaderboard_public_browse",
+              (not text.startswith("Service problem")) and bool(rows)
+              and (cta is None or cta.isVisible()),
+              f"rows={len(rows)} status={text[:80]}")
+        demo_hits = sorted(n for n in DEMO_NAMES
+                           if any(n in row for row in rows))
+        labeled = any("[Demo]" in row for row in rows)
+        _step("test_leaderboard_labeled", bool(demo_hits) and labeled,
+              f"demos={demo_hits} labeled={labeled}")
+        leaked = sorted(n for n in LEGACY_FIXTURE_NAMES
+                        if any(n in row for row in rows))
+        _step("test_leaderboard_public_isolated", not leaked,
+              f"leaked={leaked}")
         _shot("ui-test-leaderboard")
         _finish(0 if not RESULT["errors"] else 1)
+
+
+_ACCOUNT_FAKE: dict = {"server": None, "port": 0, "submitted": [],
+                       "accepted": 0, "linked": False, "passwords": {},
+                       "users": {}}
+
+
+def _account_fake_reset(state):
+    """Start a loopback account/Auth fixture server for this journey.
+
+    This is a real HTTP server the shipped window talks to; only the backend
+    is a deterministic local fixture. It never touches the network beyond
+    loopback and never sends mail."""
+    import http.server
+    import json as _json
+    import threading
+    import uuid as _uuid
+
+    if _ACCOUNT_FAKE.get("server") is not None:
+        return _ACCOUNT_FAKE
+
+    users = {}
+    sessions = {}
+    token_counter = {"n": 0}
+
+    def _issue(user):
+        token_counter["n"] += 1
+        token = f"fixture-access-{token_counter['n']}"
+        sessions[token] = str(user.get("email", "")).lower()
+        return {"access_token": token, "refresh_token": f"fixture-refresh-{token_counter['n']}",
+                "user": user}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _send(self, status, payload):
+            raw = _json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _read(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
+            try:
+                return _json.loads(raw.decode("utf-8") or "{}")
+            except ValueError:
+                return {}
+
+        def do_POST(self):  # noqa: N802 (http.server API)
+            path = self.path.split("?")[0]
+            body = self._read()
+            session_payload = None
+            if path == "/functions/v1/account-status":
+                email = str(body.get("email", "")).lower()
+                user = users.get(email)
+                status = "new"
+                if user is not None:
+                    status = "confirmed" if user.get("confirmed_at") else "unconfirmed"
+                return self._send(200, {"email_status": status,
+                                        "username_available": True})
+            if path == "/auth/v1/signup":
+                email = str(body.get("email", "")).lower()
+                meta = (body.get("data") or {})
+                if email in users and users[email].get("confirmed_at"):
+                    return self._send(422, {"code": "user_already_exists"})
+                user = {"id": str(_uuid.uuid4()), "email": email,
+                        "user_metadata": meta, "confirmed_at": None}
+                users[email] = user
+                return self._send(200, {"user": user})
+            if path == "/auth/v1/verify":
+                email = str(body.get("email", "")).lower()
+                token = str(body.get("token", ""))
+                kind = str(body.get("type", ""))
+                expected = "246810" if kind == "recovery" else "123456"
+                if token != expected:
+                    return self._send(400, {"code": "otp_expired",
+                                            "message": "token expired"})
+                user = users.get(email)
+                if user is None:
+                    user = {"id": str(_uuid.uuid4()), "email": email,
+                            "user_metadata": {}, "confirmed_at": "2026-01-01T00:00:00Z"}
+                    users[email] = user
+                user["confirmed_at"] = "2026-01-01T00:00:00Z"
+                return self._send(200, _issue(user))
+            if path == "/auth/v1/token":
+                grant = str((self.path.split("grant_type=") + [""])[1])
+                if grant.startswith("refresh_token") and body.get("refresh_token"):
+                    email = next(iter(users), "")
+                    user = users.get(email, {"id": "u", "email": email,
+                                             "user_metadata": {},
+                                             "confirmed_at": "2026-01-01T00:00:00Z"})
+                    return self._send(200, _issue(user))
+                email = str(body.get("email", "")).lower()
+                user = users.get(email)
+                if user is None or not user.get("confirmed_at"):
+                    return self._send(400, {"code": "invalid_grant"})
+                if str(body.get("password", "")) != _ACCOUNT_FAKE["passwords"].get(email):
+                    return self._send(400, {"code": "invalid_grant"})
+                return self._send(200, _issue(user))
+            if path == "/auth/v1/recover":
+                return self._send(200, {})
+            if path == "/rest/v1/rpc/link_game":
+                _ACCOUNT_FAKE["linked"] = True
+                return self._send(200, {"game_uuid": body.get("p_game_uuid"),
+                                        "resumed": False})
+            if path == "/rest/v1/rpc/evolved_capabilities":
+                return self._send(200, {"protocol_version": 2,
+                                        "authoritative_scoring": True})
+            if path == "/rest/v1/rpc/fetch_operations":
+                return self._send(200, {"operations": [], "next_cursor": 0,
+                                        "revision": 1})
+            if path == "/rest/v1/rpc/submit_operations":
+                ops = body.get("p_ops") or []
+                ids = [str(op.get("op_id")) for op in ops]
+                _ACCOUNT_FAKE["submitted"].extend(ids)
+                _ACCOUNT_FAKE["accepted"] = len(ids)
+                return self._send(200, {"accepted": ids, "conflicts": [],
+                                        "applied": len(ids)})
+            if path == "/rest/v1/rpc/hiscores":
+                rows = [{"rank": 1, "username": state.get("username", "acct"),
+                         "xp": max(1, _ACCOUNT_FAKE.get("accepted", 0) * 1000000),
+                         "is_demo": False}]
+                rows.append({"rank": 2, "username": "DemoWillow",
+                             "xp": 5_000_000, "is_demo": True})
+                return self._send(200, rows)
+            if path == "/rest/v1/rpc/public_profile":
+                return self._send(404, {"code": "02000",
+                                        "message": "no_profile"})
+            return self._send(404, {"error": "not_found"})
+
+        def do_PUT(self):  # noqa: N802
+            body = self._read()
+            auth = str(self.headers.get("Authorization", ""))
+            token = auth.replace("Bearer ", "").strip()
+            email = sessions.get(token, "")
+            if email and body.get("password"):
+                _ACCOUNT_FAKE["passwords"][email] = str(body["password"])
+            return self._send(200, {})
+
+        def do_PATCH(self):  # noqa: N802
+            return self._send(200, {})
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    _ACCOUNT_FAKE.update({"server": server, "port": server.server_port,
+                          "submitted": [], "accepted": 0, "linked": False,
+                          "passwords": {}, "users": users})
+    state["account_fake_port"] = server.server_port
+    return _ACCOUNT_FAKE
+
+
+def _account_fake_stop():
+    server = _ACCOUNT_FAKE.get("server")
+    if server is not None:
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception:
+            pass
+    _ACCOUNT_FAKE.update({"server": None, "port": 0})
+
+
+def _account_window():
+    from aqt.qt import QApplication
+    widget = QApplication.activeModalWidget()
+    if widget is not None and widget.objectName() == "ankiscape-account-window":
+        return widget
+    for candidate in QApplication.topLevelWidgets():
+        if candidate.objectName() == "ankiscape-account-window" and candidate.isVisible():
+            return candidate
+    return None
+
+
+def _account_page(dlg):
+    try:
+        flow = getattr(dlg, "_account_flow", None)
+        return flow.page if flow is not None else ""
+    except Exception:
+        return ""
+
+
+def _account_page_widget(dlg):
+    try:
+        flow = getattr(dlg, "_account_flow", None)
+        pages = getattr(dlg, "_account_pages", {}) or {}
+        page = flow.page if flow is not None else ""
+        # Qt widget keys use hyphens for the recovery pages ("recovery_request"
+        # is the flow token; "recovery-request" is the widget key).
+        widget = pages.get(page)
+        return widget if widget is not None else pages.get(page.replace("_", "-"))
+    except Exception:
+        return None
+
+
+def _account_fill(dlg, values):
+    from aqt.qt import QLineEdit
+    page = _account_page_widget(dlg)
+    for name, value in values.items():
+        child = page.findChild(QLineEdit, name) if page is not None else None
+        if child is None:
+            child = dlg.findChild(QLineEdit, name)
+        if child is not None:
+            child.setText(str(value))
+
+
+def _account_diagnostic(dlg):
+    """Compact state for failure details: page, error text, busy flag."""
+    try:
+        flow = getattr(dlg, "_account_flow", None)
+        page = flow.page if flow is not None else "?"
+        busy = bool(getattr(flow, "busy", False))
+        error = ""
+        from aqt.qt import QLabel
+        label = dlg.findChild(QLabel, "ankiscape-account-error")
+        if label is not None:
+            error = str(label.text())[:120]
+        return f"page={page} busy={busy} error={error!r}"
+    except Exception as exc:
+        return f"diag_failed={exc!r}"
+
+
+def _account_click(dlg, name):
+    from aqt.qt import QPushButton
+    if name == "ankiscape-account-primary":
+        # Several pages share the primary object name; click the button that
+        # belongs to the CURRENT page (never the hidden login page's).
+        flow = getattr(dlg, "_account_flow", None)
+        primary = getattr(dlg, "_account_primary", {}) or {}
+        child = primary.get(flow.page if flow is not None else "")
+        if child is not None and child.isEnabled():
+            child.click()
+            return True
+        return False
+    page = _account_page_widget(dlg)
+    child = page.findChild(QPushButton, name) if page is not None else None
+    if child is None:
+        child = dlg.findChild(QPushButton, name)
+    if child is not None and child.isEnabled():
+        child.click()
+        return True
+    return False
+
+
+def _mailpit_code(email, kind):
+    """Fetch the captured local OTP; loopback only, never real email."""
+    import re
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                "http://127.0.0.1:55324/api/v1/messages", timeout=5) as resp:
+            messages = json.loads(resp.read().decode()).get("messages", [])
+    except Exception:
+        return ""
+    for message in reversed(messages):
+        recipients = [t.get("Address", "") for t in message.get("To", [])]
+        if not any(email.lower() == r.lower() for r in recipients):
+            continue
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:55324/api/v1/message/{message['ID']}",
+                    timeout=5) as resp:
+                body = json.loads(resp.read().decode()).get("Text", "")
+        except Exception:
+            continue
+        match = re.search(r"\b(\d{6})\b", body or "")
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _account_journey_mode():
+    return os.environ.get("ANKISCAPE_ACCOUNT_JOURNEY_MODE", "faults")
+
+
+def _poll_ui_account_lifecycle(state):
+    """Real account window over a deterministic local fixture (faults mode)
+    or the real local Auth stack + captured loopback OTP (auth mode)."""
+    import time as _t
+    stage = state.get("stage", "setup")
+    mode = _account_journey_mode()
+    state["mode"] = mode
+
+    if stage == "setup":
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        _seed_deck(state, count=4, prefix="ACCT")
+        from aqt import mw
+        try:
+            mw.col.set_config("ankiscape_evolved_current_skill", "mining")
+            mw.col.set_config("ankiscape_evolved_current_mining", "Rune essence")
+        except Exception:
+            pass
+        stamp = str(int(_t.time()))[-8:]
+        state["email"] = f"acct{stamp}@example.invalid"
+        state["username"] = f"acct{stamp}"
+        state["password"] = "correct horse 9"
+        state["new_password"] = "correct horse 10"
+        if mode == "faults":
+            fake = _account_fake_reset(state)
+            fake["passwords"][state["email"].lower()] = state["password"]
+            import ankiscape
+            from ankiscape.evolved.net import Endpoint
+            port = fake["port"]
+            ankiscape._evolved_endpoint = lambda: Endpoint(
+                base_url=f"http://127.0.0.1:{port}", project_key="fixture-anon",
+                allow_http_loopback=True)
+        state["stage"] = "open_register"
+        return
+
+    if stage == "open_register":
+        state["window_result"] = None
+        state["window_closed_at"] = 0.0
+        from aqt.qt import QTimer
+
+        def _open():
+            try:
+                import ankiscape
+                state["window_result"] = ankiscape._evolved_account_window(
+                    "register")
+                state["window_closed_at"] = _t.time()
+            except Exception as exc:
+                state["window_result"] = {"ok": False, "error": repr(exc)}
+        QTimer.singleShot(0, _open)
+        state["stage"] = "drive_register"
+        state["stage_ticks"] = 0
+        return
+
+    if stage == "drive_register":
+        dlg = _account_window()
+        if dlg is None:
+            if state.get("window_result") is None:
+                state["stage_ticks"] = state.get("stage_ticks", 0) + 1
+                return
+            _step("account_window_opened", False,
+                  f"closed early: {state.get('window_result')}")
+            _account_fake_stop()
+            _finish(1)
+            return
+        _step("account_window_opened", True, dlg.objectName())
+        from aqt.qt import QPushButton
+        primary = dlg.findChild(QPushButton, "ankiscape-account-primary")
+        page = _account_page(dlg)
+        _step("account_window_real_buttons",
+              page == "register" and primary is not None
+              and primary.isEnabled(), f"page={page}")
+        if page != "register":
+            state["stage"] = "abort"
+            return
+        _account_fill(dlg, {
+            "ankiscape-account-username": state["username"],
+            "ankiscape-account-email": state["email"],
+            "ankiscape-account-register-password": state["password"]})
+        _account_click(dlg, "ankiscape-account-primary")
+        state["stage"] = "await_verify_page"
+        state["stage_ticks"] = 0
+        return
+
+    if stage == "await_verify_page":
+        dlg = _account_window()
+        if dlg is None:
+            _step("registration_reached_verify", False,
+                  f"window closed: {state.get('window_result')}")
+            _account_fake_stop()
+            _finish(1)
+            return
+        page = _account_page(dlg)
+        if page == "verify":
+            _step("registration_reached_verify", True)
+            state["stage"] = "await_code"
+            state["code_ticks"] = 0
+            return
+        state["stage_ticks"] = state.get("stage_ticks", 0) + 1
+        if state["stage_ticks"] > 600:
+            _step("registration_reached_verify", False,
+                  _account_diagnostic(dlg))
+            _account_fake_stop()
+            _finish(1)
+        return
+
+    if stage == "await_code":
+        state["code_ticks"] = state.get("code_ticks", 0) + 1
+        code = "123456" if mode == "faults" else _mailpit_code(state["email"],
+                                                               "signup")
+        if not code:
+            if state["code_ticks"] > 900:
+                _step("signup_code_received", False,
+                      f"no local OTP for {state['email']}")
+                _account_fake_stop()
+                _finish(1)
+            return
+        _step("signup_code_received", True)
+        dlg = _account_window()
+        if dlg is None:
+            _step("verification_submitted", False, "window vanished")
+            _account_fake_stop()
+            _finish(1)
+            return
+        _account_fill(dlg, {"ankiscape-account-code": code})
+        _account_click(dlg, "ankiscape-account-primary")
+        state["stage"] = "await_close"
+        state["stage_ticks"] = 0
+        return
+
+    if stage == "await_close":
+        if _account_window() is not None:
+            state["stage_ticks"] = state.get("stage_ticks", 0) + 1
+            if state["stage_ticks"] > 400:
+                _step("verification_closed_window", False, "still open")
+                state["stage"] = "abort"
+            return
+        result = state.get("window_result") or {}
+        _step("verification_closed_window", bool(result.get("ok")),
+              str(result)[:160])
+        state["stage"] = "await_link"
+        state["stage_ticks"] = 0
+        return
+
+    if stage == "await_link":
+        import ankiscape
+        engine = ankiscape._EVOLVED_CTX.get("engine")
+        binding = None
+        try:
+            from ankiscape.evolved.link import read_binding
+            if engine is not None:
+                binding = read_binding(engine.journal)
+        except Exception:
+            binding = None
+        game_uuid = engine.cfg.game_uuid if engine is not None else ""
+        if binding and binding.get("game_uuid") == game_uuid:
+            _step("linkage_automatic", True,
+                  f"user={binding.get('user_id','')[:8]}")
+            state["stage"] = "review"
+            return
+        state["stage_ticks"] = state.get("stage_ticks", 0) + 1
+        if state["stage_ticks"] > 400:
+            _step("linkage_automatic", False,
+                  f"state={ankiscape._EVOLVED_CTX.get('link_state')} "
+                  f"binding={binding}")
+            _account_fake_stop()
+            _finish(1)
+        return
+
+    if stage == "review":
+        _open_reviewer(state, "ACCT")
+        if not _reviewer_settled():
+            return
+        if not _answer_until_awards(state, 1, deck="ACCT Deck",
+                                    what="account-lifecycle award"):
+            return
+        state["pending_since"] = _t.time()
+        state["stage"] = "await_drain"
+        state["drain_ticks"] = 0
+        return
+
+    if stage == "await_drain":
+        import ankiscape
+        engine = ankiscape._EVOLVED_CTX.get("engine")
+        pending = engine.journal.count_pending_operations() if engine else -1
+        if pending == 0 and _ACCOUNT_FAKE.get("accepted", 0) > 0 or (
+                mode == "auth" and pending == 0):
+            elapsed = _t.time() - float(state.get("pending_since", _t.time()))
+            _step("pending_drained", True, f"{elapsed:.1f}s")
+            _step("ten_second_schedule", elapsed <= 45.0,
+                  f"drain took {elapsed:.1f}s")
+            state["stage"] = "server_score"
+            return
+        state["drain_ticks"] = state.get("drain_ticks", 0) + 1
+        if state["drain_ticks"] > 600:
+            _step("pending_drained", False, f"pending={pending}")
+            _account_fake_stop()
+            _finish(1)
+        return
+
+    if stage == "server_score":
+        import ankiscape
+        try:
+            rows = ankiscape._evolved_query_hiscores("mining", 100)
+        except Exception as exc:
+            _step("public_board_reads", False, repr(exc)[:160])
+            rows = []
+        names = {str(r.get("username")) for r in rows}
+        own = str(state.get("username", ""))
+        if mode == "faults":
+            _step("server_score_matches",
+                  own in names and any(r.get("is_demo") for r in rows),
+                  f"rows={len(rows)} own={own in names}")
+        else:
+            _step("server_score_matches", own in names,
+                  f"rows={len(rows)} own={own in names}")
+        _step("demo_rows_labeled",
+              any(r.get("is_demo") for r in rows if r.get("username") == "DemoWillow")
+              or mode != "faults",  # auth mode: checked by demo verify
+              f"rows={len(rows)}")
+        state["stage"] = "recovery_open"
+        return
+
+    if stage == "recovery_open":
+        state["recovery_result"] = None
+        from aqt.qt import QTimer
+
+        def _open_recovery():
+            try:
+                import ankiscape
+                state["recovery_result"] = ankiscape._evolved_account_window(
+                    "recovery_request")
+            except Exception as exc:
+                state["recovery_result"] = {"ok": False, "error": repr(exc)}
+        QTimer.singleShot(0, _open_recovery)
+        state["stage"] = "drive_recovery"
+        state["stage_ticks"] = 0
+        return
+
+    if stage == "drive_recovery":
+        dlg = _account_window()
+        if dlg is None:
+            state["stage_ticks"] = state.get("stage_ticks", 0) + 1
+            return
+        if _account_page(dlg) != "recovery_request":
+            _step("recovery_request_page", False,
+                  f"page={_account_page(dlg)}")
+            state["stage"] = "abort"
+            return
+        _step("recovery_request_page", True)
+        _account_fill(dlg, {"ankiscape-account-email": state["email"]})
+        _account_click(dlg, "ankiscape-account-primary")
+        state["stage"] = "recovery_await_code"
+        state["code_ticks"] = 0
+        return
+
+    if stage == "recovery_await_code":
+        dlg = _account_window()
+        if dlg is None:
+            _step("recovery_code_received", False,
+                  f"closed: {state.get('recovery_result')}")
+            _account_fake_stop()
+            _finish(1)
+            return
+        if _account_page(dlg) != "recovery_confirm":
+            state["code_ticks"] = state.get("code_ticks", 0) + 1
+            if state["code_ticks"] > 400:
+                _step("recovery_code_received", False,
+                      _account_diagnostic(dlg))
+                state["stage"] = "abort"
+            return
+        code = "246810" if mode == "faults" else _mailpit_code(
+            state["email"], "recovery")
+        if not code:
+            state["code_ticks"] = state.get("code_ticks", 0) + 1
+            if state["code_ticks"] > 900:
+                _step("recovery_code_received", False, "no local OTP")
+                state["stage"] = "abort"
+            return
+        _step("recovery_code_received", True)
+        _account_fill(dlg, {"ankiscape-account-code": code,
+                            "ankiscape-account-new-password":
+                                state["new_password"]})
+        _account_click(dlg, "ankiscape-account-primary")
+        state["stage"] = "recovery_await_close"
+        state["stage_ticks"] = 0
+        return
+
+    if stage == "recovery_await_close":
+        if _account_window() is not None:
+            state["stage_ticks"] = state.get("stage_ticks", 0) + 1
+            if state["stage_ticks"] > 400:
+                _step("recovery_closed_window", False, "still open")
+                state["stage"] = "abort"
+            return
+        result = state.get("recovery_result") or {}
+        _step("recovery_closed_window",
+              bool(result.get("ok")) and bool(result.get("password_updated")),
+              str(result)[:160])
+        import ankiscape
+        from ankiscape.evolved import accounts as _accounts
+        from ankiscape.evolved.auth import MemorySession
+        from ankiscape.evolved.net import post_json as _post
+        endpoint = ankiscape._evolved_endpoint()
+        fresh = MemorySession()
+        login = _accounts.login_password(_post, endpoint,
+                                         email=state["email"],
+                                         password=state["new_password"],
+                                         session=fresh)
+        _step("new_password_works", bool(login.ok), login.status)
+        state["stage"] = "logged_out_browse"
+        return
+
+    if stage == "logged_out_browse":
+        import ankiscape
+        ankiscape._evolved_logout()
+        _open_shell_via_menu()
+        state["stage"] = "browse_hiscores"
+        state["browse_ticks"] = 0
+        return
+
+    if stage == "browse_hiscores":
+        shell = _find_shell()
+        if shell is None:
+            state["browse_ticks"] = state.get("browse_ticks", 0) + 1
+            if state["browse_ticks"] > 300:
+                _step("public_board_logged_out", False, "shell never opened")
+                _account_fake_stop()
+                _finish(1)
+            return
+        if not _click_rail("hiscores"):
+            return
+        from aqt.qt import QApplication, QLabel, QListWidget, QWidget
+        QApplication.processEvents()
+        cta = shell.findChild(QWidget, "ankiscape-hiscores-cta")
+        listing = shell.findChild(QListWidget, "ankiscape-hiscores-list")
+        rows = [listing.item(i).text() for i in range(listing.count())] \
+            if listing is not None else []
+        _step("public_board_logged_out",
+              cta is not None and cta.isVisible() and listing is not None,
+              f"rows={len(rows)}")
+        _step("demo_labels_visible",
+              any("Demo" in r for r in rows) or mode != "faults",
+              f"rows={len(rows)}")
+        _shot("ui-account-lifecycle-done")
+        import ankiscape  # noqa: F401 (identity for the closure above)
+        state["stage"] = "done"
+        _account_fake_stop()
+        _finish(0 if not RESULT["errors"] else 1)
+        return
+
+    if stage == "abort":
+        _account_fake_stop()
+        _finish(1)
 
 
 def _poll_ui_credential_fallback(state):
@@ -4418,6 +5020,7 @@ _PHASE_POLLS = {
     ("ui-deferred-rewards", 1): _poll_ui_deferred_rewards,
     ("ui-rebuild-review", 1): _poll_ui_rebuild_review,
     ("ui-test-leaderboard", 1): _poll_ui_test_leaderboard,
+    ("ui-account-lifecycle", 1): _poll_ui_account_lifecycle,
     ("ui-credential-fallback", 1): _poll_ui_credential_fallback,
     ("ui-recovery", 1): _poll_ui_recovery,
     ("ui-profile-races", 1): _poll_ui_profile_races,

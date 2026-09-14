@@ -1,0 +1,253 @@
+{
+  "display_names": [
+    "DemoWillow",
+    "DemoFlint",
+    "DemoMoss",
+    "DemoRowan",
+    "DemoCopper"
+  ],
+  "label": "Demo",
+  "manifest_digest": "d0985a5ef697affe39056e77a131aaad2875799e26fac502777af733aa0bbcd5",
+  "note": "Permanent public demo players. Deterministic legitimate operation histories replayed through the authoritative submission RPCs; no direct state edits. Reserved .example.invalid emails. No credentials or scores are stored in this file; expectations are derived by dev/demo_traces.py and checked by dev/demo_players.py.",
+  "players": {
+    "DemoCopper": {
+      "display": "DemoCopper",
+      "email": "democopper@public-demo.example.invalid",
+      "expected": {
+        "achievements": [
+          "first_catch",
+          "first_cook"
+        ],
+        "inventory": {
+          "Bronze bar": 1,
+          "Clay": 2,
+          "Cooked Shrimp": 5,
+          "Copper ore": 1,
+          "Rune essence": 1,
+          "Shrimp": 0,
+          "Soft clay": 1,
+          "Tin ore": 0,
+          "Tree": 3
+        },
+        "levels": {
+          "cooking": 1,
+          "crafting": 1,
+          "fishing": 2,
+          "mining": 2,
+          "smithing": 1,
+          "woodcutting": 1
+        },
+        "revision": 37,
+        "total_level": 8,
+        "xp_micro": {
+          "cooking": 74750000,
+          "crafting": 1000000,
+          "fishing": 90000000,
+          "mining": 96750000,
+          "smithing": 6200000,
+          "woodcutting": 75000000
+        }
+      },
+      "game_uuid": "50169e99-8bfb-5cd6-a32e-00c237dbf9fa",
+      "ops": 37,
+      "trace_hash": "0861ebf1283cc748114a66492fa6d61810bbc20253813977b0e9662cb47961d3",
+      "username_norm": "democopper"
+    },
+    "DemoFlint": {
+      "display": "DemoFlint",
+      "email": "demoflint@public-demo.example.invalid",
+      "expected": {
+        "achievements": [
+          "first_catch"
+        ],
+        "inventory": {
+          "Bronze bar": 1,
+          "Clay": 1,
+          "Copper ore": 2,
+          "Rune essence": 3,
+          "Shrimp": 3,
+          "Soft clay": 1,
+          "Tin ore": 1,
+          "Tree": 2
+        },
+        "levels": {
+          "cooking": 1,
+          "crafting": 1,
+          "fishing": 1,
+          "mining": 2,
+          "smithing": 1,
+          "woodcutting": 1
+        },
+        "revision": 41,
+        "total_level": 7,
+        "xp_micro": {
+          "cooking": 20000000,
+          "crafting": 1000000,
+          "fishing": 30000000,
+          "mining": 129843750,
+          "smithing": 6200000,
+          "woodcutting": 62500000
+        }
+      },
+      "game_uuid": "2a358c07-ed60-5831-9291-1d8109c94be7",
+      "ops": 41,
+      "trace_hash": "95e1b7f9da2d3fbe96d1464e4ac2aa37af26b05ff8ddf9939d9f6239b3647f4e",
+      "username_norm": "demoflint"
+    },
+    "DemoMoss": {
+      "display": "DemoMoss",
+      "email": "demomoss@public-demo.example.invalid",
+      "expected": {
+        "achievements": [
+          "first_catch"
+        ],
+        "inventory": {
+          "Bronze bar": 2,
+          "Clay": 3,
+          "Copper ore": 0,
+          "Rune essence": 5,
+          "Shrimp": 3,
+          "Soft clay": 2,
+          "Tin ore": 2,
+          "Tree": 2
+        },
+        "levels": {
+          "cooking": 1,
+          "crafting": 1,
+          "fishing": 1,
+          "mining": 3,
+          "smithing": 1,
+          "woodcutting": 1
+        },
+        "revision": 52,
+        "total_level": 8,
+        "xp_micro": {
+          "cooking": 20000000,
+          "crafting": 2000000,
+          "fishing": 37500000,
+          "mining": 182437500,
+          "smithing": 12400000,
+          "woodcutting": 50000000
+        }
+      },
+      "game_uuid": "301540cf-ad74-5cb5-b6ca-b2e28fdc54e8",
+      "ops": 52,
+      "trace_hash": "099559e319b7b4ddd6aa1dfbe7f53115c8e8abe6083cac04dae7dcfba9caad87",
+      "username_norm": "demomoss"
+    },
+    "DemoRowan": {
+      "display": "DemoRowan",
+      "email": "demorowan@public-demo.example.invalid",
+      "expected": {
+        "achievements": [
+          "first_catch",
+          "first_cook"
+        ],
+        "inventory": {
+          "Bronze bar": 6,
+          "Clay": 2,
+          "Cooked Shrimp": 1,
+          "Copper ore": 3,
+          "Pot": 1,
+          "Rune essence": 5,
+          "Shrimp": 0,
+          "Soft clay": 0,
+          "Tin ore": 0,
+          "Tree": 1,
+          "Unfired pot": 0
+        },
+        "levels": {
+          "cooking": 1,
+          "crafting": 1,
+          "fishing": 1,
+          "mining": 4,
+          "smithing": 1,
+          "woodcutting": 1
+        },
+        "revision": 50,
+        "total_level": 9,
+        "xp_micro": {
+          "cooking": 13000000,
+          "crafting": 14545000,
+          "fishing": 15000000,
+          "mining": 367250000,
+          "smithing": 37200000,
+          "woodcutting": 37500000
+        }
+      },
+      "game_uuid": "a0908d85-503a-56a1-bd7d-6771f7d2c5e7",
+      "ops": 50,
+      "trace_hash": "7b959611321a24f7ab06c929a712ae196ccdb09098f1ac14c32c9f3a665752be",
+      "username_norm": "demorowan"
+    },
+    "DemoWillow": {
+      "display": "DemoWillow",
+      "email": "demowillow@public-demo.example.invalid",
+      "expected": {
+        "achievements": [
+          "first_catch",
+          "first_cook"
+        ],
+        "inventory": {
+          "Bronze bar": 3,
+          "Clay": 2,
+          "Cooked Shrimp": 4,
+          "Copper ore": 0,
+          "Pot": 2,
+          "Rune essence": 4,
+          "Shrimp": 2,
+          "Soft clay": 2,
+          "Tin ore": 0,
+          "Tree": 7,
+          "Unfired pot": 0
+        },
+        "levels": {
+          "cooking": 1,
+          "crafting": 1,
+          "fishing": 1,
+          "mining": 3,
+          "smithing": 1,
+          "woodcutting": 3
+        },
+        "revision": 59,
+        "total_level": 10,
+        "xp_micro": {
+          "cooking": 55250000,
+          "crafting": 31090000,
+          "fishing": 72500000,
+          "mining": 204281250,
+          "smithing": 18600000,
+          "woodcutting": 181250000
+        }
+      },
+      "game_uuid": "4b3fd130-9be9-5a07-963a-4349a461be7e",
+      "ops": 59,
+      "trace_hash": "69165fb281a32a13b5c90080e8bafd20054d481cbf388e46be2c91862c071a60",
+      "username_norm": "demowillow"
+    }
+  },
+  "suite_id": "public-demo",
+  "suite_version": 1,
+  "tie": {
+    "pair": [
+      "DemoFlint",
+      "DemoMoss"
+    ],
+    "skill": "cooking"
+  },
+  "trace": {
+    "batch_size": 200,
+    "bounds": {
+      "abort_on_429_or_5xx_after": 3,
+      "max_concurrent_requests": 2,
+      "max_requests_per_second": 2,
+      "max_retries": 3,
+      "one_run_at_a_time": true,
+      "request_timeout_s": 30
+    },
+    "device_id": "demo-v1",
+    "max_ops_per_demo": 3000,
+    "max_total_ops": 15000,
+    "version": 1
+  }
+}

@@ -184,3 +184,60 @@ Local implementation for the reliability/support plan is recorded in
 
 Do not call the release ready while any required platform/scenario/manual
 prerequisite above remains missing.
+
+## 3.0.0 release preparation (2026-09-11, unreleased source)
+
+These rows apply to the current unreleased source, not to a published
+artifact. They are preparation evidence for the release-rehearsal plan.
+
+| Check | Result | Evidence |
+|---|---|---|
+| Upgrade 2.0.2-shape fixture -> Evolved (26.08.1) | PASS | `dev.py test --suite e2e --journey upgrade --anki 26.8.1 --qt 6` |
+| Upgrade 2.0.2-shape fixture -> Evolved (23.10.1) | PASS | same journey on 23.10 |
+| Deferred rewards persist before publish, worker equals reference | PASS | `ui-deferred-rewards` |
+| Late-retraction rebuild stays responsive, state equals reference | PASS | `ui-rebuild-review` |
+| Recovery warning shows on failed write and clears on finalized write | PASS | `ui-recovery` |
+| Offline art decodes, guide credits render, install unchanged | PASS | `ui-art` |
+| Bounded icon cache reuses decodes; rows stay bounded | PASS | `ui-visual-polish` |
+| Credential vault secure/session-only branches truthful | PASS | `ui-credential-fallback` |
+| Account contracts against local stack (secure + session-only) | PASS | `dev/account_contracts_e2e.py --local` |
+| Scoring parity + full backend suite + full mutation gate | PASS | local gates on 2026-09-11 |
+| Native responsiveness/endurance smoke (26.08.1) | PASS with budget warnings: lag p95 ~140 ms (limit 50 ms), reward p95 ~297 ms (limit 250 ms) | `dev/native_performance.py --profile smoke` |
+| Seven-target nightly on one candidate | PENDING | nightly workflow |
+| Release-verify rehearsal on a frozen candidate | PENDING | `release-verify.yml` |
+| Real-inbox delivery (Wilson) | BLOCKED | human |
+| AnkiMobile/AnkiDroid checklist | BLOCKED | human |
+| Artwork publication decision | BLOCKED | owner |
+
+Row results are from `3c2aac9`/`1e261f6` local runs. Native performance
+budgets are enforced at nightly/release; smoke reports them as warnings by
+design. Do not mark the release ready while any row is PENDING or BLOCKED.
+
+## Account, sync and public leaderboard repair (2026-09-13, unreleased source)
+
+Added after Wilson's production-playground report (second signup, 71 pending
+reviews, empty leaderboard, reset window). These rows cover the repair change
+only; earlier rows above are preserved as recorded. Rows that need hosted
+access or real inbox are marked BLOCKED/PENDING and must not be read as done.
+
+| Check | Result | Evidence |
+|---|---|---|
+| Typed account outcomes (duplicate email, unconfirmed resume, invalid/expired code, rate limit, offline) | PASS (local) | `tests/test_account_lifecycle.py`; pgTAP `0005_public_board.test.sql` written, CI-run pending |
+| One account window: real buttons, requests off the UI thread, stale callbacks discarded, reset success separate from vault/sync | PASS (local) | `tests/test_account_flow.py`; `ui-account-lifecycle` journey implemented |
+| Linkage happens automatically after verify/login/reset; binding stored locally without credentials | PASS (local) | `tests/test_link.py`; `tests/test_account_journey_fixture.py` (real HTTP) |
+| Durable page ingest: op + cursor one transaction, remote rows never echo to the outbox, explicit acks, no-progress backoff | PASS (local) | `tests/test_sync_durable.py`; `tests/test_sync.py` |
+| Ten-second first-pending scheduling, single-flight coalescing, permanent-state pause, rate-limit deadline | PASS (local) | `tests/test_scheduler.py` |
+| Public browsing logged out; five labeled demos; allowlisted responses; test/legacy rows never leak | PASS (unit/fixture) | `tests/test_account_journey_fixture.py`; `0005_public_board.test.sql` written, CI-run pending |
+| Five public demos generated, deterministic, every-skill coverage, reproducible tie | PASS (local) | `dev/demo_traces.py --write-fixture`; `tests/test_demo_traces.py`; `tests/test_fixture_plans.py` |
+| Hosted migrations 0008/0009 + `account-status` function deploy | BLOCKED — authorization | hosted runbook in the repair plan |
+| Hosted public-demo apply + verify (retiring the surplus 24) | BLOCKED — authorization | `dev/demo_players.py --hosted --plan/--apply/--verify` |
+| Packaged `ui-account-lifecycle` native journey | PASS on 26.08.1 and 23.10.1 (Qt6 macOS); other five targets PENDING | 23 steps/0 failures on artifact `da9600cf03…`; `dev/account_journey_e2e.py --require-all-targets` in CI |
+| Public browsing against production (rows load, legacy fixtures absent) | PASS | `ui-test-leaderboard` steps 1–7 on 26.08.1; demo-label step pending hosted apply |
+| Local backend suite + account-contracts e2e + demo verify | BLOCKED — Docker Desktop VM read-only wedge on this Mac (containerd metadata fs read-only) | rerun after Docker disk repair |
+| Real-inbox signup/recovery/resend (Wilson) | BLOCKED — human only; no agent sends email | `docs/account-repair/FINDINGS.md` |
+| 71 preserved pending reviews safe and drainable | CONFIRMED locally (read-only + SQLite backup) | `artifacts/account-repair/baseline.json` |
+
+Local build gates run on this change: `run_tests.py` (509 tests), package
+build + `--check` (171 members, prod endpoint baked, sha256 `da9600cf03…`),
+`audit_assets.py --check` (100 assets). No hosted user was created, modified
+or deleted; no email was sent.

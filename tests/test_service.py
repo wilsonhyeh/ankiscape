@@ -208,13 +208,13 @@ class TestSyncService(unittest.TestCase):
         self.assertTrue(out["ok"])
         ids = sorted(self.journal.operation_ids())
         self.assertEqual(ids, ["op-a-1", "op-b-1"])
-        # Download-first merge, then upload: the merged remote op is still
-        # unacknowledged locally, so it uploads too (server dedups by op_id;
-        # exact-retry returns the same acceptance). Convergence = both stored,
-        # both acked, nothing pending.
+        # Download-first merge: remote rows never enter the upload outbox, so
+        # only the local op is uploaded; convergence = both stored, remote
+        # already acknowledged, nothing pending.
         self.assertEqual(sorted(op["op_id"] for op in self.uploaded[0]),
-                         ["op-a-1", "op-b-1"])
+                         ["op-a-1"])
         self.assertEqual(self.journal.pending_operations(), [])
+        self.assertEqual(out["pending"], 0)
 
     def test_rate_limited_surfaces_backoff_pending_kept(self):
         self.journal.append_operation(_op("op-rl", 1))

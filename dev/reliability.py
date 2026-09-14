@@ -50,7 +50,8 @@ MAX_RUN_SECONDS = 48 * 3600
 # Native journeys run on every target lane (hosted login/leaderboard coverage
 # is required only on the current Qt6 target per OS; see the matrix).
 NEW_JOURNEYS = ("ui-deferred-rewards", "ui-rebuild-review", "ui-report-bug",
-                "ui-visual-polish", "ui-test-leaderboard", "ui-credential-fallback",
+                "ui-visual-polish", "ui-test-leaderboard",
+                "ui-account-lifecycle", "ui-credential-fallback",
                 "ui-profile-races", "ui-recovery")
 
 
@@ -1540,30 +1541,32 @@ def _run_endurance(ctx: Dict[str, Any], minutes: int, out_dir: str) -> Dict[str,
 
 
 def _run_hosted_fixtures(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
+    plan_file = os.path.join(ROOT, "artifacts", "account-repair",
+                             "demo-plan-hosted.json")
     steps = [
-        (["dev/seed_hosted_fixtures.py", "--hosted", "--plan"],
-         "hosted_fixture_plan", 600),
-        (["dev/seed_hosted_fixtures.py", "--hosted", "--apply"],
-         "hosted_fixture_apply_1", 1800),
-        (["dev/seed_hosted_fixtures.py", "--hosted", "--apply"],
-         "hosted_fixture_apply_2_idempotent", 1800),
-        (["dev/seed_hosted_fixtures.py", "--hosted", "--verify"],
-         "hosted_fixture_verify", 1800),
-        (["dev/hosted_fixture_e2e.py", "--hosted"],
-         "hosted_fixture_e2e", 1800),
+        (["dev/demo_players.py", "--hosted", "--plan"],
+         "public_demo_plan", 600),
+        (["dev/demo_players.py", "--hosted", "--apply",
+          "--plan-file", plan_file],
+         "public_demo_apply_1", 1800),
+        (["dev/demo_players.py", "--hosted", "--apply",
+          "--plan-file", plan_file],
+         "public_demo_apply_2_idempotent", 1800),
+        (["dev/demo_players.py", "--hosted", "--verify"],
+         "public_demo_verify", 1800),
     ]
     assertions = []
     files = []
     for argv, name, timeout in steps:
         command = [sys.executable, os.path.join(ROOT, argv[0])] + argv[1:]
-        log_name = f"hosted-fixtures-{name}.log"
+        log_name = f"public-demo-{name}.log"
         rc, _ = _run_command(command, os.path.join(out_dir, log_name),
                              env=ctx.get("env"), timeout=timeout)
         assertions.append({"name": name, "ok": rc == 0, "detail": f"exit {rc}"})
         files.append(log_name)
     ok = all(a["ok"] for a in assertions)
     return {"id": "hosted-fixtures", "status": "pass" if ok else "fail",
-            "command": "dev/seed_hosted_fixtures.py + dev/hosted_fixture_e2e.py",
+            "command": "dev/demo_players.py (plan/apply/verify)",
             "exit_status": 0 if ok else 1,
             "detail": "; ".join(f"{a['name']}:{a['detail']}" for a in assertions),
             "assertions": assertions, "counts": {},

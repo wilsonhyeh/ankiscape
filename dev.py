@@ -520,23 +520,23 @@ def cmd_user_journey(args, anki_bin: str, installed: str) -> int:
 
 
 def _print_fixture_account_steps(fixture: str) -> None:
-    """Show which permanent hosted fixture account to sign in as (never a
-    credential): the password derives from ANKISCAPE_FIXTURE_SECRET."""
+    """Show which public demo account to sign in as (never a credential):
+    the password derives from ANKISCAPE_FIXTURE_SECRET."""
     try:
         import importlib.util as _ilu
         spec = _ilu.spec_from_file_location(
-            "ankiscape_fixture_traces",
-            os.path.join(ROOT, "dev", "fixture_traces.py"))
+            "ankiscape_demo_traces",
+            os.path.join(ROOT, "dev", "demo_traces.py"))
         module = _ilu.module_from_spec(spec)
         spec.loader.exec_module(module)
-        suite = module.load_suite()
-        name = fixture or suite["display_names"][0]
-        print(f"dev:   0. Sign in with fixture account {name} "
+        names = list(module.DISPLAY_NAMES)
+        name = fixture or names[0]
+        print(f"dev:   0. Sign in with demo account {name} "
               f"({module.email_for(name)});")
         print("dev:      derive its password from ANKISCAPE_FIXTURE_SECRET "
-              "with dev/fixture_traces.password_for(secret, name).")
-        print("dev:      After sign-in, Hiscores shows the labeled Test "
-              "leaderboard toggle.")
+              "with dev/demo_players.py's password_for(secret, name).")
+        print("dev:      Demo players appear on the public Hiscores labeled "
+              "Demo.")
     except Exception as exc:
         print(f"dev:   fixture instructions unavailable: {exc!r}")
 
@@ -829,7 +829,8 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
                 "ui-onboarding", "ui-training", "ui-settings", "ui-review",
                 "ui-lifecycle", "ui-art", "ui-visual-polish",
                 "ui-deferred-rewards", "ui-rebuild-review",
-                "ui-test-leaderboard", "ui-credential-fallback",
+                "ui-test-leaderboard", "ui-account-lifecycle",
+                "ui-credential-fallback",
                 "ui-recovery", "ui-profile-races", "ui-report-bug",
                 "native-performance", "native-performance-control")
     if journey not in journeys:
@@ -1172,8 +1173,8 @@ def main(argv=None) -> int:
     p_launch.add_argument("--fresh", action="store_true",
                           help="wipe the scenario base first (verifies the wipe)")
     p_launch.add_argument("--fixture", default="",
-                          help="user-test fixture display name "
-                               "(default: first hosted-v1 account)")
+                          help="user-test demo display name "
+                               "(default: first public-demo account)")
     p_launch.add_argument("--no-anki", action="store_true")
     p_reset = sub.add_parser("reset")
     p_reset.add_argument("--scenario", required=True,
@@ -1193,7 +1194,7 @@ def main(argv=None) -> int:
                                  "ui-settings", "ui-review", "ui-lifecycle",
                                  "ui-art", "ui-visual-polish",
                                  "ui-deferred-rewards", "ui-rebuild-review",
-                                 "ui-test-leaderboard",
+                                 "ui-test-leaderboard", "ui-account-lifecycle",
                                  "ui-credential-fallback", "ui-recovery",
                                  "ui-profile-races", "ui-report-bug"))
     p_verify = sub.add_parser("verify")

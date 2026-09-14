@@ -61,6 +61,33 @@ against production without it.
   sort and limit; test profiles are indistinguishable from unknown names.
 - `test_hiscores`/`test_public_profile`/`self_context` are authenticated-only
   and authorize from the caller's own player row, never a client flag.
-- Seed/verify: `python3 dev/seed_hosted_fixtures.py --hosted --apply|--verify`
-  and `python3 dev/hosted_fixture_e2e.py --hosted` (see docs/RELIABILITY.md
-  for credentials and rate limits). Never delete registry-owned accounts.
+- Seed/verify: `python3 dev/demo_players.py --hosted --apply|--verify`
+  (see docs/RELIABILITY.md for credentials and rate limits). The old
+  hosted-v1 24-account suite is retired; `dev/seed_hosted_fixtures.py`
+  refuses to recreate it. Never delete registry-owned accounts.
+
+## Public demo board (migration 0009)
+
+- `public.players.is_demo` marks the five permanent public demo players
+  (DemoWillow, DemoFlint, DemoMoss, DemoRowan, DemoCopper). Privileged tooling
+  only, same guard pattern as `is_test`; never settable from client metadata
+  or ordinary RPCs.
+- Public `hiscores` returns exactly `{rank, username, xp, is_demo}` per row
+  and `public_profile` exactly `{username, is_demo, state:{xp}}`. No auth or
+  game UUIDs, inventory, checkpoints, counters or timestamps.
+- Visible membership = active real players plus published demos; temporary
+  test rows stay excluded; demos rank under the same rules (never pinned).
+- Apply/verify: `python3 dev/demo_players.py --local|--hosted
+  --plan|--apply --plan-file PATH|--verify`. Every hosted deletion requires
+  an exact fixture_registry/user/game/email match and stops on drift.
+
+## Account status (migration 0008)
+
+- `public.account_lifecycle_status(email, username)` is service-role only and
+  returns `{email_status: new|unconfirmed|confirmed, username_available}`;
+  it reads auth.users but exposes no ids, stored emails or metadata.
+  `public.account_status_consume` provides atomic fixed-window rate buckets
+  keyed by HMAC digests supplied by the `account-status` Edge Function.
+- Deploy: `supabase functions deploy account-status --no-verify-jwt` plus the
+  updated `username-login`; set `ACCOUNT_STATUS_HMAC_SECRET`. Neither function
+  creates accounts or sends mail.

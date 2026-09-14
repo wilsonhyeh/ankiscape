@@ -173,11 +173,21 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
         status = shell.call("get_status", default={}) or {}
         account_info = shell.call("get_account", default={}) or {}
         if account_info.get("logged_in"):
+            pending = int(status.get("pending", 0) or 0)
+            rejected = int(status.get("rejected", 0) or 0)
+            if status.get("sync_state") == "syncing":
+                progress = "Syncing…"
+            elif pending or rejected:
+                parts = []
+                if pending:
+                    parts.append(f"{pending} change(s) waiting to sync")
+                if rejected:
+                    parts.append(f"{rejected} change(s) couldn't sync")
+                progress = "; ".join(parts) + "."
+            else:
+                progress = "All progress synced."
             account_status.setText(
-                f"Signed in as {account_info.get('username', '?')}. "
-                + ("All progress synced."
-                   if not status.get("pending")
-                   else f"{status.get('pending')} review(s) waiting to sync."))
+                f"Signed in as {account_info.get('username', '?')}. " + progress)
             if not account_info.get("remembered"):
                 account_status.setText(account_status.text() + " Sign-in is active for this session only; no saved credential is available.")
             login.setVisible(False)

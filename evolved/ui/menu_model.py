@@ -437,8 +437,12 @@ def format_hiscores_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 rank = int(rank)
             except (TypeError, ValueError):
                 rank = None
+        is_demo = row.get("is_demo", False)
+        if not isinstance(is_demo, bool):
+            is_demo = False
         out.append({"rank": rank,
                     "username": str(row.get("username", "?")),
                     "xp": str(row.get("xp", 0)),
-                    "xp_display": format_xp(row.get("xp", 0))})
+                    "xp_display": format_xp(row.get("xp", 0)),
+                    "is_demo": is_demo})
     return out

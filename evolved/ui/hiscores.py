@@ -1,8 +1,14 @@
-# evolved/ui/hiscores.py - Hiscores journeys: logged out, loading, cached,
-# empty, no-match, expired login, and service error states.
-"""Never renders a failed request as zero scores or empty success. Offline
-cached results stay visibly dated; provisional local totals are explained
-separately from confirmed ranks. No sign-in popup on reviews."""
+# evolved/ui/hiscores.py - Public Hiscores journeys plus optional account.
+"""The public board is browsable without an account: live rankings and player
+lookup work logged out with the anonymous key. Signing in adds your own
+score, sync and catch-up — shown as a call to action, never a locked panel.
+
+States covered: logged out, loading, cached/stale, empty, no-match, session
+expired, service error, and the authenticated Test leaderboard for
+server-reported test accounts. Demo players are labeled "Demo" in rows and
+lookup. Cached rows survive network failure with their timestamp; a real
+empty result is distinct from an unavailable service.
+"""
 from __future__ import annotations
 
 import time
@@ -15,9 +21,8 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
                         QWidget)
     from .stale import response_is_stale
     from . import OBJECT_NAMES
-    from .theme import DEFAULT_SCALE
     from .widgets import (StonePanel, body_label, display_label, icon_pixmap,
-                          muted_label, error_label, success_label)
+                          muted_label)
     from ..assets import slot_icon_path
 
     root = QWidget(shell)
@@ -28,38 +33,10 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
 
     state: Dict[str, Any] = {"loading": False, "result": None, "lookup": None,
                              "req": 0, "closed": False, "account": None,
-                             "cohort": False}
+                             "cohort": False, "sync_requested_at": 0.0,
+                             "remote_ops": 0}
 
-    # Logged-out panel
-    logged_out = StonePanel()
-    logged_out_head = QHBoxLayout()
-    logged_out_icon = QLabel()
-    logged_out_icon.setFixedSize(24, 24)
-    account_pix = icon_pixmap(slot_icon_path("hiscores.account"), 24)
-    if account_pix is not None:
-        logged_out_icon.setPixmap(account_pix)
-        logged_out_icon.setAccessibleName("Account")
-    logged_out_head.addWidget(logged_out_icon)
-    logged_out_head.addWidget(display_label("Compete on the Hiscores"), 1)
-    logged_out.body.addLayout(logged_out_head)
-    logged_out.body.addWidget(body_label(
-        "Create a free account to back up this game and appear on the online "
-        "leaderboards. Your reviews always earn XP locally — an account adds "
-        "backup, cross-device catch-up, and shared rankings. It is optional "
-        "and never interrupts studying.", wrap=True))
-    out_row = QHBoxLayout()
-    login_btn = QPushButton("Log in")
-    login_btn.setObjectName("ankiscape-hiscores-login")
-    register_btn = QPushButton("Create account")
-    register_btn.setObjectName("ankiscape-hiscores-register")
-    register_btn.setProperty("class", "primary")
-    out_row.addWidget(login_btn)
-    out_row.addWidget(register_btn)
-    out_row.addStretch(1)
-    logged_out.body.addLayout(out_row)
-    layout.addWidget(logged_out)
-
-    # Logged-in panel
+    # Public board (always visible; account is optional).
     panel = StonePanel()
     header = QHBoxLayout()
     rank_icon = QLabel()
@@ -111,7 +88,36 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
     listing = QListWidget()
     listing.setObjectName(OBJECT_NAMES["hiscores_list"])
     panel.body.addWidget(listing, 1)
+
+    # Signed-out call to action (below the board, never a lock).
+    cta = StonePanel()
+    cta.setObjectName("ankiscape-hiscores-cta")
+    cta_head = QHBoxLayout()
+    account_icon = QLabel()
+    account_icon.setFixedSize(24, 24)
+    account_pix = icon_pixmap(slot_icon_path("hiscores.account"), 24)
+    if account_pix is not None:
+        account_icon.setPixmap(account_pix)
+        account_icon.setAccessibleName("Account")
+    cta_head.addWidget(account_icon)
+    cta_head.addWidget(display_label("Add your score"), 1)
+    cta.body.addLayout(cta_head)
+    cta.body.addWidget(body_label(
+        "Anyone can browse the Hiscores. Create a free account to sync this "
+        "game, keep an online backup and appear on the board yourself. Your "
+        "reviews always earn XP locally; an account is optional.", wrap=True))
+    cta_row = QHBoxLayout()
+    login_btn = QPushButton("Log in")
+    login_btn.setObjectName("ankiscape-hiscores-login")
+    register_btn = QPushButton("Create account")
+    register_btn.setObjectName("ankiscape-hiscores-register")
+    register_btn.setProperty("class", "primary")
+    cta_row.addWidget(login_btn)
+    cta_row.addWidget(register_btn)
+    cta_row.addStretch(1)
+    cta.body.addLayout(cta_row)
     layout.addWidget(panel, 1)
+    layout.addWidget(cta)
 
     def _account() -> Dict[str, Any]:
         try:
@@ -135,8 +141,6 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         else:
             status_icon.setVisible(False)
         try:
-            # Keep the stable identity object name: style via a dynamic
-            # property so tests/tools can always find this label.
             status.setProperty(
                 "statusKind",
                 "error" if kind == "error"
@@ -144,6 +148,20 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
             status.setObjectName(OBJECT_NAMES["hiscores_status"])
             status.style().unpolish(status)
             status.style().polish(status)
+        except Exception:
+            pass
+
+    def _request_sync_if_useful(account: Dict[str, Any]) -> None:
+        """Open-the-leaderboard sync request: at most one per short window so
+        view refreshes never create a refresh -> sync -> refresh loop."""
+        if not account.get("logged_in"):
+            return
+        now = time.monotonic()
+        if now - float(state.get("sync_requested_at") or 0) < 10.0:
+            return
+        state["sync_requested_at"] = now
+        try:
+            shell.call("on_sync")
         except Exception:
             pass
 
@@ -163,8 +181,8 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         state["account"] = key
         logged_in = bool(account.get("logged_in"))
         is_test = bool(account.get("is_test"))
-        logged_out.setVisible(not logged_in)
-        panel.setVisible(logged_in)
+        cta.setVisible(not logged_in)
+        sync_btn.setVisible(logged_in)
         # Only server-reported test accounts ever see the test toggle.
         test_toggle.setVisible(logged_in and is_test)
         if not is_test and test_toggle.isChecked():
@@ -172,14 +190,12 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
             test_toggle.setChecked(False)
             test_toggle.blockSignals(False)
             state["cohort"] = False
-        if not logged_in:
-            _set_status("", "muted")
-            return
         cohort = bool(state["cohort"])
         cached = shell.call("get_hiscores_cache", skill.currentText(), cohort,
                             default=None)
         if cached:
             _render(cached, stale=True)
+        _request_sync_if_useful(account)
         if not state["loading"]:
             _load()
 
@@ -194,8 +210,6 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         _set_status(
             "Loading test rankings…" if cohort else "Loading rankings…",
             "muted", "hiscores.pending")
-        # Cached rows stay visible while the refresh runs; a successful
-        # result or an error replaces them below.
         requested = skill.currentText()
 
         def _done(result):
@@ -237,21 +251,27 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         account = _account()
         me = str(account.get("username", "") or "")
         cohort = bool(state["cohort"])
+        logged_in = bool(account.get("logged_in"))
         if not rows:
             _set_status(("No test rankings yet." if cohort else
-                         "No rankings yet — finish some reviews, then Sync now."),
+                         "No rankings yet — finish some reviews, then Sync now."
+                         if logged_in else
+                         "No rankings yet."),
                         "muted")
         else:
             when = _fmt_time(result.get("fetched_at"))
             prefix = "Offline — showing cached rankings" if stale else "Updated"
             scope = "Test leaderboard — synthetic test accounts only. " if cohort else ""
-            _set_status(f"{scope}{prefix} {when}. Competition ranks; ties share a rank.",
+            tail = ("Competition ranks; ties share a rank. Demo players are "
+                    "labeled.")
+            _set_status(f"{scope}{prefix} {when}. {tail}",
                         "muted" if stale else "ok",
                         "hiscores.offline" if stale else "")
         for row in rows:
             rank = row.get("rank")
             rank_text = f"#{rank}" if rank else "unranked"
-            label = (f"{rank_text}  {row.get('username', '?')}  —  "
+            demo = "  [Demo]" if row.get("is_demo") else ""
+            label = (f"{rank_text}  {row.get('username', '?')}{demo}  —  "
                      f"{row.get('xp_display', row.get('xp', '0'))} XP")
             item = QListWidgetItem(label)
             if me and str(row.get("username", "")) == me:
@@ -283,13 +303,14 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
                         "error", "hiscores.offline")
             return
         listing.clear()
-        if "offline" in error or "logged" in error.lower():
-            _set_status("You are signed out or offline. Log in to view "
-                        "Hiscores — your local progress is safe.", "error",
+        lower = error.lower()
+        if "jwt" in lower or "401" in error or "expired" in lower:
+            _set_status("Your session expired. Log in again for your own "
+                        "score; public rankings still work.", "error")
+        elif "offline" in lower or "connect" in lower or "unconfigured" in lower:
+            _set_status("You are offline. Public rankings need a connection; "
+                        "your local progress is safe.", "error",
                         "hiscores.offline")
-        elif "jwt" in error.lower() or "401" in error or "expired" in error.lower():
-            _set_status("Your session expired. Log in again to view Hiscores.",
-                        "error")
         else:
             _set_status(f"Service problem: {error[:120]}", "error")
 
@@ -321,11 +342,12 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
             found = str(profile.get("username") or name)
             rank = profile.get("rank")
             xp_display = str(profile.get("xp_display") or "")
+            demo = " (Demo)" if profile.get("is_demo") else ""
             if rank:
-                _set_status(f"Found {found} — rank #{rank}, "
+                _set_status(f"Found {found}{demo} — rank #{rank}, "
                             f"{xp_display} XP.", "ok")
             else:
-                _set_status(f"Found {found} — {xp_display} XP; rank "
+                _set_status(f"Found {found}{demo} — {xp_display} XP; rank "
                             f"unavailable outside the loaded top list.", "ok")
             rows = result.get("rows") or []
             if rows:
@@ -342,14 +364,9 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
         else:
             _done({"ok": False, "not_found": True})
 
-    def _open_login():
-        shell.call("on_account")
+    login_btn.clicked.connect(lambda: shell.call("on_account"))
+    register_btn.clicked.connect(lambda: shell.call("on_register"))
 
-    def _open_register():
-        shell.call("on_register")
-
-    login_btn.clicked.connect(_open_login)
-    register_btn.clicked.connect(_open_register)
     def _toggle_cohort(checked):
         state["cohort"] = bool(checked)
         state["req"] += 1

@@ -1,7 +1,9 @@
-# tests/test_fixture_plans.py - Hosted fixture suite determinism and bounds.
-"""Pure checks for dev/fixtures/hosted-v1.json and dev/fixture_traces.py:
-24 fixed names, deterministic hashes/ids, operations within the per-player
-and total bounds, tie/zero/gem/undo coverage, and no credentials anywhere."""
+# tests/test_fixture_plans.py - Fixture suites: historical + active demos.
+"""The hosted-v1 24-account suite is RETIRED (kept as historical data only;
+its seeding tools refuse to run). The active permanent population is the
+public-demo-v1 five labeled demo players. These checks pin both facts:
+historical data is preserved without credentials, and the demo suite is
+deterministic, bounded and fully covered."""
 from __future__ import annotations
 
 import importlib.util
@@ -23,20 +25,58 @@ def _load(name: str, relative: str):
     return module
 
 
-TRACES = _load("ankiscape_fixture_traces_test", "dev/fixture_traces.py")
+HISTORICAL = _load("ankiscape_fixture_traces_test", "dev/fixture_traces.py")
+DEMOS = _load("ankiscape_demo_traces_test", "dev/demo_traces.py")
+SEED = _load("ankiscape_seed_guard_test", "dev/seed_hosted_fixtures.py")
+HOSTED_E2E = _load("ankiscape_hosted_e2e_guard_test",
+                   "dev/hosted_fixture_e2e.py")
+
+FORBIDDEN_KEYS = {"password", "secret", "service_role", "access_token",
+                  "refresh_token", "anon_key", "apikey"}
 
 
-class HostedSuiteTests(unittest.TestCase):
+class HistoricalHostedSuiteTests(unittest.TestCase):
+    """The old manifest remains readable historical data, not executable."""
+
     @classmethod
     def setUpClass(cls):
-        cls.suite = TRACES.load_suite()
-        cls.traces = TRACES.build_traces(cls.suite["display_names"])
+        cls.suite = HISTORICAL.load_suite()
 
-    def test_exactly_twenty_four_unique_natural_names(self):
+    def test_manifest_preserved_with_twenty_four_names(self):
         names = self.suite["display_names"]
         self.assertEqual(len(names), 24)
-        norms = [TRACES.username_norm(n) for n in names]
-        self.assertEqual(len(set(norms)), 24)
+        self.assertEqual(len(set(HISTORICAL.username_norm(n)
+                                 for n in names)), 24)
+
+    def test_manifest_carries_no_credentials(self):
+        def _walk(value, path="suite"):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    self.assertNotIn(str(key).lower(), FORBIDDEN_KEYS,
+                                     f"credential field at {path}.{key}")
+                    _walk(child, f"{path}.{key}")
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    _walk(child, f"{path}[{index}]")
+        _walk(self.suite)
+
+    def test_seeding_tools_refuse_to_recreate_retired_users(self):
+        self.assertEqual(SEED.main([]), 2)
+        self.assertEqual(HOSTED_E2E.main([]), 2)
+
+
+class ActiveDemoSuiteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.suite = DEMOS.load_suite()
+        cls.traces = DEMOS.build_traces(tuple(cls.suite["display_names"]))
+
+    def test_exactly_five_unique_demo_names(self):
+        names = self.suite["display_names"]
+        self.assertEqual(len(names), 5)
+        self.assertEqual(sorted(names), sorted(DEMOS.DISPLAY_NAMES))
+        norms = [DEMOS.username_norm(n) for n in names]
+        self.assertEqual(len(set(norms)), 5)
         for norm in norms:
             self.assertGreaterEqual(len(norm), 3)
             self.assertLessEqual(len(norm), 20)
@@ -47,88 +87,58 @@ class HostedSuiteTests(unittest.TestCase):
         self.assertLessEqual(total, self.suite["trace"]["max_total_ops"])
         for name, trace in self.traces.items():
             self.assertLessEqual(len(trace["ops"]),
-                                 self.suite["trace"]["max_ops_per_player"],
+                                 self.suite["trace"]["max_ops_per_demo"],
                                  name)
             self.assertGreater(len(trace["ops"]), 0, name)
 
     def test_deterministic_hashes_and_identities(self):
-        again = TRACES.build_traces(self.suite["display_names"])
+        again = DEMOS.build_traces(tuple(self.suite["display_names"]))
+        self.assertEqual(DEMOS.manifest_digest(self.traces),
+                         DEMOS.manifest_digest(again))
         for name in self.traces:
             self.assertEqual(self.traces[name]["trace_hash"],
                              again[name]["trace_hash"], name)
             self.assertEqual(self.traces[name]["game_uuid"],
                              again[name]["game_uuid"], name)
-            self.assertEqual(self.traces[name]["ops"][0]["op_id"],
-                             again[name]["ops"][0]["op_id"], name)
-            self.assertNotEqual(self.traces[name]["trace_hash"], "")
 
-    def test_game_uuids_are_unique(self):
-        games = [t["game_uuid"] for t in self.traces.values()]
-        self.assertEqual(len(set(games)), 24)
+    def test_every_demo_has_nonzero_xp_in_every_skill(self):
+        for name, trace in self.traces.items():
+            xp = trace["expected"]["xp_micro"]
+            for skill in ("mining", "woodcutting", "smithing", "crafting",
+                          "fishing", "cooking"):
+                self.assertGreater(int(xp.get(skill, 0)), 0,
+                                   f"{name}/{skill}")
 
-    def test_tie_pair_has_identical_expected_xp(self):
-        tie = [t for t in self.traces.values() if t["slot"] in (1, 2)]
-        self.assertEqual(len(tie), 2)
-        self.assertEqual(tie[0]["expected"]["xp_micro"],
-                         tie[1]["expected"]["xp_micro"])
-        self.assertEqual(tie[0]["expected"]["total_level"],
-                         tie[1]["expected"]["total_level"])
+    def test_reproducible_tie_in_cooking(self):
+        left = self.traces["DemoFlint"]["expected"]["xp_micro"]["cooking"]
+        right = self.traces["DemoMoss"]["expected"]["xp_micro"]["cooking"]
+        self.assertEqual(left, right)
+        self.assertGreater(int(left), 0)
 
-    def test_zero_score_player_earns_no_xp(self):
-        zero = [t for t in self.traces.values() if t["slot"] == 0][0]
-        self.assertEqual(sum(zero["expected"]["xp_micro"].values()), 0)
+    def test_manifest_and_reserved_emails(self):
+        digest = DEMOS.manifest_digest(self.traces)
+        self.assertEqual(self.suite["manifest_digest"], digest)
+        self.assertEqual(self.suite["label"], "Demo")
+        for name, trace in self.traces.items():
+            self.assertTrue(trace["email"].endswith(".example.invalid"))
+            self.assertEqual(self.suite["players"][name]["trace_hash"],
+                             trace["trace_hash"])
+            self.assertEqual(self.suite["players"][name]["email"],
+                             trace["email"])
 
-    def test_gem_player_holds_a_mined_gem(self):
-        gem = [t for t in self.traces.values() if t["slot"] == 5][0]
-        gems = [k for k in gem["expected"]["inventory"]
-                if k.startswith("Uncut ")]
-        self.assertTrue(gems, "fixture gem trace produced no gem")
-
-    def test_undo_player_has_retract_and_restore(self):
-        undo = [t for t in self.traces.values() if t["slot"] == 6][0]
-        kinds = [op["kind"] for op in undo["ops"]]
-        self.assertIn("review_retract", kinds)
-        self.assertIn("review_restore", kinds)
-        # One award restored, one left retracted: exactly one skill earned.
-        earned = [s for s, xp in undo["expected"]["xp_micro"].items() if xp > 0]
-        self.assertEqual(len(earned), 1)
-
-    def test_material_and_recipe_coverage_present(self):
-        outcomes = set()
-        for trace in self.traces.values():
-            for op in trace["ops"]:
-                if op["kind"] == "review_award":
-                    outcomes.add(op["payload"].get("skill"))
-                if op["kind"] == "review_skip":
-                    outcomes.add("skip")
-        for expected in ("mining", "woodcutting", "fishing", "cooking",
-                         "smithing", "crafting", "skip"):
-            self.assertIn(expected, outcomes)
-
-    def test_no_credentials_or_secrets_in_suite(self):
-        forbidden_keys = {"password", "secret", "service_role", "access_token",
-                          "refresh_token", "anon_key", "apikey"}
-
+    def test_no_credentials_or_retired_names(self):
         def _walk(value, path="suite"):
             if isinstance(value, dict):
                 for key, child in value.items():
-                    self.assertNotIn(str(key).lower(), forbidden_keys,
+                    self.assertNotIn(str(key).lower(), FORBIDDEN_KEYS,
                                      f"credential field at {path}.{key}")
                     _walk(child, f"{path}.{key}")
             elif isinstance(value, list):
                 for index, child in enumerate(value):
                     _walk(child, f"{path}[{index}]")
-
         _walk(self.suite)
-        # Display names never contain addresses or secret-looking material.
-        for name in self.suite["display_names"]:
-            self.assertNotIn("@", name)
-
-    def test_lane_assignment_covers_all_names(self):
-        lanes = self.suite["lanes"]
-        assigned = [n for names in lanes.values() for n in names]
-        self.assertEqual(sorted(assigned), sorted(self.suite["display_names"]))
-        self.assertEqual(len(assigned), 24)
+        self.assertFalse(set(self.traces) & set(
+            HISTORICAL.load_suite()["display_names"]))
 
 
 if __name__ == "__main__":

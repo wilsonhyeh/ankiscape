@@ -144,10 +144,18 @@ def make_transport(config: ServiceConfig,
             return {"status": "transient", "detail": "malformed response"}
         accepted = data.get("accepted", [])
         conflicts = data.get("conflicts", [])
-        acked = [str(a) for a in accepted] if isinstance(accepted, list) else []
+        if not isinstance(accepted, list) or not isinstance(conflicts, list):
+            # An explicit ack contract: never infer success from a missing or
+            # malformed list. The job raises protocol_error on this shape.
+            return {"status": "transient", "detail": "missing_ack_list"}
+        acked = [str(a) for a in accepted]
         quarantine = [str(c.get("op_id", "")) for c in conflicts
                       if isinstance(c, dict) and c.get("op_id")]
-        return {"status": "ok", "acked": acked, "quarantine": quarantine}
+        # `acked` is always present on a well-formed response; the job treats
+        # a missing key as a protocol error rather than assumed success.
+        return {"status": "ok", "acked": acked, "quarantine": quarantine,
+                "rejected": len(quarantine),
+                "applied": int(data.get("applied", 0) or 0)}
 
     def download(cursor: str) -> Dict[str, Any]:
         try:
@@ -176,11 +184,16 @@ def make_transport(config: ServiceConfig,
                 "lamport": int(row.get("lamport", 0) or 0),
                 "kind": str(row.get("kind", "")),
                 "payload": row.get("payload", {}) or {}})
-        has_more = len(ops) >= UPLOAD_BATCH_MAX
+        try:
+            next_cursor = int(data.get("next_cursor", cur) or 0)
+        except (TypeError, ValueError):
+            next_cursor = cur
+        # A full page whose cursor advanced means there is likely more; an
+        # empty or short page, or a non-advancing cursor, ends the download.
+        has_more = len(ops) >= UPLOAD_BATCH_MAX and next_cursor > cur
         return {"status": "ok", "operations": wire_ops,
-                "next_cursor": str(data.get("next_cursor", cur)),
-                "has_more": has_more if not data.get("next_cursor") == cur
-                else bool(len(ops) >= UPLOAD_BATCH_MAX)}
+                "next_cursor": str(next_cursor),
+                "has_more": has_more}
 
     return {"upload": upload, "download": download}
 
@@ -222,20 +235,32 @@ def _validated_hiscores_row(row: Any) -> Dict[str, Any]:
         raise NetError("malformed_response", "hiscores row rank is not numeric")
     if rank < 1:
         raise NetError("malformed_response", "hiscores row rank is not positive")
-    return {"rank": rank, "username": username, "xp": xp}
+    is_demo = row.get("is_demo", False)
+    if not isinstance(is_demo, bool):
+        # Older/newer servers may omit the flag; anything malformed is an
+        # explicit false rather than a reason to drop the row.
+        is_demo = False
+    return {"rank": rank, "username": username, "xp": xp, "is_demo": is_demo}
 
 
 def _fetch_hiscores_rows(post: PostFn, endpoint: Endpoint, session, *,
                          skill: str, limit: int,
-                         cohort: bool = False) -> List[Dict[str, Any]]:
+                         cohort: bool = False,
+                         public: bool = False) -> List[Dict[str, Any]]:
     """Array-mode Hiscores RPC + per-row validation (shared by Ranks and
     player lookup). Empty list is a successful empty state. `cohort=True`
     selects the authenticated Test leaderboard RPC; the server authorizes it
-    from the caller's own player row, never from this flag."""
+    from the caller's own player row, never from this flag.
+
+    `public=True` reads the public board with the anonymous key and NO bearer
+    token — even when a session exists — so a stale token can never blank the
+    public rankings or the request's identity.
+    """
     rpc = "test_hiscores" if cohort else "hiscores"
+    token = None if public else _session_token(session)
     data = post(endpoint, f"/rest/v1/rpc/{rpc}",
                 {"p_skill": str(skill), "p_limit": int(limit)},
-                access_token=_session_token(session), response_shape="array")
+                access_token=token, response_shape="array")
     if not isinstance(data, list):
         raise NetError("malformed_response", "hiscores must be a list")
     return [_validated_hiscores_row(row) for row in data]
@@ -259,27 +284,32 @@ def fetch_self_context(post: PostFn, endpoint: Endpoint, session) -> Optional[Di
 
 def query_hiscores(post: PostFn, endpoint: Endpoint, session, *,
                    skill: str, limit: int = 50,
-                   cohort: bool = False) -> List[Dict[str, Any]]:
+                   cohort: bool = False,
+                   public: bool = False) -> List[Dict[str, Any]]:
     """Hiscores query over real transport. Raises NetError on failure; the
-    Qt caller converts to a problem line (never a modal)."""
+    Qt caller converts to a problem line (never a modal). `public=True` uses
+    the anonymous public board with no bearer token."""
     from .ui.menu_model import format_hiscores_rows
 
     return format_hiscores_rows(_fetch_hiscores_rows(
-        post, endpoint, session, skill=skill, limit=limit, cohort=cohort))
+        post, endpoint, session, skill=skill, limit=limit, cohort=cohort,
+        public=public))
 
 
 def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
                          username: str, skill: str,
                          limit: int = 50,
-                         cohort: bool = False) -> Dict[str, Any]:
+                         cohort: bool = False,
+                         public: bool = False) -> Dict[str, Any]:
     """Player lookup: normalize, fetch the public profile, then match the
     player in the selected-skill Hiscores list for a rank.
 
-    The server's public_profile RPC returns `{username, state}` (not rank
-    rows). A found player whose rank falls outside the loaded top list gets
-    an explicit rank-unavailable row; a missing profile is a distinct
-    friendly not-found result (`no_profile`). Unrelated transport failures
-    raise NetError so the caller shows a service problem, not "not found".
+    The server's public_profile RPC returns `{username, is_demo, state}`
+    (not rank rows). A found player whose rank falls outside the loaded top
+    list gets an explicit rank-unavailable row; a missing profile is a
+    distinct friendly not-found result (`no_profile`). Unrelated transport
+    failures raise NetError so the caller shows a service problem, not "not
+    found". `public=True` reads anonymously with no bearer token.
     """
     from .auth import normalize_username
     from .ui.menu_model import format_hiscores_rows, format_xp
@@ -289,11 +319,12 @@ def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
     except ValueError:
         return {"ok": False, "not_found": True}
     skill = str(skill or "").lower()
+    token = None if public else _session_token(session)
     try:
         rpc = "test_public_profile" if cohort else "public_profile"
         data = post(endpoint, f"/rest/v1/rpc/{rpc}",
                     {"p_username_norm": norm},
-                    access_token=_session_token(session))
+                    access_token=token)
     except NetError as exc:
         if exc.kind == "not_found" or "no_profile" in str(exc.detail):
             return {"ok": False, "not_found": True}
@@ -303,6 +334,9 @@ def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
     name = data.get("username")
     if not isinstance(name, str) or not name.strip():
         raise NetError("malformed_response", "public_profile missing username")
+    is_demo = data.get("is_demo", False)
+    if not isinstance(is_demo, bool):
+        is_demo = False
     state = data.get("state")
     if not isinstance(state, dict) and cohort:
         # Test profile returns the safe allowlist: {username, skills, is_test}.
@@ -329,16 +363,18 @@ def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
     try:
         for row in _fetch_hiscores_rows(post, endpoint, session,
                                         skill=skill, limit=limit,
-                                        cohort=cohort):
+                                        cohort=cohort, public=public):
             if row["username"].casefold() == name.casefold():
                 rank = row["rank"]
                 break
     except NetError:
         rank = None
-    row = {"rank": rank, "username": name, "xp": xp_micro}
+    row = {"rank": rank, "username": name, "xp": xp_micro,
+           "is_demo": is_demo}
     return {"ok": True,
             "profile": {"username": name, "skill": skill, "rank": rank,
-                        "xp": xp_micro, "xp_display": format_xp(xp_micro)},
+                        "xp": xp_micro, "xp_display": format_xp(xp_micro),
+                        "is_demo": is_demo},
             "rows": format_hiscores_rows([row]),
             "fetched_at": time.time()}
 
@@ -350,7 +386,9 @@ class SyncService:
                  transport: Dict[str, Callable],
                  apply_remote: Callable[[Dict], None],
                  get_user_id: Callable[[], Optional[str]],
-                 triggers: Optional[SyncTriggers] = None):
+                 triggers: Optional[SyncTriggers] = None,
+                 endpoint_project: str = "",
+                 initial_last_success: Optional[float] = None):
         self.game_uuid = game_uuid
         self.journal = journal
         self.transport = transport
@@ -359,11 +397,20 @@ class SyncService:
         self.triggers = triggers or SyncTriggers()
         self._lock = threading.Lock()
         self._refresh_lock = threading.Lock()
+        self.endpoint_project = str(endpoint_project or "")
+        if initial_last_success is None:
+            try:
+                initial_last_success = journal.get_sync_success(
+                    self.endpoint_project)
+            except Exception:
+                initial_last_success = None
         self.job = SyncJob(
             generation=generation, game_uuid=game_uuid,
             user_id=get_user_id(), journal=journal,
             upload=transport["upload"], download=transport["download"],
-            apply_remote=apply_remote)
+            apply_remote=apply_remote,
+            initial_last_success=initial_last_success,
+            endpoint_project=self.endpoint_project)
 
     def note_reviews(self, count: int = 1) -> None:
         self.job.note_reviews(count)
@@ -390,11 +437,14 @@ class SyncService:
         except Exception:
             user_id = None
         if not user_id:
-            return {"ok": False, "error": "logged_out_no_network"}
+            return {"ok": False, "error": "logged_out_no_network",
+                    "status": "logged_out", "pending": self._pending(),
+                    "rejected": self._rejected()}
         if self.job.user_id != user_id:
             self.job.user_id = user_id
         if not self.due(**flags):
-            return {"ok": False, "error": "not_due"}
+            return {"ok": False, "error": "not_due", "status": "not_due",
+                    "pending": self._pending(), "rejected": self._rejected()}
         try:
             out = self.job.run_once(generation=self.job.generation,
                                     user_id=user_id)
@@ -402,23 +452,33 @@ class SyncService:
             # Permanent statuses raise out of run_once: surface them as
             # structured errors with pending preserved (nothing acked).
             return {"ok": False, "error": str(exc)[:300],
-                    "pending": len(self._pending_ids())}
+                    "status": self.job.state.last_error_kind or "error",
+                    "retry_after": self.job.state.retry_after,
+                    "pending": self._pending(), "rejected": self._rejected()}
         except Exception as exc:
             return {"ok": False, "error": f"transient:{exc!r}"[:300],
-                    "pending": len(self._pending_ids())}
-        out["pending"] = len(self._pending_ids())
+                    "status": self.job.state.last_error_kind or "transient",
+                    "retry_after": self.job.state.retry_after,
+                    "pending": self._pending(), "rejected": self._rejected()}
+        out["pending"] = self._pending()
+        out["rejected"] = self._rejected()
         return out
 
     def force_sync(self) -> Dict[str, Any]:
         """Manual Sync button path: bypass trigger evaluation."""
         return self.maybe_sync(manual=True)
 
-    def _pending_ids(self) -> List[str]:
+    def _pending(self) -> int:
         try:
-            return [op["op_id"]
-                    for op in self.journal.pending_operations(limit=1)]
+            return int(self.journal.count_pending_operations())
         except Exception:
-            return []
+            return -1
+
+    def _rejected(self) -> int:
+        try:
+            return int(self.journal.count_rejected_operations())
+        except Exception:
+            return 0
 
     def backoff_hint_s(self) -> float:
         try:
@@ -426,15 +486,49 @@ class SyncService:
         except Exception:
             return 0.0
 
-    def status_line(self) -> Dict[str, Any]:
-        """Render-ready status for the Hiscores tab (no Qt here)."""
+    def state_token(self) -> str:
+        """Typed sync state for the UI. Never string-searches error text at
+        the call site; this is the one inference point."""
         try:
-            pending = len(self.journal.pending_operations(limit=1000))
+            if self.job.state.running:
+                return "syncing"
+            error = str(self.job.state.last_error or "")
+            kind = self.job.state.last_error_kind
+            if error:
+                if kind == "no_progress" or "no_progress" in error:
+                    return "offline"
+                if kind == "rate_limited" or "rate_limited" in error:
+                    return "offline"
+                if "server_update_required" in error:
+                    return "server_upgrade"
+                if "permanent:unauthorized" in error:
+                    return "session_expired"
+                if "permanent:forbidden" in error:
+                    return "game_mismatch"
+                if "permanent:invalid" in error:
+                    return "service_error"
+                if kind == "protocol_error" or "protocol_error" in error:
+                    return "service_error"
+                return "offline"
+            if self._rejected() > 0:
+                return "rejected_progress"
+            pending = self._pending()
+            if pending > 0:
+                return "pending"
+            if self.job.state.last_success:
+                return "synced"
+            return "pending"
         except Exception:
-            pending = -1
+            return "service_error"
+
+    def status_line(self) -> Dict[str, Any]:
+        """Render-ready status for settings/Hiscores (no Qt here). Uncapped
+        counts only; never a sorted pending scan."""
         return {"logged_in": bool(self.get_user_id()),
                 "last_success": self.job.state.last_success,
-                "pending": pending,
+                "pending": self._pending(),
+                "rejected": self._rejected(),
+                "state": self.state_token(),
                 "last_error": self.job.state.last_error or "",
                 "backoff_s": self.backoff_hint_s(),
                 "last_activity": time.time()}

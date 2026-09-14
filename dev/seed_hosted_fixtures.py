@@ -82,6 +82,7 @@ class Transport:
     def request(self, method: str, path: str, *, body: Any = None,
                 params: Optional[Dict[str, str]] = None,
                 token: str = "", service: bool = False,
+                headers_extra: Optional[Dict[str, str]] = None,
                 expect: Tuple[int, ...] = (200, 201, 204)) -> Any:
         url = f"{self.base_url}{path}"
         if params:
@@ -92,6 +93,8 @@ class Transport:
                    # Same protocol marker the shipped client sends; servers
                    # with authoritative scoring reject old-protocol uploads.
                    "X-AnkiScape-Protocol": "2"}
+        for name, value in (headers_extra or {}).items():
+            headers[str(name)] = str(value)
         if service:
             headers["Authorization"] = f"Bearer {self.service_key}"
         elif token:
@@ -511,6 +514,14 @@ def cmd_verify(args) -> int:
 
 
 def main(argv=None) -> int:
+    print("seed_hosted_fixtures: RETIRED — the hosted-v1 24-account suite is "
+          "no longer provisioned. Use dev/demo_players.py (five public demos) "
+          "instead. This script refuses to recreate retired users.",
+          file=sys.stderr)
+    return 2
+
+
+def _legacy_main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="seed_hosted_fixtures.py")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--local", action="store_true",

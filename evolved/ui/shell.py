@@ -157,48 +157,80 @@ def refresh_shell(mw) -> bool:
         return False
 
 
-def _pending_suffix(pending: int) -> str:
-    if not pending:
-        return ""
-    return f" · {pending} review{'s' if pending != 1 else ''} pending"
+def _pending_suffix(pending: int, rejected: int = 0) -> str:
+    parts = []
+    if pending:
+        parts.append(f"{pending} change{'s' if pending != 1 else ''} waiting to sync")
+    if rejected:
+        parts.append(f"{rejected} change{'s' if rejected != 1 else ''} couldn't sync")
+    return (" · " + " · ".join(parts)) if parts else ""
 
 
 def status_text(status: Optional[Dict[str, Any]]) -> str:
     """Short, typed status copy (pure, testable).
 
-    Raw exception text never reaches the header: the user sees a plain
-    state, and the selectable diagnostic detail carries sanitized context.
+    Raw exception text never reaches the header: the user sees a plain state
+    and the selectable diagnostic detail carries sanitized context. The state
+    is a typed token from SyncService.state_token(); the `last_error`
+    string-search below only serves callers that pass a minimal dict.
     """
     if not status:
         return "Local progress · not signed in"
     if status.get("recovery"):
         return "Game recovery · a review wasn't saved — keep reviewing"
+    pending = int(status.get("pending", 0) or 0)
+    rejected = int(status.get("rejected", 0) or 0)
+    suffix = _pending_suffix(pending, rejected)
     if not status.get("logged_in"):
         text = "Local progress · not signed in"
+        if suffix:
+            return text + suffix
         return f"{text} · updating" if status.get("updating") else text
+    state = str(status.get("sync_state", "") or "")
     last_error = str(status.get("last_error") or "")
-    pending = int(status.get("pending", 0) or 0)
-    suffix = _pending_suffix(pending)
-    if last_error:
-        lower = last_error.lower()
-        if "server update required" in lower or "server_update_required" in lower \
-                or "upgrade" in lower:
-            return "Sync paused · Server update required — update the add-on"
-        if any(token in lower for token in ("unauthorized", "jwt", "expired",
-                                            "sign in", "signed out")):
-            return "Session expired · sign in again — progress saved" + suffix
-        if any(token in lower for token in ("offline", "unconfigured",
-                                            "connection", "timed out",
-                                            "transient", "server")):
-            return "Offline · sync unavailable — progress saved" + suffix
+    if not state:
+        # Minimal-dict compatibility: infer only the clearest states.
+        if "Server update required" in last_error or "server_update_required" in last_error:
+            state = "server_upgrade"
+        elif pending or rejected:
+            state = "pending"
+        elif status.get("last_success"):
+            state = "synced"
+    if state == "verification_needed":
+        return ("Verify your email to sync — progress saved" + suffix)
+    if state == "linking":
+        return ("Signed in · linking this game to your account\u2026"
+                + (suffix if pending else ""))
+    if state == "syncing":
+        return "Syncing\u2026" + suffix
+    if state == "session_expired":
+        return "Session expired · sign in again — progress saved" + suffix
+    if state == "server_upgrade":
+        return "Sync paused · Server update required — update the add-on"
+    if state == "game_mismatch":
+        return ("Signed in · this game belongs to another account — "
+                "progress is safe on this computer")
+    if state == "rejected_progress":
+        return ("Some changes couldn't sync"
+                + (f" ({rejected})" if rejected else "")
+                + " — see Settings \u2192 Account")
+    if state in ("offline", "retrying"):
         return "Sync unavailable — progress saved" + suffix
-    if pending:
-        return f"Signed in · {pending} review{'s' if pending != 1 else ''} pending"
+    if state == "service_error":
+        return "Sync problem — progress saved" + suffix
+    if state == "pending":
+        detail = _pending_suffix(pending, rejected)
+        return ("Signed in" + detail) if detail else "Signed in · all progress synced"
+    if state == "synced":
+        return "Signed in · all progress synced"
+    if last_error:
+        # Unknown typed state with an error: never claim success.
+        return "Sync unavailable — progress saved" + suffix
+    if suffix:
+        return "Signed in" + suffix
     if status.get("last_success"):
-        text = "Signed in · all progress synced"
-    else:
-        text = "Signed in · never synced yet"
-    return f"{text} · updating" if status.get("updating") else text
+        return "Signed in · all progress synced"
+    return "Signed in · never synced yet"
 
 
 def sanitize_detail(text: Any, limit: int = 240) -> str:

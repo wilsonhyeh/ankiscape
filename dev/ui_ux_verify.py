@@ -33,8 +33,8 @@ ALL_SCENARIOS = (
     "ui-onboarding", "ui-training", "ui-settings", "ui-review",
     "ui-lifecycle", "ui-art", "ui-visual-polish",
     "ui-deferred-rewards", "ui-rebuild-review", "ui-test-leaderboard",
-    "ui-credential-fallback", "ui-recovery", "ui-profile-races",
-    "ui-report-bug",
+    "ui-account-lifecycle", "ui-credential-fallback", "ui-recovery",
+    "ui-profile-races", "ui-report-bug",
 )
 # `sync` is a local-stack journey owned by the Linux backend role (it needs
 # Docker/Supabase + Anki under Xvfb), never part of the native target role.
@@ -47,8 +47,8 @@ SHELL_SCENARIOS = ("ui-onboarding", "ui-training", "ui-settings",
                    "ui-review", "ui-lifecycle", "ui-art",
                    "ui-visual-polish", "ui-deferred-rewards",
                    "ui-rebuild-review", "ui-test-leaderboard",
-                   "ui-credential-fallback", "ui-recovery",
-                   "ui-profile-races", "ui-report-bug")
+                   "ui-account-lifecycle", "ui-credential-fallback",
+                   "ui-recovery", "ui-profile-races", "ui-report-bug")
 
 
 def _load_dev():

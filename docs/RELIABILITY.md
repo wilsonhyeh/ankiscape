@@ -8,7 +8,7 @@ gates. See `docs/TEST-MATRIX.md` for the requirement-to-test mapping.
 | Stage | Command | What runs | Expected duration |
 |---|---|---|---|
 | pr | `python3 dev/reliability.py verify --stage pr` | Pure suite, generated PR traces, asset/package audit; Linux backend + one native smoke in CI | ~1 min local / ~15 min CI (excluding first runtime download) |
-| nightly | `python3 dev/reliability.py verify --stage nightly` | Adds seven-target native matrix, expanded generated traces, 30-min endurance, performance metrics, trusted hosted fixture smoke | ~4-6 h CI |
+| nightly | `python3 dev/reliability.py verify --stage nightly` | Adds seven-target native matrix, expanded generated traces, 30-min endurance, performance metrics, trusted hosted public-demo verify | ~4-6 h CI |
 | release | `python3 dev/reliability.py verify --stage release --evidence artifacts/reliability` | Consumes validated lane evidence + mutation gate; all seven targets required | ~6-8 h CI |
 | evidence only | `python3 dev/reliability.py verify-evidence --matrix dev/reliability-matrix.json --evidence artifacts/reliability` | Validates provenance/hashes/scenarios/budgets without executing | seconds |
 | one lane | `python3 dev/reliability.py run-lane --stage nightly --os linux --anki 26.8.1 --qt 6 --anki-bin <path> --out artifacts/reliability/<run>/<lane>` | Executes this lane's scenarios and writes `record.json` | 10-90 min |
@@ -29,10 +29,9 @@ overwrite its date): `python3 dev/reliability.py baseline`.
   (Info.plist, `anki-<v>.dist-info`); hash-verified downloads may declare
   `--anki-actual`, recorded as `declared` in evidence.
 - Linux native lanes need Xvfb, a real desktop session (`dev/runtime_adapter.requires_desktop` refuses offscreen) and a UTF-8 locale (`LANG=C.UTF-8`; the 23.10 launcher exits without one). The 23.10 Qt5 bundle needs its own system libs beyond the Qt6 set: `libglib2.0-0`, `libxcb-xinerama0`, `libxcb-randr0`, `libxcb-sync1`, `libxcb-xinput0`, `libxi6`, `libxtst6`, `libxdamage1`, `libxcomposite1`, `libxrandr2`, `libxcursor1`, `libsm6`, `libice6`, `libnss3`, `libpulse-mainloop-glib0`, `libwayland-cursor0`, `libwayland-egl1`, `libgstreamer1.0-0`, `libgstreamer-plugins-base1.0-0` (workflows install the full list).
-- Hosted fixture lanes need `ANKISCAPE_PROD_URL`, `ANKISCAPE_PROD_ANON_KEY`,
+- Hosted lanes need `ANKISCAPE_PROD_URL`, `ANKISCAPE_PROD_ANON_KEY`,
   `SUPABASE_SERVICE_ROLE_KEY` (provisioning only) and
-  `ANKISCAPE_FIXTURE_SECRET` from approved secret storage. Per-lane native
-  journeys also read `ANKISCAPE_FIXTURE_EMAIL` / `ANKISCAPE_FIXTURE_PASSWORD`.
+  `ANKISCAPE_FIXTURE_SECRET` from approved secret storage. Per-lane native journeys run the deterministic local account fixture and need no fixture credentials.
 
 ## Scenario ids
 
@@ -40,8 +39,8 @@ overwrite its date): `python3 dev/reliability.py baseline`.
 same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
 `dialogs`, `ui-onboarding`, `ui-training`, `ui-settings`, `ui-review`,
 `ui-lifecycle`, `ui-art`, `ui-visual-polish`, `ui-deferred-rewards`,
-`ui-rebuild-review`, `ui-test-leaderboard`, `ui-credential-fallback`,
-`ui-recovery`, `ui-profile-races`, `ui-report-bug`.
+`ui-rebuild-review`, `ui-test-leaderboard`, `ui-account-lifecycle`,
+`ui-credential-fallback`, `ui-recovery`, `ui-profile-races`, `ui-report-bug`.
 
 ## Rerunning one failed case
 
@@ -73,10 +72,16 @@ same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
 
 ## Fixtures and secrets
 
-- Permanent hosted cohort: `dev/fixtures/hosted-v1.json` (24 names, no
-  credentials). Passwords derive from `ANKISCAPE_FIXTURE_SECRET`.
-- Seed/verify: `python3 dev/seed_hosted_fixtures.py --local|--hosted
-  --plan|--apply|--verify`, then `python3 dev/hosted_fixture_e2e.py`.
+- Permanent public demo players: `dev/fixtures/public-demo-v1.json` (five
+  labeled demos, no credentials). Passwords derive from
+  `ANKISCAPE_FIXTURE_SECRET`.
+- Plan/apply/verify: `python3 dev/demo_players.py --local|--hosted
+  --plan|--apply --plan-file PATH|--verify`. The old hosted-v1 24-account
+  suite is retired; `dev/seed_hosted_fixtures.py` refuses to recreate it.
+- Account journeys: `python3 dev/account_journey_e2e.py --local` runs the
+  packaged `ui-account-lifecycle` journey over the real local Auth chain and
+  writes this target's record under `artifacts/account-journey/`;
+  `--collect --require-all-targets` validates records from every target.
 - One provisioning/smoke run at a time; <=2 req/s; abort on repeated 429/5xx.
 - GitHub configuration: `python3 scripts/configure_github.py
   --plan|--apply|--verify` (labels, Issues, private vulnerability reporting,
@@ -86,7 +91,7 @@ same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
 ## Nightly ownership
 
 - Owner: repository maintainer. The nightly workflow is the only place the
-  seven-target matrix, 30-minute endurance and hosted fixture smoke run.
+  seven-target matrix, 30-minute endurance and hosted public-demo verify run.
 - Trusted-main only: hosted credentials are never exposed to forks.
 - Evidence retention: failure artifacts 30 days, release evidence 90 days.
   Old evidence directories are historical records; never rewrite their dates.
