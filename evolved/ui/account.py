@@ -10,9 +10,11 @@ Stable object names (documented for tests and the native journey):
   pages             ankiscape-account-<login|register|verify|
                     recovery-request|recovery-confirm>
   inputs            ankiscape-account-identity, -password, -remember,
-                    -username, -email, -register-password, -code, -new-password
+                    -username, -email, -register-password, -verify-email-input,
+                    -code, -new-password
   actions           ankiscape-account-primary, -back, -cancel, -resend,
-                    -check-status, -forgot, -go-register, -show-password
+                    -check-status, -forgot, -go-register, -reset-shortcut,
+                    -show-password
   status/error      ankiscape-account-status, ankiscape-account-error
 """
 from __future__ import annotations
@@ -177,14 +179,27 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     register_actions.addWidget(register_primary)
     register_actions.addStretch(1)
     register_layout.addLayout(register_actions)
+    reset_shortcut = QPushButton("Reset password")
+    reset_shortcut.setObjectName("ankiscape-account-reset-shortcut")
+    reset_shortcut.setVisible(False)
+    register_layout.addWidget(reset_shortcut)
     register_layout.addStretch(1)
 
     # ----------------------------------------------------------- verify page
     verify_page, verify_layout, verify_form = _page(
         "verify", "Enter the verification code from your email.")
-    verify_email = muted_label("")
+    verify_email = muted_label("", wrap=True)
     verify_email.setObjectName("ankiscape-account-verify-email")
+    verify_email.setText(
+        "Enter the code we emailed you for this account. Codes can take a "
+        "minute. Resend is available after the cooldown; providers may "
+        "limit repeated requests.")
     verify_layout.insertWidget(1, verify_email)
+    verify_email_input = QLineEdit()
+    verify_email_input.setObjectName("ankiscape-account-verify-email-input")
+    verify_email_input.setMaxLength(320)
+    verify_form.addRow("Email for this account:", verify_email_input)
+    inputs["verify_email"] = verify_email_input
     code = QLineEdit()
     code.setObjectName("ankiscape-account-code")
     code.setMaxLength(32)
@@ -241,6 +256,84 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     recovery_confirm_layout.addLayout(recovery_confirm_actions)
     recovery_confirm_layout.addStretch(1)
 
+    # ------------------------------------------------------------- home page
+    home_page, home_layout, home_form = _page(
+        "home", "Signed in. Progress syncs to your account.")
+    home_username = body_label("")
+    home_username.setObjectName("ankiscape-account-home-username")
+    home_layout.insertWidget(1, home_username)
+    home_sync = muted_label("", wrap=True)
+    home_sync.setObjectName("ankiscape-account-home-sync")
+    home_layout.insertWidget(2, home_sync)
+    home_actions = QHBoxLayout()
+    home_logout = QPushButton("Log out")
+    home_logout.setObjectName("ankiscape-account-logout")
+    delete_open = QPushButton("Delete account\u2026")
+    delete_open.setObjectName("ankiscape-account-delete-open")
+    delete_open.setProperty("class", "danger")
+    home_actions.addWidget(home_logout)
+    home_actions.addWidget(delete_open)
+    home_actions.addStretch(1)
+    home_layout.addLayout(home_actions)
+    home_layout.addStretch(1)
+
+    # ----------------------------------------------------------- delete page
+    delete_page, delete_layout, delete_form = _page(
+        "delete", "Deleting your account removes it permanently.")
+    delete_explain = body_label(
+        "This removes your account and its online data: game progress, "
+        "backups, scores and your place on the leaderboard. Your Classic "
+        "progress is not touched. Local Evolved progress on this computer "
+        "stays unless you choose to remove it below. Any pending changes "
+        "will be lost.", wrap=True)
+    delete_explain.setObjectName("ankiscape-account-delete-explain")
+    delete_layout.insertWidget(1, delete_explain)
+    delete_username = QLineEdit()
+    delete_username.setObjectName("ankiscape-account-delete-username")
+    delete_username.setMaxLength(64)
+    delete_form.addRow("Type your username exactly:", delete_username)
+    inputs["delete_username"] = delete_username
+    _secret_row(delete_form, "delete_password", "Your password:",
+                "ankiscape-account-delete-password")
+    delete_local = QCheckBox(
+        "Also delete my local progress for this game on this computer \u2014 "
+        "this cannot be undone.")
+    delete_local.setObjectName("ankiscape-account-delete-local")
+    delete_local.setChecked(False)
+    try:
+        # QCheckBox gained word wrap after some supported Qt builds.
+        delete_local.setWordWrap(True)
+    except AttributeError:
+        pass
+    delete_form.addRow("", delete_local)
+    inputs["delete_local"] = delete_local
+    delete_local_warning = QLabel(
+        "Local Evolved progress for this game will be erased on this "
+        "computer. Other computers keep their own copies. This cannot be "
+        "undone.")
+    delete_local_warning.setObjectName("ankiscape-account-delete-local-warning")
+    delete_local_warning.setWordWrap(True)
+    delete_local_warning.setProperty("class", "error")
+    delete_local_warning.setVisible(False)
+    delete_layout.addWidget(delete_local_warning)
+    delete_actions = QHBoxLayout()
+    delete_confirm = QPushButton("Delete account")
+    delete_confirm.setObjectName("ankiscape-account-delete-confirm")
+    delete_confirm.setProperty("class", "danger")
+    delete_confirm.setEnabled(False)
+    delete_check = QPushButton("Check status")
+    delete_check.setObjectName("ankiscape-account-delete-check")
+    delete_check.setVisible(False)
+    delete_retry_local = QPushButton("Retry local cleanup")
+    delete_retry_local.setObjectName("ankiscape-account-delete-retry-local")
+    delete_retry_local.setVisible(False)
+    delete_actions.addWidget(delete_confirm)
+    delete_actions.addWidget(delete_check)
+    delete_actions.addWidget(delete_retry_local)
+    delete_actions.addStretch(1)
+    delete_layout.addLayout(delete_actions)
+    delete_layout.addStretch(1)
+
     # ---------------------------------------------------------- shared footer
     footer = QHBoxLayout()
     back = QPushButton("Back")
@@ -257,11 +350,13 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     root.addLayout(footer)
 
     page_index = {"login": 0, "register": 1, "verify": 2,
-                  "recovery_request": 3, "recovery_confirm": 4}
+                  "recovery_request": 3, "recovery_confirm": 4,
+                  "home": 5, "delete": 6}
     primary_by_page = {"login": login_primary, "register": register_primary,
                        "verify": verify_primary,
                        "recovery_request": recovery_request_primary,
-                       "recovery_confirm": recovery_primary}
+                       "recovery_confirm": recovery_primary,
+                       "delete": delete_confirm}
 
     def _current_primary():
         return primary_by_page.get(flow.page, login_primary)
@@ -273,20 +368,51 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
             return
         stack.setCurrentIndex(page_index[page])
         for key in ("password", "register_password", "code", "new_password",
-                    "recovery_code"):
+                    "recovery_code", "delete_password"):
             edit = inputs.get(key)
             if edit is not None and page_index[page] != _page_index_for_input(key):
                 edit.clear()
         error.setText(payload.get("error", "") or "")
         status.setText(payload.get("status", "") or "")
+        if page == "home":
+            info = flow.home_info()
+            name = str(info.get("username", "") or "your account")
+            home_username.setText(f"Signed in as {name}.")
+            pending = int(info.get("pending", 0) or 0)
+            rejected = int(info.get("rejected", 0) or 0)
+            state = str(info.get("sync_state", "") or "local_only")
+            lines = []
+            if state:
+                lines.append("Sync: " + state.replace("_", " ") + ".")
+            lines.append(
+                f"{pending} change(s) waiting to sync"
+                + (f", {rejected} rejected" if rejected else "") + ".")
+            home_sync.setText(" ".join(lines))
+            delete_retry_local.setVisible(False)
+            delete_check.setVisible(False)
+        if page == "delete":
+            delete_check.setVisible(False)
+            delete_retry_local.setVisible(False)
+            _update_delete_confirm()
+        prefill_identity = payload.get("prefill_identity", "") or ""
+        if prefill_identity:
+            inputs["identity"].setText(prefill_identity)
+        prefill_email = payload.get("prefill_email", "") or ""
+        if prefill_email:
+            inputs["recovery_email"].setText(prefill_email)
+        verify_seed = (getattr(flow, "_verify_email", "")
+                       or flow._register_fields.get("email", ""))
+        if page == "verify" and verify_seed \
+                and not inputs["verify_email"].text().strip():
+            # Seed only an untouched field so a typed address survives.
+            inputs["verify_email"].setText(verify_seed)
         if page == "verify":
-            email_shown = (flow._register_fields.get("email", "")
-                           or flow._recovery_email)
-            verify_email.setText(
-                f"Code sent to {email_shown}" if email_shown else "")
             _update_resend()
         if page == "recovery_confirm":
             _update_resend()
+        reset_shortcut.setVisible(
+            page == "register"
+            and bool(getattr(flow, "_reset_shortcut", False)))
         back.setEnabled(flow.can_back())
         check.setVisible(bool(getattr(flow, "_uncertain_registration", False)))
         heading.setText({
@@ -295,11 +421,14 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
             "verify": "Verify your email",
             "recovery_request": "Reset password",
             "recovery_confirm": "Choose a new password",
+            "home": "Your account",
+            "delete": "Delete account",
         }.get(page, "Account"))
         focus = payload.get("focus", "")
         widget = inputs.get({
             "identity": "identity", "username": "username",
             "email": "recovery_email", "code": "code",
+            "delete_username": "delete_username",
         }.get(focus, ""))
         if widget is not None:
             try:
@@ -311,16 +440,30 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     def _page_index_for_input(key: str) -> int:
         return {
             "password": 0, "register_password": 1, "code": 2,
-            "recovery_code": 4, "new_password": 4,
+            "recovery_code": 4, "new_password": 4, "delete_password": 6,
         }.get(key, -1)
 
     def _refresh_primary_text(page: str) -> None:
         text = {"login": "Log in", "register": "Register",
                 "verify": "Verify", "recovery_request": "Send reset code",
-                "recovery_confirm": "Reset password"}.get(page, "Continue")
+                "recovery_confirm": "Reset password",
+                "delete": "Delete account and local progress"
+                if inputs["delete_local"].isChecked() else "Delete account",
+                }.get(page, "Continue")
         primary = primary_by_page.get(page)
         if primary is not None:
             primary.setText(text)
+
+    def _update_delete_confirm() -> None:
+        """The confirm button unlocks only for the exact display username and
+        a nonempty password. The controller revalidates at dispatch."""
+        authoritative = (flow.delete_username()
+                         if hasattr(flow, "delete_username") else "")
+        typed = inputs["delete_username"].text()
+        ok = bool(authoritative) and typed == authoritative \
+            and bool(inputs["delete_password"].text())
+        delete_confirm.setEnabled(bool(ok) and not flow.busy)
+        _refresh_primary_text(flow.page)
 
     def _update_resend() -> None:
         remaining = flow.resend_available_in() if hasattr(flow, "resend_available_in") else 0
@@ -341,14 +484,38 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
             busy = bool(payload.get("busy"))
             for button in (login_primary, register_primary, verify_primary,
                            recovery_request_primary, recovery_primary,
-                           go_register, forgot, resend, recovery_resend):
+                           go_register, forgot, resend, recovery_resend,
+                           reset_shortcut, delete_check, delete_retry_local):
                 button.setEnabled(not busy)
+            inputs["verify_email"].setEnabled(not busy)
+            inputs["delete_username"].setEnabled(not busy)
+            inputs["delete_password"].setEnabled(not busy)
+            inputs["delete_local"].setEnabled(not busy)
             check.setEnabled(not busy)
             back.setEnabled(not busy and flow.can_back())
+            _update_delete_confirm()
             if not busy:
                 _update_resend()
         elif name == "resend":
             _update_resend()
+        elif name == "reset_shortcut":
+            reset_shortcut.setVisible(bool(payload.get("visible"))
+                                      and flow.page == "register")
+        elif name == "delete_started":
+            delete_check.setVisible(False)
+            delete_retry_local.setVisible(False)
+            delete_local_warning.setVisible(
+                bool(inputs["delete_local"].isChecked()))
+        elif name == "delete_result":
+            result_status = str(payload.get("status", "") or "")
+            can_check = bool(payload.get("can_check"))
+            delete_check.setVisible(can_check
+                                    and result_status != "cleanup_incomplete")
+            delete_retry_local.setVisible(
+                result_status == "cleanup_incomplete")
+            delete_local_warning.setVisible(
+                bool(inputs["delete_local"].isChecked())
+                and result_status not in ("exists",))
         elif name == "uncertain":
             check.setVisible(True)
         elif name == "close":
@@ -369,12 +536,26 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
                                  inputs["email"].text(),
                                  inputs["register_password"].text())
         elif page == "verify":
-            flow.submit_verify(inputs["code"].text())
+            flow.submit_verify(inputs["code"].text(),
+                               inputs["verify_email"].text())
         elif page == "recovery_request":
             flow.request_recovery(inputs["recovery_email"].text())
         elif page == "recovery_confirm":
             flow.submit_reset(inputs["recovery_code"].text(),
                               inputs["new_password"].text())
+        elif page == "delete":
+            flow.submit_delete(inputs["delete_password"].text(),
+                               inputs["delete_username"].text(),
+                               bool(inputs["delete_local"].isChecked()))
+
+    def _resend():
+        # The verify page resends the signup code to its own recipient; the
+        # reset page resends recovery. Widgets are read on the main thread
+        # and the controller captures the recipient before any worker runs.
+        if flow.page == "verify":
+            flow.resend_code(inputs["verify_email"].text())
+        else:
+            flow.resend_code()
 
     for button in (login_primary, register_primary, verify_primary,
                    recovery_request_primary, recovery_primary):
@@ -382,9 +563,27 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     back.clicked.connect(flow.back)
     cancel.clicked.connect(flow.cancel)
     check.clicked.connect(flow.check_status)
-    resend.clicked.connect(flow.resend_code)
-    recovery_resend.clicked.connect(flow.resend_code)
+    resend.clicked.connect(_resend)
+    recovery_resend.clicked.connect(_resend)
     forgot.clicked.connect(lambda: flow.start("recovery_request"))
+    reset_shortcut.clicked.connect(
+        lambda: flow.open_recovery_with(flow._register_fields.get("email", "")))
+    home_logout.clicked.connect(flow.logout)
+    delete_open.clicked.connect(flow.open_delete)
+    delete_confirm.clicked.connect(_primary)
+    delete_check.clicked.connect(flow.check_deletion)
+    delete_retry_local.clicked.connect(flow.retry_local_cleanup)
+
+    def _local_toggled(checked: bool) -> None:
+        delete_local_warning.setVisible(bool(checked)
+                                        and not flow.busy)
+        _refresh_primary_text(flow.page)
+
+    delete_local.toggled.connect(_local_toggled)
+    inputs["delete_username"].textChanged.connect(
+        lambda _text: _update_delete_confirm())
+    inputs["delete_password"].textChanged.connect(
+        lambda _text: _update_delete_confirm())
 
     def _to_register():
         flow.start("register")

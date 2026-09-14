@@ -45,6 +45,16 @@ the Wilson-operated device checklist at the bottom.
 5b. Shell + account screens live: `python3 dev.py test --suite e2e --journey
    dialogs` (icon rail + Hiscores controls + register/login/recovery submit
    paths through the shipped builders).
+5c. Account lifecycle (native): `python3 dev.py test --suite e2e --journey
+   ui-account-lifecycle`. Covers flat hosted signup reaching verification
+   without manual Check status, an edited verify address routed to the signup
+   `resend` endpoint, automatic link/sync, obfuscated duplicate resolution
+   with the reset shortcut, recovery, the signed-in home, and account
+   deletion with keep-local cleanup, error and cancel paths.
+5d. Fresh-start notice (native): `python3 dev.py test --suite e2e --journey
+   upgrade`. Try Evolved stays disabled until the acknowledgement checkbox is
+   checked in the single upgrade dialog; returning activated players switch
+   without any notice. No Classic-to-Evolved transfer exists.
 6. Enable Keep me signed in -> restart with Resume -> account restored from
    Keychain. Log out -> restart -> signed out. Unchecked remember stays
    session-only. Offline review -> restart -> reconnect -> pending uploads in bounded

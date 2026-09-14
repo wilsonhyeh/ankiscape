@@ -94,13 +94,110 @@ def qt_chooser_dialog(parent=None) -> Callable[[], object]:
     return _run
 
 
+def _fresh_start_block(layout, ack_box, on_toggle) -> None:
+    """Shared prominent fresh-start copy + acknowledgement checkbox."""
+    try:
+        from aqt.qt import QLabel
+        from .widgets import display_label, muted_label
+    except Exception:
+        return
+    from ..onboarding import (FRESH_START_ACK_TEXT, FRESH_START_BODY,
+                              FRESH_START_TITLE)
+    heading = display_label(FRESH_START_TITLE)
+    heading.setObjectName("ankiscape-fresh-start-title")
+    try:
+        heading.setStyleSheet("color: #E3BE68; font-weight: bold;")
+    except Exception:
+        pass
+    layout.addWidget(heading)
+    body = muted_label(FRESH_START_BODY, wrap=True)
+    body.setObjectName("ankiscape-fresh-start-body")
+    layout.addWidget(body)
+    ack_box.setText(FRESH_START_ACK_TEXT)
+    ack_box.setObjectName("ankiscape-fresh-start-ack")
+    try:
+        ack_box.setWordWrap(True)
+    except Exception:
+        pass
+    layout.addWidget(ack_box)
+    ack_box.toggled.connect(on_toggle)
+    _ = QLabel
+
+
+def show_fresh_start_notice(parent=None) -> str:
+    """One-use Classic -> Evolved acknowledgement.
+
+    Returns "evolved" only when Continue was clicked with the checkbox
+    checked, "classic" for an explicit Stay on Classic click, and "" for
+    close/Escape/dialog failure (which must not persist anything).
+    """
+    try:
+        from aqt.qt import (QCheckBox, QDialog, QHBoxLayout, QPushButton,
+                            QVBoxLayout)
+    except Exception:
+        return ""
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("AnkiScape Evolved")
+    dlg.setObjectName("ankiscape-fresh-start-notice")
+    try:
+        from aqt.qt import Qt
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    except Exception:
+        pass
+    try:
+        from .widgets import apply_theme
+        apply_theme(dlg)
+    except Exception:
+        pass
+    layout = QVBoxLayout(dlg)
+    ack = QCheckBox("")
+    choice = {"mode": ""}
+    continue_btn = QPushButton("Try Evolved")
+    continue_btn.setObjectName("ankiscape-fresh-start-continue")
+    continue_btn.setEnabled(False)
+    try:
+        continue_btn.setStyleSheet(
+            "QPushButton { border-color: #E3BE68; color: #E3BE68; "
+            "font-weight: bold; }")
+    except Exception:
+        pass
+
+    def _toggle(checked: bool) -> None:
+        continue_btn.setEnabled(bool(checked))
+
+    _fresh_start_block(layout, ack, _toggle)
+    row = QHBoxLayout()
+    classic_btn = QPushButton("Stay on Classic")
+    classic_btn.setObjectName("ankiscape-fresh-start-cancel")
+
+    def _choose(mode: str) -> None:
+        choice["mode"] = mode
+        dlg.accept()
+
+    continue_btn.clicked.connect(lambda: _choose("evolved"))
+    classic_btn.clicked.connect(lambda: _choose("classic"))
+    row.addWidget(continue_btn)
+    row.addWidget(classic_btn)
+    row.addStretch(1)
+    layout.addLayout(row)
+    result = dlg.exec()
+    try:
+        dlg.deleteLater()
+    except Exception:
+        pass
+    if result != QDialog.DialogCode.Accepted:
+        return ""
+    return choice.get("mode", "")
+
+
 def show_upgrade_prompt(*, get_requested, set_requested, qt_dialog=None) -> str:
     """Classic-upgrade prompt driver.
 
-    'evolved' tries Evolved in the same visit; anything else (Continue
-    Classic, close, Escape, dialog failure) keeps Classic active and leaves
-    the Try Evolved invitation in the Classic menu. Either choice persists
-    the requested mode so the prompt is asked once.
+    'evolved' tries Evolved in the same visit; 'classic' is an explicit
+    Continue Classic and persists that choice. Close/Escape/dialog failure
+    returns "" and changes NOTHING (no mode persistence), so the Try Evolved
+    invitation stays. The embedded acknowledgement gates Try Evolved inside
+    the single dialog.
     """
     try:
         current = get_requested()
@@ -109,14 +206,14 @@ def show_upgrade_prompt(*, get_requested, set_requested, qt_dialog=None) -> str:
     if current not in ("classic", "evolved"):
         current = "classic"
     if qt_dialog is None:
-        chosen = "classic"
+        chosen = ""
     else:
         try:
             chosen = qt_dialog()
         except Exception:
             chosen = None
     if chosen not in ("classic", "evolved"):
-        chosen = "classic"
+        return ""
     try:
         set_requested(chosen)
     except Exception:
@@ -125,11 +222,15 @@ def show_upgrade_prompt(*, get_requested, set_requested, qt_dialog=None) -> str:
 
 
 def qt_upgrade_dialog(parent=None) -> Callable[[], object]:
-    """Build the real Try Evolved / Continue Classic dialog caller."""
+    """Build the real single-dialog Try Evolved / Continue Classic caller.
+
+    The fresh-start copy and acknowledgement live inside this one dialog;
+    Try Evolved stays disabled until the checkbox is checked.
+    """
     def _run():
         try:
-            from aqt.qt import (QDialog, QDialogButtonBox, QLabel, QPushButton,
-                                QVBoxLayout)
+            from aqt.qt import (QCheckBox, QDialog, QDialogButtonBox, QLabel,
+                                QPushButton, QVBoxLayout)
         except Exception:
             return None
         dlg = QDialog(parent)
@@ -150,9 +251,10 @@ def qt_upgrade_dialog(parent=None) -> Callable[[], object]:
             "AnkiScape Evolved is ready.\n\n"
             "Evolved is a fresh six-skill game with its own progress, plus "
             "optional online Hiscores and cross-device catch-up. Your Classic "
-            "progress is saved and untouched — you can switch back at any "
+            "progress is saved and untouched \u2014 you can switch back at any "
             "time, and nothing restarts."))
-        choice = {"mode": "classic"}
+        choice = {"mode": ""}
+        ack = QCheckBox("")
         try_btn = QPushButton("Try Evolved")
         try_btn.setObjectName("ankiscape-upgrade-try")
         try:
@@ -161,12 +263,21 @@ def qt_upgrade_dialog(parent=None) -> Callable[[], object]:
                 "font-weight: bold; }")
         except Exception:
             pass
-        try_btn.clicked.connect(
-            lambda: (choice.update(mode="evolved"), dlg.accept()))
+        try_btn.setEnabled(False)
+
+        def _toggle(checked: bool) -> None:
+            try_btn.setEnabled(bool(checked))
+
+        _fresh_start_block(layout, ack, _toggle)
+
+        def _choose(mode: str) -> None:
+            choice["mode"] = mode
+            dlg.accept()
+
+        try_btn.clicked.connect(lambda: _choose("evolved"))
         classic_btn = QPushButton("Continue Classic")
         classic_btn.setObjectName("ankiscape-upgrade-classic")
-        classic_btn.clicked.connect(
-            lambda: (choice.update(mode="classic"), dlg.accept()))
+        classic_btn.clicked.connect(lambda: _choose("classic"))
         layout.addWidget(try_btn)
         layout.addWidget(classic_btn)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
@@ -179,5 +290,5 @@ def qt_upgrade_dialog(parent=None) -> Callable[[], object]:
             pass
         if result != QDialog.DialogCode.Accepted:
             return None
-        return choice.get("mode", "classic")
+        return choice.get("mode", "")
     return _run

@@ -17,6 +17,14 @@ decides otherwise.
   delivery.
 - Hiscores are per-skill, username + XP only. No friends, clans, or web
   hiscores.
+- Evolved starts fresh: Classic levels, XP and items are never transferred.
+  There is no Classic-to-Evolved transfer, and the first switch shows a
+  fresh-start acknowledgement. Each mode keeps its own progress.
+- Account deletion removes the server account and its online data (game
+  progress, backups, scores and leaderboard presence). It does not promise
+  erasure of provider backups or provider operational logs, and shared
+  short-lived anti-abuse buckets may retain digests. Local Evolved progress
+  is kept unless the user opts in to remove it on that computer.
 
 ## Platform
 

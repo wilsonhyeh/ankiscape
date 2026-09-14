@@ -33,6 +33,14 @@ Qt5/Qt6, macOS/Linux/Windows.
   Offline results are provisional until reconciliation; concurrent
   ingredient conflicts resolve to zero reward for the losing action (policy
   2), and reconciliation says so.
+- Evolved starts fresh at level 1: Classic levels, XP and items are NOT
+  transferred (there is no Classic-to-Evolved transfer; Evolved has its own
+  shared leaderboard). The first switch to Evolved asks for an explicit
+  "I understand" acknowledgement. Both modes keep their own progress and
+  switching between them never restarts either one.
+- Deleting your account (Account → Delete account) removes the server account
+  and its online data; local Evolved progress stays unless you also tick the
+  local-removal box. Deletion needs your password and your exact username.
 - Keep me signed in stores the session in macOS Keychain (or an available system credential backend). Passwords are never saved; Log out removes the saved session. If no secure backend is available, sign-in lasts for this session only.
 - Forgot password is available from Log in and Settings → Account. Request an email code, then enter it with a new password.
 - The Guide tab is an offline handbook covering all six skills, exact XP formulas, every recipe and resource, levels 1–99, gems, achievements, catch-up, accounts, and backups. Tables are generated from the shipped game rules.

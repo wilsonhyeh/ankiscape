@@ -69,6 +69,41 @@ class MemorySession:
         if callable(self.on_change):
             self.on_change(self)
 
+    def set_guarded(self, *, expect_refresh_token, expect_user_id,
+                    access_token: str, refresh_token: str, user_id: str,
+                    username: Optional[str] = None) -> bool:
+        """Install rotated tokens only when the session still belongs to the
+        snapshot the caller refreshed for. Comparison and mutation happen
+        under the session lock; a logout or newer login wins."""
+        with self._lock:
+            if self.refresh_token != expect_refresh_token:
+                return False
+            if expect_user_id is not None and self.user_id != expect_user_id:
+                return False
+            self.access_token = access_token
+            self.refresh_token = refresh_token
+            self.user_id = user_id
+            self.username = username
+        if callable(self.on_change):
+            self.on_change(self)
+        return True
+
+    def clear_guarded(self, *, expect_refresh_token,
+                      expect_user_id) -> bool:
+        """Clear only when the session still matches the refreshed snapshot."""
+        with self._lock:
+            if self.refresh_token != expect_refresh_token:
+                return False
+            if expect_user_id is not None and self.user_id != expect_user_id:
+                return False
+            self.access_token = None
+            self.refresh_token = None
+            self.user_id = None
+            self.username = None
+        if callable(self.on_change):
+            self.on_change(self)
+        return True
+
     @property
     def logged_in(self) -> bool:
         with self._lock:

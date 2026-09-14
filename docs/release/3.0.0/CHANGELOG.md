@@ -5,6 +5,13 @@ choice on first launch: **Try Evolved** or **Continue Classic**. Classic
 stays frozen; Evolved starts fresh at level 1 / 0 XP (no stat transfer, for
 hiscore fairness). Paths can be switched later in Settings → Advanced.
 
+The first switch to Evolved now requires an explicit acknowledgement:
+"Evolved starts fresh." — Classic levels, XP and items are **not**
+transferred, each mode keeps its own progress, switching never restarts
+either game, and there is no Classic-to-Evolved transfer. Returning players
+with an activated Evolved game see no notice; canceling the notice changes
+nothing.
+
 ## Added
 
 - **Evolved game**: six skills (Mining, Woodcutting, Smithing, Crafting,

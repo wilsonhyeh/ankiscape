@@ -816,7 +816,85 @@ except Exception:
 _EVOLVED_CTX: dict = {"engine": None, "journal": None, "game_uuid": None,
                        "generation": 0, "user_id": None, "profile_session": None,
                        "sync_service": None, "endpoint": None,
-                       "endpoint_dev": None, "self_context": None}
+                       "endpoint_dev": None, "self_context": None,
+                       "account_epoch": 0, "deletion": None,
+                       "deletion_blocked_user": None}
+
+# In-flight account/sync worker count. Deletion cleanup waits for zero
+# without blocking the UI thread (polled through the coordinator).
+_EVOLVED_ACCOUNT_INFLIGHT: dict = {"count": 0}
+
+
+def _evolved_account_epoch() -> int:
+    return int(_EVOLVED_CTX.get("account_epoch", 0) or 0)
+
+
+def _evolved_fence_account_operations() -> int:
+    """Invalidate every in-flight account operation for the current identity.
+
+    Late link/refresh/sync callbacks compare their captured epoch and must
+    not install sessions or bindings after a deletion fence.
+    """
+    epoch = _evolved_account_epoch() + 1
+    _EVOLVED_CTX["account_epoch"] = epoch
+    return epoch
+
+
+def _evolved_deletion_profile_dir():
+    try:
+        pm = getattr(mw, "pm", None)
+        if pm is not None and hasattr(pm, "profileFolder"):
+            return pm.profileFolder()
+    except Exception:
+        pass
+    return None
+
+
+def _evolved_deletion_marker(*, user_id: str = "", game_uuid: str = ""):
+    """The profile's deletion marker when it matches the query, else None.
+    A pending marker without a conclusive reply resumes as unknown."""
+    from .evolved.deletion import (marker_matches, read_marker,
+                                   resume_pending_marker)
+    profile_dir = _evolved_deletion_profile_dir()
+    if not profile_dir:
+        return None
+    marker = read_marker(profile_dir)
+    if not marker_matches(marker, user_id=user_id, game_uuid=game_uuid):
+        return None
+    if marker.get("phase") == "pending":
+        resume_pending_marker(profile_dir, marker)
+        marker = read_marker(profile_dir)
+    return marker
+
+
+def _evolved_apply_deferred_deletion_cleanup(col) -> None:
+    """Finish a cleanup_pending marker for THIS profile before engine
+    creation. Never touches another game's files or another identity."""
+    from .evolved.deletion import (canonical_game_dir, clear_marker,
+                                   read_marker, remove_game_dir)
+    profile_dir = _evolved_deletion_profile_dir()
+    if not profile_dir or col is None:
+        return
+    marker = read_marker(profile_dir)
+    if not marker or marker.get("phase") != "cleanup_pending":
+        return
+    game_uuid = str(marker.get("game_uuid") or "")
+    if marker.get("delete_local") and game_uuid:
+        game_dir = canonical_game_dir(profile_dir, game_uuid)
+        if game_dir is None or not remove_game_dir(game_dir):
+            return
+    try:
+        pointer = col.get_config("ankiscape_evolved_player_data", None)
+    except Exception:
+        pointer = None
+    if isinstance(pointer, dict) and str(pointer.get("game_uuid") or "") \
+            == game_uuid:
+        try:
+            col.set_config("ankiscape_evolved_player_data", None)
+            col.set_config("ankiscape_evolved_onboarding", None)
+        except Exception:
+            return
+    clear_marker(profile_dir)
 
 # Async reward finalization: review_key -> captured context. Outcomes are
 # finalized exactly once for the session recap and the 200-review sync
@@ -953,6 +1031,20 @@ def _evolved_identity_active() -> bool:
             _onb.evolved_identity(lambda k, d=None: col.get_config(k, d)))
     except Exception:
         return False
+
+
+def _evolved_fresh_start_required() -> bool:
+    """True until an Evolved game identity has a valid positive activation."""
+    try:
+        from .evolved import onboarding as _onb
+        col = getattr(mw, "col", None)
+        if col is None:
+            return True
+        pointer = _onb.evolved_identity(
+            lambda k, d=None: col.get_config(k, d))
+        return _onb.fresh_start_gate_required(pointer)
+    except Exception:
+        return True
 
 
 def _evolved_selections() -> dict:
@@ -1802,7 +1894,17 @@ def _evolved_lookup_async(username: str, skill: str, on_done,
 
 
 def _evolved_account_runner(work, deliver):
-    """Run account/sync work off the Qt thread; deliver on the main thread."""
+    """Run account/sync work off the Qt thread; deliver on the main thread.
+
+    In-flight accounting lets destructive cleanup wait for outstanding
+    link/refresh/sync work without blocking the UI thread."""
+    def _tracked():
+        _EVOLVED_ACCOUNT_INFLIGHT["count"] += 1
+        try:
+            return work()
+        finally:
+            _EVOLVED_ACCOUNT_INFLIGHT["count"] -= 1
+
     taskman = getattr(mw, "taskman", None)
     if taskman is not None:
         try:
@@ -1813,18 +1915,267 @@ def _evolved_account_runner(work, deliver):
                 except Exception as exc:
                     value = exc
                 deliver(value)
-            taskman.run_in_background(work, _bg)
+            taskman.run_in_background(_tracked, _bg)
             return
         except Exception:
             pass
     try:
         from .evolved.ui.account import default_runner
-        default_runner()(work, deliver)
+        default_runner()(_tracked, deliver)
     except Exception:
         try:
-            deliver(work())
+            deliver(_tracked())
         except Exception as exc:
             deliver(exc)
+
+
+def _evolved_account_home() -> dict:
+    """Home-page facts: authoritative username, sync state and counters."""
+    sess = _evolved_profile_session()
+    logged_in = bool(sess is not None and sess.logged_in)
+    status = _evolved_status()
+    return {"logged_in": logged_in,
+            "username": (getattr(sess, "username", None) or "") if sess else "",
+            "sync_state": str(status.get("sync_state", "") or ""),
+            "pending": int(status.get("pending", 0) or 0),
+            "rejected": int(status.get("rejected", 0) or 0),
+            "last_error": str(status.get("last_error", "") or "")}
+
+
+def _evolved_deletion_event(event: str, payload: dict) -> None:
+    """Relay coordinator events to the live window (if any) and the UI."""
+    flow = _EVOLVED_CTX.get("account_flow")
+    if flow is not None:
+        try:
+            flow.apply_delete_event(event, payload)
+        except Exception:
+            pass
+    _evolved_refresh_views()
+    try:
+        from aqt.utils import tooltip
+        if event == "deleted":
+            tooltip("Account deleted.")
+        elif event == "cleanup_incomplete":
+            tooltip("Account deleted; local cleanup is incomplete.")
+        elif event == "unknown":
+            tooltip("Could not confirm deletion. Open the account window to "
+                    "check status.")
+    except Exception:
+        pass
+
+
+def _evolved_deletion_check_exists():
+    """Reconciliation probe for the ORIGINAL authenticated identity.
+
+    True only on a validated Auth user lookup for that identity. Any 401,
+    expired token, network failure or unknown answer is inconclusive (None),
+    never proof of deletion. Authoritative absence is confirmed by the
+    local/E2E service-role path or Wilson's admin check."""
+    from .evolved.net import NetError
+    from .evolved.net import post_json as _post
+    marker = _EVOLVED_CTX.get("deletion_marker") or {}
+    user_id = str(marker.get("user_id") or "")
+    if not user_id:
+        return None
+    endpoint = _evolved_endpoint()
+    if endpoint is None:
+        return None
+    sess = _EVOLVED_CTX.get("profile_session")
+    token = ""
+    if sess is not None and str(getattr(sess, "user_id", "") or "") == user_id:
+        if not getattr(sess, "logged_in", False):
+            try:
+                sess.refresh_once()
+            except Exception:
+                pass
+        token = str(getattr(sess, "access_token", "") or "")
+    if not token:
+        token = str(_EVOLVED_CTX.get("deletion_token") or "")
+    if not token:
+        return None
+    try:
+        data = _post(endpoint, "/auth/v1/user", {}, access_token=token)
+    except NetError:
+        return None
+    except Exception:
+        return None
+    return bool(isinstance(data, dict) and data.get("id") == user_id)
+
+
+def _evolved_begin_account_deletion(username: str, password: str,
+                                    delete_local: bool) -> None:
+    """Build and start one deletion coordinator for this profile/game."""
+    from .evolved.deletion import DeletionCoordinator, DeletionDeps
+    sess = _evolved_profile_session()
+    endpoint = _evolved_endpoint()
+    profile_dir = _evolved_deletion_profile_dir()
+    engine = _EVOLVED_CTX.get("engine")
+    game_uuid = ""
+    try:
+        if engine is not None:
+            game_uuid = str(engine.cfg.game_uuid or "")
+    except Exception:
+        game_uuid = ""
+    if not game_uuid:
+        game_uuid = str(_EVOLVED_CTX.get("game_uuid") or "")
+    captured_user = str(getattr(sess, "user_id", "") or "")
+    if sess is None or endpoint is None or not profile_dir or not captured_user:
+        _evolved_deletion_event("refused", {
+            "status": "account_unavailable",
+            "message": "This profile can't be deleted right now."})
+        return
+    captured_token = str(getattr(sess, "access_token", "") or "")
+    _EVOLVED_CTX["deletion_marker"] = {
+        "user_id": captured_user, "game_uuid": game_uuid}
+    _EVOLVED_CTX["deletion_token"] = captured_token
+
+    def _clear_identity() -> bool:
+        live_sess = _EVOLVED_CTX.get("profile_session")
+        if live_sess is None:
+            return True
+        inner = getattr(live_sess, "session", None)
+        if inner is None:
+            return False
+        live_user = str(getattr(inner, "user_id", "") or "")
+        if not live_user or live_user != captured_user:
+            return True  # already cleared, or a newer identity owns it
+        try:
+            cleared = inner.clear_guarded(
+                expect_refresh_token=inner.refresh_token,
+                expect_user_id=captured_user)
+        except Exception:
+            return False
+        if not cleared:
+            return False
+        _EVOLVED_CTX["user_id"] = None
+        _EVOLVED_CTX["sync_service"] = None
+        return bool(getattr(live_sess, "persistence_ok", True))
+
+    def _detach_binding() -> bool:
+        ok = True
+        journal = None
+        try:
+            if engine is not None:
+                journal = getattr(engine, "journal", None)
+        except Exception:
+            journal = None
+        if journal is None:
+            journal = _EVOLVED_CTX.get("journal")
+        if journal is not None:
+            try:
+                journal.set_metadata("account_binding", "")
+            except Exception:
+                ok = False
+        _EVOLVED_CTX["sync_service"] = None
+        _EVOLVED_CTX["link_state"] = "logged_out"
+        _EVOLVED_CTX["link_message"] = ""
+        _EVOLVED_CTX["remote_ops_dirty"] = False
+        try:
+            _evolved_cancel_timer()
+        except Exception:
+            pass
+        try:
+            _evolved_refresh_views()
+        except Exception:
+            pass
+        return ok
+
+    def _stop_local_work() -> None:
+        try:
+            _evolved_cancel_timer()
+        except Exception:
+            pass
+        _EVOLVED_CTX["sync_service"] = None
+
+    def _close_journal() -> None:
+        journal = None
+        try:
+            if engine is not None:
+                journal = getattr(engine, "journal", None)
+        except Exception:
+            journal = None
+        if journal is None:
+            journal = _EVOLVED_CTX.get("journal")
+        if journal is not None:
+            try:
+                journal.close()
+            except Exception:
+                pass
+        _EVOLVED_CTX["engine"] = None
+        _EVOLVED_CTX["journal"] = None
+        _EVOLVED_CTX["game_uuid"] = None
+
+    def _clear_pointer() -> str:
+        col = getattr(mw, "col", None)
+        if col is None:
+            return "deferred"
+        try:
+            pointer = col.get_config("ankiscape_evolved_player_data", None)
+        except Exception:
+            return "failed"
+        if isinstance(pointer, dict):
+            pointer_game = str(pointer.get("game_uuid") or "")
+            if pointer_game and game_uuid and pointer_game != game_uuid:
+                return "done"  # another game's identity: leave it alone
+        try:
+            col.set_config("ankiscape_evolved_player_data", None)
+            col.set_config("ankiscape_evolved_onboarding", None)
+        except Exception:
+            return "failed"
+        return "done"
+
+    def _suspend_online() -> None:
+        _EVOLVED_CTX["deletion_blocked_user"] = captured_user
+        _EVOLVED_CTX["sync_service"] = None
+
+    def _resume_online() -> None:
+        if _EVOLVED_CTX.get("deletion_blocked_user") == captured_user:
+            _EVOLVED_CTX["deletion_blocked_user"] = None
+
+    deps = DeletionDeps(
+        post=_post_mod(), endpoint=endpoint, accounts=_accounts_mod(),
+        profile_dir=profile_dir, user_id=captured_user,
+        username=str(username or getattr(sess, "username", "") or ""),
+        game_uuid=game_uuid, delete_local=bool(delete_local),
+        access_token=captured_token, runner=_evolved_account_runner,
+        on_event=_evolved_deletion_event,
+        check_account_exists=_evolved_deletion_check_exists,
+        clear_identity=_clear_identity, detach_binding=_detach_binding,
+        stop_local_work=_stop_local_work,
+        await_workers=lambda: _EVOLVED_ACCOUNT_INFLIGHT["count"] == 0,
+        close_journal=_close_journal, clear_pointer=_clear_pointer,
+        fence_epoch=_evolved_fence_account_operations,
+        suspend_online=_suspend_online, resume_online=_resume_online)
+    coordinator = DeletionCoordinator(deps)
+    _EVOLVED_CTX["deletion"] = coordinator
+    if not coordinator.begin(password, username=username):
+        _EVOLVED_CTX["deletion"] = None
+
+
+def _post_mod():
+    from .evolved.net import post_json
+    return post_json
+
+
+def _accounts_mod():
+    from .evolved import accounts
+    return accounts
+
+
+def _evolved_check_account_deletion() -> None:
+    coordinator = _EVOLVED_CTX.get("deletion")
+    if coordinator is None:
+        _evolved_deletion_event("exists", {})
+        return
+    coordinator.reconcile()
+
+
+def _evolved_retry_local_deletion_cleanup() -> None:
+    coordinator = _EVOLVED_CTX.get("deletion")
+    if coordinator is None:
+        _evolved_deletion_event("deleted", {})
+        return
+    coordinator.retry_local_cleanup()
 
 
 def _evolved_account_context():
@@ -1856,9 +2207,14 @@ def _evolved_account_context():
             generation=generation, user_id=lambda: sess.user_id,
             on_remember=_on_remember,
             on_close=lambda result: _evolved_refresh_views(),
-            on_verified=lambda: _evolved_post_auth_coordinator("verified"),
+            on_verified=_evolved_show_email_verified,
             on_password_updated=_evolved_show_password_updated,
             on_reset_done=lambda: _evolved_post_auth_coordinator("reset"),
+            home=_evolved_account_home,
+            on_logout=_evolved_logout,
+            on_delete=_evolved_begin_account_deletion,
+            on_delete_check=_evolved_check_account_deletion,
+            on_delete_retry_local=_evolved_retry_local_deletion_cleanup,
         )
     except Exception:
         return None
@@ -1873,8 +2229,13 @@ def _evolved_account_window(page: str = "login") -> dict:
         return {"ok": False, "error": "Account service is not configured."}
     flow = AccountFlow(ctx)
     parent = getattr(mw, "ankiscape_evolved_shell", None) or mw
-    result = open_account_window(parent, flow, runner=ctx.runner,
-                                 start_page=page)
+    _EVOLVED_CTX["account_flow"] = flow
+    try:
+        result = open_account_window(parent, flow, runner=ctx.runner,
+                                     start_page=page)
+    finally:
+        if _EVOLVED_CTX.get("account_flow") is flow:
+            _EVOLVED_CTX["account_flow"] = None
     _evolved_refresh_views()
     return result if isinstance(result, dict) else {"ok": False}
 
@@ -1894,19 +2255,43 @@ def _evolved_show_password_updated() -> None:
         pass
 
 
-def _evolved_post_auth_coordinator(reason: str = "login") -> None:
+def _evolved_show_email_verified() -> None:
+    """Nonmodal post-verification notice. The syncing clause is only used
+    when link/sync work was actually scheduled; otherwise say it plainly."""
+    scheduled = False
+    try:
+        scheduled = bool(_evolved_post_auth_coordinator("verified"))
+    except Exception:
+        scheduled = False
+    try:
+        from aqt.utils import tooltip
+        tooltip("Email verified \u2014 syncing your progress in the background."
+                if scheduled else "Email verified.")
+    except Exception:
+        pass
+    try:
+        from .evolved.ui.shell import refresh_shell
+        if getattr(mw, "ankiscape_evolved_shell", None) is not None:
+            refresh_shell(mw)
+    except Exception:
+        pass
+
+
+def _evolved_post_auth_coordinator(reason: str = "login") -> bool:
     """The one post-auth path for signup verification, login, reset and
     remembered-session restoration: verify the session, link the game with
     the authoritative idempotent RPC, persist the local binding, then request
-    sync. Login success stays success even when linkage fails."""
+    sync. Login success stays success even when linkage fails. Returns True
+    when link/sync work was scheduled."""
     try:
         engine = _ensure_evolved_engine()
         if engine is None:
-            return
+            return False
         game_uuid = engine.cfg.game_uuid
         journal = engine.journal
     except Exception:
-        return
+        return False
+    epoch = _evolved_account_epoch()
     _EVOLVED_CTX["link_state"] = "linking"
     _EVOLVED_CTX["link_message"] = "Linking this game to your account\u2026"
     _evolved_refresh_views()
@@ -1921,6 +2306,11 @@ def _evolved_post_auth_coordinator(reason: str = "login") -> None:
                     "message": "Not signed in; progress is saved here."}
         result = ensure_link(_post, endpoint, sess, game_uuid=game_uuid,
                              refresh=lambda: sess.refresh_once())
+        if _evolved_account_epoch() != epoch:
+            # A deletion fenced this identity while the request was in
+            # flight: never recreate a binding for it.
+            return {"state": "logged_out",
+                    "message": "This account's local link was cleared."}
         if result.linked:
             persist_binding(journal, result, game_uuid=game_uuid,
                             user_id=sess.user_id or "",
@@ -1930,6 +2320,9 @@ def _evolved_post_auth_coordinator(reason: str = "login") -> None:
 
     def deliver(out):
         out = out if isinstance(out, dict) else {"state": "service_error"}
+        if _evolved_account_epoch() != epoch:
+            _evolved_refresh_views()
+            return
         _EVOLVED_CTX["link_state"] = str(out.get("state", "service_error"))
         _EVOLVED_CTX["link_message"] = str(out.get("message", ""))
         if out.get("linked"):
@@ -1937,6 +2330,7 @@ def _evolved_post_auth_coordinator(reason: str = "login") -> None:
         _evolved_refresh_views()
 
     _evolved_account_runner(work, deliver)
+    return True
 
 
 def _evolved_register_dialog_flow() -> None:
@@ -2087,28 +2481,26 @@ def _evolved_dev_anon_key() -> str:
 
 
 def _evolved_refresh_session(session, accounts_mod, post_fn) -> bool:
-    """Refresh access token via Supabase; serialized by ProfileSession."""
+    """Refresh access token via Supabase; serialized by ProfileSession.
+
+    The owner guard (snapshot compare + guarded install/clear) lives in
+    accounts.refresh_access_token so the runtime and the local contract
+    harness exercise the same implementation. The account-operation epoch
+    fences a reply that arrives after a deletion started."""
     try:
+        epoch = _evolved_account_epoch()
         endpoint = _evolved_endpoint()
-        if endpoint is None or not session.refresh_token:
-            return False
-        from .evolved.net import NetError
-        try:
-            data = post_fn(endpoint, "/auth/v1/token?grant_type=refresh_token",
-                           {"refresh_token": session.refresh_token})
-        except NetError as exc:
-            if exc.kind in ("unauthorized", "invalid", "forbidden"):
-                session.clear()
-            return False
-        if not isinstance(data, dict):
-            return False
-        access, refresh = data.get("access_token"), data.get("refresh_token")
-        user = data.get("user", {}) or {}
-        if not access or not refresh or not user.get("id"):
-            return False
-        session.set(access_token=access, refresh_token=refresh,
-                    user_id=user.get("id"), username=session.username)
-        return True
+
+        def _guard() -> bool:
+            if _evolved_account_epoch() != epoch:
+                return False
+            if _EVOLVED_CTX.get("deletion_blocked_user") == (
+                    session.user_id or ""):
+                return False
+            return True
+
+        return bool(accounts_mod.refresh_access_token(
+            post_fn, endpoint, session, guard=_guard))
     except Exception:
         return False
 
@@ -2126,6 +2518,10 @@ def _evolved_sync_service():
             return None
         sess = _evolved_profile_session()
         if sess is None or not sess.logged_in:
+            return None
+        if _EVOLVED_CTX.get("deletion_blocked_user") == (sess.user_id or ""):
+            # Online work is suspended for an identity with an unresolved
+            # deletion; local play stays available.
             return None
         endpoint = _evolved_endpoint()
         if endpoint is None:
@@ -2408,23 +2804,13 @@ def _evolved_query_hiscores(skill: str, limit: int = 50,
 
 
 def _evolved_account_dialog() -> None:
-    """Account button: one account window for login; a signed-in click shows
-    status instead of silently signing the user out (logout is explicit in
-    Settings → Account)."""
+    """Account button: the one account window — signed-in home when a session
+    exists, Login otherwise. Logout and deletion live inside the window."""
     try:
         sess = _evolved_profile_session()
         if sess is None or _evolved_endpoint() is None:
             return
-        if sess.logged_in:
-            name = getattr(sess, "username", None) or "your account"
-            try:
-                from aqt.utils import tooltip
-                tooltip(f"Signed in as {name}. "
-                        "Log out from Settings \u2192 Account.")
-            except Exception:
-                pass
-            return
-        _evolved_account_window("login")
+        _evolved_account_window("home" if sess.logged_in else "login")
     except Exception:
         pass
 
@@ -2786,8 +3172,10 @@ def _routing_on_profile_load():
 def _ask_upgrade_choice() -> str:
     """Upgrade prompt: Try Evolved / Continue Classic. Close keeps Classic.
 
-    Choosing Try Evolved activates setup in the SAME visit (no restart); the
-    prompt is asked once because either choice persists the requested mode.
+    Choosing Try Evolved activates setup in the SAME visit (no restart). An
+    explicit choice persists the requested mode; close/Escape persists
+    nothing. The dialog itself carries the fresh-start acknowledgement, so
+    the switch is told not to show a second notice.
     """
     from .evolved.ui.chooser import qt_upgrade_dialog, show_upgrade_prompt
     col = getattr(mw, "col", None)
@@ -2809,18 +3197,15 @@ def _ask_upgrade_choice() -> str:
             set_requested=lambda m: _mode_mod.set_requested_mode(_set, m),
             qt_dialog=qt_upgrade_dialog(getattr(mw, "app", None) and mw))
     except Exception:
-        result = _mode_mod.CLASSIC
+        result = ""
     if result == _mode_mod.EVOLVED:
         try:
-            _switch_mode_now(_mode_mod.EVOLVED, open_onboarding=True)
+            _switch_mode_now(_mode_mod.EVOLVED, open_onboarding=True,
+                             fresh_start_ack=True)
         except Exception:
             pass
-    else:
-        try:
-            _mode_mod.set_requested_mode(_set, _mode_mod.CLASSIC)
-        except Exception:
-            pass
-    return result
+        return result
+    return result or _mode_mod.CLASSIC
 
 
 def _begin_runtime_with(requested: str, *, run_catchup: bool = True):
@@ -2885,6 +3270,12 @@ def _evolved_maybe_restore_session() -> None:
         sess = _evolved_profile_session()
         if sess is None or not sess.logged_in:
             return
+        marker = _evolved_deletion_marker(user_id=sess.user_id or "")
+        if marker is not None:
+            # A deletion for this identity is unresolved: never restore the
+            # session's online work across restart.
+            _EVOLVED_CTX["deletion_blocked_user"] = marker.get("user_id")
+            return
         _EVOLVED_CTX["restored_generation"] = gen
         _EVOLVED_CTX["link_state"] = "linking"
         _EVOLVED_CTX["link_message"] = "Linking this game to your account\u2026"
@@ -2916,12 +3307,15 @@ def _evolved_reviewer_active() -> bool:
     return False
 
 
-def _switch_mode_now(mode: str, *, open_onboarding: bool = False) -> dict:
+def _switch_mode_now(mode: str, *, open_onboarding: bool = False,
+                     fresh_start_ack: bool = False) -> dict:
     """Immediate mode transition (decision 22). No restart, ever.
 
-    Rejected while the reviewer is active. Invalidates the generation before
-    releasing widgets/HUD/credentials, then activates the new adapter and
-    refreshes entry points. Both stores are preserved.
+    Rejected while the reviewer is active. Every Classic -> Evolved switch
+    passes the fresh-start acknowledgement gate BEFORE any mutation: menu
+    callbacks and settings cannot bypass it, and the upgrade dialog passes
+    its own in-memory acknowledgement to avoid a second notice. The requested
+    mode is persisted only after that gate succeeds.
     """
     if not _RUNTIME_AVAILABLE:
         return {"ok": False, "error": "runtime unavailable"}
@@ -2940,6 +3334,29 @@ def _switch_mode_now(mode: str, *, open_onboarding: bool = False) -> dict:
             _open_evolved_shell()
         return {"ok": True, "already": mode}
     col = getattr(mw, "col", None)
+
+    # Fresh-start gate: before widgets/credentials are touched and before
+    # anything is persisted. Returning users with an activated game pass.
+    if mode == _mode_mod.EVOLVED and not fresh_start_ack:
+        if _evolved_fresh_start_required():
+            choice = ""
+            try:
+                from .evolved.ui.chooser import show_fresh_start_notice
+                choice = show_fresh_start_notice(
+                    getattr(mw, "ankiscape_evolved_shell", None) or mw)
+            except Exception:
+                choice = ""
+            if choice != "evolved":
+                if choice == "classic":
+                    try:
+                        if col is not None:
+                            _mode_mod.set_requested_mode(
+                                lambda k, v: col.set_config(k, v),
+                                _mode_mod.CLASSIC)
+                    except Exception:
+                        pass
+                return {"ok": False, "cancelled": True}
+            fresh_start_ack = True
 
     # 1. Invalidate generation and release the old mode's widgets first.
     try:
@@ -3229,6 +3646,13 @@ def _ensure_evolved_engine():
             profile_dir = pm.profileFolder()
     except Exception:
         profile_dir = None
+    # Finish any deferred deletion cleanup for THIS profile before a game
+    # engine can be built, so an erased game can never be recreated.
+    try:
+        if col is not None:
+            _evolved_apply_deferred_deletion_cleanup(col)
+    except Exception:
+        pass
     game_uuid = None
     activated_at = 0
     try:
@@ -3239,6 +3663,11 @@ def _ensure_evolved_engine():
                 activated_at = int(pointer.get("activated_at", 0) or 0)
     except Exception:
         pass
+    if game_uuid:
+        blocked = _evolved_deletion_marker(game_uuid=str(game_uuid))
+        if blocked is not None and blocked.get("delete_local"):
+            # This game is pending deletion: do not bind or recreate it.
+            return None
     if not game_uuid:
         game_uuid = str(_uuid.uuid4())
         # New identities activate NOW: reviews taken before this moment are

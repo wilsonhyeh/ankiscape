@@ -91,3 +91,33 @@ against production without it.
 - Deploy: `supabase functions deploy account-status --no-verify-jwt` plus the
   updated `username-login`; set `ACCOUNT_STATUS_HMAC_SECRET`. Neither function
   creates accounts or sends mail.
+
+## Account deletion (migration 0010 + `account-delete`)
+
+- `0010_account_deletion_cleanup.sql` adds a narrowly scoped `BEFORE DELETE`
+  trigger on `public.players`: deleting one player row removes that game's
+  `game_checkpoints` and that user's `moderation_audit` rows in the same
+  transaction as the Auth deletion. Auth cascades cover operations, review
+  claims and `game_state`. No broad deletes, no orphan sweeps. A failed Auth
+  deletion or the `fixture_registry` RESTRICT rolls the cleanup back.
+- Deploy order: `supabase db push --dry-run --skip-vault --project-ref <ref>`
+  (expect exactly the new cleanup migration), then
+  `supabase db push --skip-vault --project-ref <ref>`, then
+  `supabase functions deploy account-delete --project-ref <ref>` with JWT
+  verification ON (config.toml sets `[functions.account-delete] verify_jwt =
+  true`). Never use a global `--no-verify-jwt`; never redeploy 0008/0009.
+- Scope: the server account, game progress, backups, scores and leaderboard
+  presence are removed. Provider backups, provider operational logs and
+  short-lived shared anti-abuse buckets are out of scope. Local progress is
+  kept unless the client opts in to remove it on that computer.
+- Rollout failure: stop and do not ship the client delete entry point against
+  a server without the cleanup migration. An authorized rollback may disable
+  the endpoint/client entry while keeping the additive migration; it cannot
+  restore a deleted account. Issued access JWTs stay cryptographically valid
+  until expiry, so deletion is proven by the Auth user being absent and new
+  logins/link attempts failing, not by every endpoint returning 401.
+- Recovery for an unknown client outcome: the client keeps a credential-free
+  `account-deletion.json` marker, suspends online work for that identity and
+  offers a read-only status check. Only an authoritative user-not-found
+  result establishes absence; a confirmed existing account may retry with
+  fresh confirmation.

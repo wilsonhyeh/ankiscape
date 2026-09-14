@@ -220,19 +220,33 @@ def _collect(record_dir: str) -> Dict[str, Dict[str, Any]]:
     return records
 
 
-def _required_targets(matrix_path: str) -> List[Dict[str, Any]]:
+def _required_targets(matrix_path: str) -> tuple:
+    """(required targets, per-journey assertion requirements).
+
+    Absence or failure of any assertion a scenario lists for a target's
+    journey makes that target's record fail. Per-journey assertion owners
+    live on scenario entries (e.g. the native-journeys scenario)."""
     with open(matrix_path, encoding="utf-8") as fh:
         matrix = json.load(fh)
     targets = matrix.get("required_targets")
     if not isinstance(targets, list) or not targets:
         raise JourneyError(f"{matrix_path} has no required_targets")
-    return targets
+    top = [entry for entry in targets if isinstance(entry, dict)]
+    requirements: List[Dict[str, Any]] = []
+    for entry in list(targets) + list(matrix.get("scenarios") or []):
+        if not isinstance(entry, dict):
+            continue
+        for requirement in entry.get("target_requirements") or []:
+            if isinstance(requirement, dict):
+                requirements.append(requirement)
+    return top, requirements
 
 
 def _validate(records: Dict[str, Dict[str, Any]],
-              required: List[Dict[str, Any]]) -> List[str]:
+              required: tuple) -> List[str]:
+    top_targets, requirements = required
     errors: List[str] = []
-    expected = {target_key(target) for target in required}
+    expected = {target_key(target) for target in top_targets}
     for key in sorted(expected - set(records)):
         errors.append(f"missing_target:{key}")
     for key, record in sorted(records.items()):
@@ -243,6 +257,19 @@ def _validate(records: Dict[str, Dict[str, Any]],
             errors.append(f"journey_exit:{key}")
         if record.get("failed"):
             errors.append(f"journey_failed:{key}:{','.join(record['failed'])}")
+        assertions = record.get("assertions") or {}
+        journey = str(record.get("journey") or "")
+        for requirement in requirements:
+            if target_key(requirement.get("target") or {}) != key:
+                continue
+            required_journey = str(requirement.get("journey") or "")
+            if required_journey and required_journey != journey:
+                continue
+            for name in requirement.get("assertions") or []:
+                if name not in assertions:
+                    errors.append(f"missing_assertion:{key}:{name}")
+                elif not assertions[name]:
+                    errors.append(f"failed_assertion:{key}:{name}")
     return errors
 
 
@@ -340,7 +367,7 @@ def main(argv: List[str]) -> int:
                 print(f"account_journey: FAIL {error}", file=sys.stderr)
             print(f"account_journey: FAIL ({len(errors)} finding(s))")
             return 1
-        print(f"account_journey: PASS ({len(required)} targets)")
+        print(f"account_journey: PASS ({len(required[0])} targets)")
         return 0
     except JourneyError as exc:
         print(f"account_journey: BLOCKED: {exc}", file=sys.stderr)

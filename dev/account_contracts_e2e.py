@@ -20,11 +20,15 @@ Exits 2 (blocked, verification pending) when Docker/Supabase is unavailable.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -33,15 +37,35 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 API = "http://127.0.0.1:55321"
+MAILPIT = "http://127.0.0.1:55324"
 FAILURES: list = []
 
-from evolved.accounts import login_password, logout  # noqa: E402
+from evolved.accounts import (delete_account, login_password, logout,  # noqa: E402
+                              register, resend_signup_code, verify_code,
+                              check_account_status)
+from evolved.auth import MemorySession  # noqa: E402
 from evolved.credentials import CredentialVault  # noqa: E402
 from evolved.journal import Journal  # noqa: E402
 from evolved.net import Endpoint, NetError, post_json  # noqa: E402
 from evolved.service import (ServiceConfig, SyncService, make_transport,  # noqa: E402
                              query_hiscores, query_public_profile)
 from evolved.session_store import ProfileSession  # noqa: E402
+
+
+def _load_module(name: str, filename: str):
+    path = os.path.join(ROOT, "dev", filename)
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        return None
+    return module
+
+
+def _load_auth_smoke_helpers():
+    """Reuse the existing capture-inbox helpers from dev/auth_smoke.py."""
+    return _load_module("ankiscape_auth_smoke", "auth_smoke.py")
 
 
 def check(name, cond, detail=""):
@@ -99,24 +123,52 @@ def _delete_fixture_user(service_key, user_id):
         _admin(service_key, "DELETE", f"/auth/v1/admin/users/{user_id}")
 
 
+def _service(service_key, method, path, body=None):
+    """Service-role PostgREST call (local disposable stack only)."""
+    return _admin(service_key, method, path, body)
+
+
+def _rows(service_key, path):
+    status, data = _service(service_key, "GET", path)
+    if status >= 300 or not isinstance(data, list):
+        return None
+    return data
+
+
+def _mailpit_message(email, *, after_id="", timeout_s=90.0):
+    """Bounded capture-inbox polling for the exact disposable recipient."""
+    smoke = _load_auth_smoke_helpers()
+    if smoke is None:
+        return "", ""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            messages = smoke._mailpit_messages()
+        except Exception:
+            time.sleep(2)
+            continue
+        for message in reversed(messages):
+            message_id = str(message.get("ID", ""))
+            recipients = [t.get("Address", "") for t in message.get("To", [])]
+            if not any(email.lower() == r.lower() for r in recipients):
+                continue
+            if after_id and message_id == after_id:
+                continue
+            try:
+                body = smoke._mailpit_body(message_id)
+            except Exception:
+                continue
+            match = re.search(r"\b(\d{6})\b", body or "")
+            if match:
+                return match.group(1), message_id
+        time.sleep(2)
+    return "", ""
+
+
 def _refresh_via_auth(session, endpoint) -> bool:
-    """Same contract as the product's _evolved_refresh_session."""
-    if not session.refresh_token:
-        return False
-    try:
-        data = post_json(endpoint, "/auth/v1/token?grant_type=refresh_token",
-                         {"refresh_token": session.refresh_token})
-    except NetError as exc:
-        if exc.kind in ("unauthorized", "invalid", "forbidden"):
-            session.clear()
-        return False
-    access, refresh = data.get("access_token"), data.get("refresh_token")
-    user = data.get("user") or {}
-    if not access or not refresh or not user.get("id"):
-        return False
-    session.set(access_token=access, refresh_token=refresh,
-                user_id=user["id"], username=session.username)
-    return True
+    """The product's own owner-guarded refresh helper (not a dev copy)."""
+    from evolved.accounts import refresh_access_token
+    return refresh_access_token(post_json, endpoint, session)
 
 
 def _op(game_uuid, device, seq, review_key):
@@ -137,6 +189,227 @@ def _svc(game_uuid, journal, transport, session, generation=1):
                        get_user_id=lambda: session.user_id)
 
 
+def _signup_resend_verify_checks(*, anon, service, endpoint, check, stamp,
+                                 users):
+    """Real GoTrue signup/duplicate/resend/verify through the product client.
+
+    Flat hosted shape, obfuscated duplicates, the signup `resend` route and a
+    NEW captured OTP correlated by message id (never the original code)."""
+    email = f"acct-signup-{stamp}@example.invalid"
+    username = f"signup{stamp[:8]}"
+    password = uuid.uuid4().hex + "Aa9"
+    memory = MemorySession()
+    out = register(post_json, endpoint, username=username, email=email,
+                   password=password)
+    check("signup reaches verification_required against real GoTrue "
+          "(flat shape)", out.status == "verification_required"
+          and bool(out.session_user_id), f"{out.status} {out.detail}")
+    duplicate = register(post_json, endpoint, username=username,
+                         email=email, password=uuid.uuid4().hex + "Aa9")
+    check("duplicate signup resolves to email_exists",
+          duplicate.status == "email_exists", duplicate.detail)
+    status = check_account_status(post_json, endpoint, email=email,
+                                  username=username)
+    check("status recheck reports the unconfirmed email",
+          status.ok and status.email_status == "unconfirmed",
+          f"{status.status} {status.email_status}")
+
+    original_code, original_id = _mailpit_message(email)
+    check("signup OTP captured locally", bool(original_code), email)
+    resent = resend_signup_code(post_json, endpoint, email=email)
+    check("signup resend accepted (type=signup route)", resent.ok,
+          resent.status)
+    resent_code, resent_id = _mailpit_message(email, after_id=original_id)
+    check("resent OTP is a NEW captured message for the recipient",
+          bool(resent_code) and bool(resent_id) and resent_id != original_id,
+          f"original={original_id} resent={resent_id}")
+    check("resent OTP differs from the original code",
+          bool(resent_code) and resent_code != original_code)
+    verified = verify_code(post_json, endpoint, email=email,
+                           code=resent_code, kind="signup", session=memory)
+    check("resent signup OTP verifies with type=signup", verified.ok,
+          f"{verified.status} {verified.detail}")
+    check("verified session belongs to the signup user",
+          memory.logged_in and memory.user_id == out.session_user_id,
+          f"{memory.user_id} vs {out.session_user_id}")
+    users.append(memory.user_id)
+    confirmed = check_account_status(post_json, endpoint, email=email,
+                                     username=username)
+    check("status recheck flips to confirmed after verification",
+          confirmed.ok and confirmed.email_status == "confirmed",
+          confirmed.email_status)
+
+
+def _deletion_contract_checks(*, anon, service, endpoint, check, stamp,
+                              users, other_game=""):
+    """Task 7 contract through the local gateway: guards, refusals, cleanup."""
+    email = f"acct-delete-{stamp}@example.invalid"
+    username = f"delete{stamp[:7]}"
+    password = uuid.uuid4().hex + "Aa9"
+    user_id, status, _ = _create_fixture_user(
+        service, email=email, username=username, password=password)
+    check("deletion fixture user created without email",
+          bool(user_id) and status < 300, str(status))
+    if not user_id:
+        return
+    users.append(user_id)
+    memory = MemorySession()
+    login = login_password(post_json, endpoint, email=email,
+                           password=password, session=memory)
+    check("deletion fixture can sign in", login.ok, login.status)
+    game = str(uuid.uuid4())
+    post_json(endpoint, "/rest/v1/rpc/link_game", {"p_game_uuid": game},
+              access_token=memory.access_token)
+    journal = Journal(os.path.join(tempfile.gettempdir(),
+                                   f"ankiscape-delete-{stamp}.sqlite3"))
+    try:
+        transport = make_transport(ServiceConfig(
+            endpoint=endpoint, game_uuid=game, post=post_json), memory)
+        journal.append_operation(_op(game, "del-a", 1,
+                                     f"rk-delete-{stamp}"))
+        _svc(game, journal, transport, memory).force_sync()
+        checkpoint = _service(service, "POST", "/rest/v1/game_checkpoints",
+                              {"game_uuid": game, "revision": 1, "state": {}})
+        audit = _service(service, "POST", "/rest/v1/moderation_audit",
+                         {"target_user_id": user_id, "action": "note",
+                          "reason": "e2e-delete"})
+        check("deletion fixture seeded (checkpoint + audit)",
+              checkpoint[0] < 300 and audit[0] < 300,
+              f"{checkpoint[0]}/{audit[0]}")
+
+        # Wrong confirmation never consumes the account.
+        wrong = delete_account(post_json, endpoint,
+                               access_token=memory.access_token,
+                               username=username.upper(), password=password)
+        check("wrong username/case refuses with invalid_confirmation",
+              wrong.status == "invalid_confirmation", wrong.status)
+        wrong_pw = delete_account(post_json, endpoint,
+                                  access_token=memory.access_token,
+                                  username=username,
+                                  password="not-the-password-Aa9")
+        check("wrong password refuses with invalid_credentials",
+              wrong_pw.status == "invalid_credentials", wrong_pw.status)
+        missing = delete_account(post_json, endpoint, access_token="",
+                                 username=username, password=password)
+        check("missing session refuses with invalid_session",
+              missing.status == "invalid_session", missing.status)
+        bogus = delete_account(post_json, endpoint,
+                               access_token="not-a-real-token",
+                               username=username, password=password)
+        check("bogus token refuses without claiming deletion",
+              bogus.status in ("invalid_session", "service_error"),
+              bogus.status)
+        rows = _rows(service, f"/rest/v1/game_checkpoints"
+                              f"?game_uuid=eq.{game}&select=revision")
+        check("refusals left the account and checkpoint untouched",
+              rows is not None and len(rows) == 1, str(rows))
+
+        # Service-role seeding proves the demo and fixture guards.
+        demo_on = _service(service, "PATCH",
+                           f"/rest/v1/players?user_id=eq.{user_id}",
+                           {"is_demo": True})
+        refused_demo = delete_account(post_json, endpoint,
+                                      access_token=memory.access_token,
+                                      username=username, password=password)
+        _service(service, "PATCH", f"/rest/v1/players?user_id=eq.{user_id}",
+                 {"is_demo": False})
+        check("demo accounts are immutable",
+              demo_on[0] < 300 and refused_demo.status == "demo_immutable",
+              refused_demo.status)
+        fixture = _service(service, "POST", "/rest/v1/fixture_registry", {
+            "suite_id": "account-delete-e2e", "suite_version": 1,
+            "username_norm": username.lower(), "user_id": user_id,
+            "expected_trace_hash": f"trace-{stamp}"})
+        refused_fixture = delete_account(post_json, endpoint,
+                                         access_token=memory.access_token,
+                                         username=username,
+                                         password=password)
+        _service(service, "DELETE",
+                 f"/rest/v1/fixture_registry?user_id=eq.{user_id}")
+        check("registered fixtures are immutable",
+              fixture[0] < 300
+              and refused_fixture.status == "demo_immutable",
+              f"{fixture[0]} {refused_fixture.status}")
+
+        # A separate identity proves the rate limit without deleting data.
+        rate_email = f"acct-rate-{stamp}@example.invalid"
+        rate_name = f"rate{stamp[:9]}"
+        rate_id, _, _ = _create_fixture_user(
+            service, email=rate_email, username=rate_name, password=password)
+        users.append(rate_id)
+        rate_memory = MemorySession()
+        login_password(post_json, endpoint, email=rate_email,
+                       password=password, session=rate_memory)
+        limited = None
+        for _attempt in range(6):
+            limited = delete_account(post_json, endpoint,
+                                     access_token=rate_memory.access_token,
+                                     username=rate_name,
+                                     password="wrong-password-Aa9")
+        check("repeated attempts hit the deletion rate limit",
+              limited is not None and limited.status == "rate_limited",
+              getattr(limited, "status", ""))
+
+        # Concurrency: one sync racing the authorized deletion. Either it
+        # lands before the delete (and is cleaned with the account) or it
+        # fails closed; no orphan checkpoint may survive.
+        journal.append_operation(_op(game, "del-race", 2,
+                                     f"rk-delete-race-{stamp}"))
+        race: dict = {}
+
+        def _race_sync():
+            try:
+                race["result"] = _svc(game, journal, transport,
+                                      memory).force_sync()
+            except Exception as exc:
+                race["result"] = {"ok": False, "error": repr(exc)[:120]}
+
+        thread = threading.Thread(target=_race_sync)
+        thread.start()
+
+        # The real deletion removes the auth user and cleans the orphans.
+        deleted = delete_account(post_json, endpoint,
+                                 access_token=memory.access_token,
+                                 username=username, password=password)
+        thread.join(timeout=30)
+        check("concurrent sync resolves around the deletion",
+              isinstance(race.get("result"), dict),
+              str(race.get("result"))[:160])
+        check("authorized deletion succeeds", deleted.status == "deleted",
+              f"{deleted.status} {deleted.detail}")
+        check("auth user is gone after deletion",
+              _admin(service, "GET",
+                     f"/auth/v1/admin/users/{user_id}")[0] == 404)
+        check("player row is gone after deletion",
+              _rows(service, f"/rest/v1/players?user_id=eq.{user_id}"
+                             f"&select=user_id") == [])
+        check("owned operations are gone after deletion",
+              _rows(service, f"/rest/v1/game_operations?game_uuid=eq.{game}"
+                             f"&select=op_id") == [])
+        check("review claims are gone after deletion",
+              _rows(service, f"/rest/v1/review_claims?game_uuid=eq.{game}"
+                             f"&select=review_key") == [])
+        check("checkpoints are gone after deletion",
+              _rows(service, f"/rest/v1/game_checkpoints?game_uuid=eq.{game}"
+                             f"&select=revision") == [])
+        check("moderation audit rows are gone after deletion",
+              _rows(service, f"/rest/v1/moderation_audit?target_user_id=eq."
+                             f"{user_id}&select=id") == [])
+        if other_game:
+            untouched = _rows(service, f"/rest/v1/game_state?game_uuid=eq."
+                                       f"{other_game}&select=game_uuid")
+            check("another user's game and state are untouched",
+                  untouched is not None and len(untouched) == 1,
+                  str(untouched))
+        if user_id in users:
+            users.remove(user_id)  # already deleted; skip teardown
+    finally:
+        try:
+            journal.close()
+        except Exception:
+            pass
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--local", action="store_true", required=True,
@@ -153,6 +426,21 @@ def main(argv=None) -> int:
         return 2
     endpoint = Endpoint(base_url=API, project_key=anon,
                         allow_http_loopback=True)
+
+    functions = _load_module("ankiscape_account_functions",
+                             "account_functions.py")
+    lease = None
+    if functions is None:
+        check("local account function runner available", False,
+              "dev/account_functions.py missing")
+        return 2
+    try:
+        lease = functions.ensure_serving()
+        check("account functions serve current code with per-function JWT",
+              True, "account-delete verify_jwt=true")
+    except functions.FunctionsUnavailable as exc:
+        print(f"account_contracts_e2e: BLOCKED: {exc}", file=sys.stderr)
+        return 2
 
     stamp = uuid.uuid4().hex[:10]
     password = uuid.uuid4().hex
@@ -327,6 +615,16 @@ def main(argv=None) -> int:
                                vault=CredentialVault(profile_dir, API))
         check("logout clears the remembered session", not after.logged_in
               and vault.read() is None)
+
+        # --- Real signup / duplicate / resend / verify (confirmations on) --
+        _signup_resend_verify_checks(anon=anon, service=service,
+                                     endpoint=endpoint, check=check,
+                                     stamp=stamp, users=users)
+
+        # --- Task 7 deletion contract through the local gateway ------------
+        _deletion_contract_checks(anon=anon, service=service,
+                                  endpoint=endpoint, check=check,
+                                  stamp=stamp, users=users, other_game=game)
     finally:
         for journal in journals:
             try:
@@ -336,6 +634,8 @@ def main(argv=None) -> int:
         tmp.cleanup()
         for user_id in users:
             _delete_fixture_user(service, user_id)
+        if lease is not None:
+            lease.release()
         print("fixture users deleted" if users else "no fixture users to delete")
 
     print(f"\n{len(FAILURES)} failures" if FAILURES

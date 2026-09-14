@@ -190,21 +190,24 @@
           "target": { "os": "macos", "anki": "26.8.1", "qt": "6" },
           "journey": "ui-account-lifecycle",
           "assertions": ["account_window_opened", "verification_closed_window",
-                         "linkage_automatic", "pending_drained",
+                         "resend_route", "linkage_automatic",
+                         "pending_drained", "delete_flow",
                          "public_board_logged_out"]
         },
         {
           "target": { "os": "windows", "anki": "26.8.1", "qt": "6" },
           "journey": "ui-account-lifecycle",
           "assertions": ["account_window_opened", "verification_closed_window",
-                         "linkage_automatic", "pending_drained",
+                         "resend_route", "linkage_automatic",
+                         "pending_drained", "delete_flow",
                          "public_board_logged_out"]
         },
         {
           "target": { "os": "linux", "anki": "26.8.1", "qt": "6" },
           "journey": "ui-account-lifecycle",
           "assertions": ["account_window_opened", "verification_closed_window",
-                         "linkage_automatic", "pending_drained",
+                         "resend_route", "linkage_automatic",
+                         "pending_drained", "delete_flow",
                          "public_board_logged_out"]
         }
       ]

@@ -5,8 +5,10 @@ import unittest
 from evolved.data import load_rules
 from evolved.engine import EngineConfig, EvolvedEngine
 from evolved.journal import Journal
+from evolved.onboarding import (FRESH_START_ACK_TEXT, fresh_start_gate_required,
+                                identity_active)
 from evolved.ui.bank import filter_inventory
-from evolved.ui.chooser import show_mode_chooser
+from evolved.ui.chooser import show_mode_chooser, show_upgrade_prompt
 from evolved.ui.hud import HudOwner
 
 
@@ -70,6 +72,45 @@ class TestEvolvedUI(unittest.TestCase):
         self.assertEqual(store["mode"], "classic")
         self.assertEqual(show_mode_chooser(get_requested=get, set_requested=set_,
                                            qt_dialog=lambda: "evolved"), "evolved")
+
+    def test_fresh_start_gate_predicate(self):
+        self.assertTrue(fresh_start_gate_required(None))
+        self.assertTrue(fresh_start_gate_required({}))
+        # UUID without a valid positive activation is still unfinished.
+        self.assertTrue(fresh_start_gate_required(
+            {"game_uuid": "g-1", "activated_at": 0}))
+        self.assertTrue(fresh_start_gate_required(
+            {"game_uuid": "g-1", "activated_at": "not-a-number"}))
+        self.assertFalse(fresh_start_gate_required(
+            {"game_uuid": "g-1", "activated_at": 1700000000}))
+        self.assertTrue(identity_active({"game_uuid": "g-1",
+                                         "activated_at": 1}))
+
+    def test_acknowledgement_copy_is_the_required_sentence(self):
+        self.assertEqual(
+            FRESH_START_ACK_TEXT,
+            "I understand that Evolved starts fresh at level 1 and my "
+            "Classic progress cannot be transferred.")
+
+    def test_upgrade_prompt_persists_only_explicit_choices(self):
+        persisted = []
+
+        def set_(mode):
+            persisted.append(mode)
+
+        # Close/Escape/dialog failure: nothing is persisted.
+        self.assertEqual(show_upgrade_prompt(
+            get_requested=lambda: "classic", set_requested=set_,
+            qt_dialog=lambda: None), "")
+        self.assertEqual(persisted, [])
+        # Explicit choices persist.
+        self.assertEqual(show_upgrade_prompt(
+            get_requested=lambda: "classic", set_requested=set_,
+            qt_dialog=lambda: "evolved"), "evolved")
+        self.assertEqual(show_upgrade_prompt(
+            get_requested=lambda: "classic", set_requested=set_,
+            qt_dialog=lambda: "classic"), "classic")
+        self.assertEqual(persisted, ["evolved", "classic"])
 
     def test_hud_coalesced_single_paint(self):
         paints = []

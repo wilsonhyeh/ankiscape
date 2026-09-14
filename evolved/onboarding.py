@@ -174,6 +174,30 @@ def identity_active(pointer: Optional[Dict[str, Any]]) -> bool:
         return False
 
 
+# One-time acknowledgement shown before the first Classic -> Evolved switch.
+# Shared verbatim by the upgrade dialog and the standalone notice.
+FRESH_START_TITLE = "Evolved starts fresh."
+FRESH_START_BODY = (
+    "Every AnkiScape Evolved player starts at level 1. Your Classic levels, "
+    "XP and items are NOT transferred \u2014 they stay with Classic exactly "
+    "as they are. You can stay on Classic, or switch between Classic and "
+    "Evolved whenever you like; each mode keeps its own progress and nothing "
+    "restarts. There is no Classic-to-Evolved transfer; Evolved has its own "
+    "shared leaderboard.")
+FRESH_START_ACK_TEXT = (
+    "I understand that Evolved starts fresh at level 1 and my Classic "
+    "progress cannot be transferred.")
+
+
+def fresh_start_gate_required(evolved: Optional[Dict[str, Any]]) -> bool:
+    """True when the first-switch acknowledgement is required.
+
+    No identity at all, or a UUID without a valid positive activation stamp,
+    both count as unfinished setup.
+    """
+    return not identity_active(evolved)
+
+
 def decide_first_load(*, requested: Optional[str], has_request: bool,
                       classic_progress: bool,
                       evolved: Optional[Dict[str, Any]],

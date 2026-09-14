@@ -1455,6 +1455,20 @@ def _poll_upgrade_3(state):
         state["stage_ticks"] = 0
         _step("upgrade_prompt", True)
         _shot("upgrade-prompt")
+        from aqt.qt import QCheckBox, QPushButton
+        try_btn = dlg.findChild(QPushButton, "ankiscape-upgrade-try")
+        ack = dlg.findChild(QCheckBox, "ankiscape-fresh-start-ack")
+        _step("fresh_start_gate_visible",
+              try_btn is not None and ack is not None
+              and not try_btn.isEnabled() and not ack.isChecked(),
+              f"try={try_btn is not None} ack={ack is not None}")
+        if ack is None or try_btn is None:
+            state["stage"] = "abort"
+            return
+        # The toggled handler enables the button synchronously; no nested
+        # processEvents() here (it can re-enter this poll inside exec()).
+        ack.click()
+        _step("fresh_start_ack_enables_try", try_btn.isEnabled())
         if not _click_upgrade("ankiscape-upgrade-try"):
             _step("upgrade_try_click", False, "button missing")
             return
@@ -1462,6 +1476,14 @@ def _poll_upgrade_3(state):
         state["stage"] = "onboarding"
         return
     if stage == "onboarding":
+        # Wait for the modal dialog's exec() to unwind before any other UI
+        # work; driving the shell while it is still open deadlocks 23.10.
+        if _find_upgrade_dialog() is not None:
+            state["dialog_ticks"] = state.get("dialog_ticks", 0) + 1
+            if state["dialog_ticks"] > 300:
+                _step("upgrade_try_click", False, "dialog never closed")
+                state["stage"] = "abort"
+            return
         # Try Evolved commits in the SAME visit: setup opens without restart.
         if not state.get("onboarding_started"):
             state["onboarding_started"] = True
@@ -1585,6 +1607,27 @@ def _poll_upgrade_4(state):
             _ = before
         except Exception as exc:
             _step("classic_resumed", False, repr(exc))
+            return
+        # Returning users with an activated Evolved game pass the gate: the
+        # settings path (the same callable the mode switch is wired to) must
+        # switch without any fresh-start notice.
+        if not state.get("fresh_returning"):
+            # The settings switch is rejected while a reviewer is open.
+            try:
+                mw.moveToState("deckBrowser")
+            except Exception:
+                pass
+            if getattr(mw, "state", "") == "review":
+                return
+            state["fresh_returning"] = True
+            import ankiscape
+            deps = ankiscape._evolved_shell_deps()
+            result = deps["on_mode_switch"]("evolved")
+            noticed = _find_fresh_start_notice() is not None
+            _step("fresh_start_notice_absent_for_returning",
+                  bool(result.get("ok")) and not noticed,
+                  f"result={result} notice={noticed}")
+            ankiscape._switch_mode_now("classic")
             return
         _shot("upgrade-classic-back")
         _finish(0 if not RESULT["errors"] else 1)
@@ -3534,17 +3577,32 @@ def _account_fake_reset(state):
                 status = "new"
                 if user is not None:
                     status = "confirmed" if user.get("confirmed_at") else "unconfirmed"
+                if _ACCOUNT_FAKE.get("status_force_new_calls", 0) > 0:
+                    # Simulates an older/unknown status server so the signup
+                    # response shape (obfuscated duplicate) is exercised.
+                    _ACCOUNT_FAKE["status_force_new_calls"] -= 1
+                    status = "new"
                 return self._send(200, {"email_status": status,
                                         "username_available": True})
             if path == "/auth/v1/signup":
                 email = str(body.get("email", "")).lower()
                 meta = (body.get("data") or {})
+                _ACCOUNT_FAKE["signup_posts"].append(email)
                 if email in users and users[email].get("confirmed_at"):
-                    return self._send(422, {"code": "user_already_exists"})
+                    # Hosted GoTrue obfuscates an existing confirmed user as
+                    # a user-shaped body with no identities.
+                    return self._send(200, {"id": str(_uuid.uuid4()),
+                                            "email": email,
+                                            "identities": []})
                 user = {"id": str(_uuid.uuid4()), "email": email,
                         "user_metadata": meta, "confirmed_at": None}
                 users[email] = user
-                return self._send(200, {"user": user})
+                # Hosted shape: the user object at the top level.
+                return self._send(200, {"id": user["id"], "email": email,
+                                        "user_metadata": meta,
+                                        "identities": [{"id": "ident-1"}],
+                                        "confirmation_sent_at":
+                                            "2026-01-01T00:00:00Z"})
             if path == "/auth/v1/verify":
                 email = str(body.get("email", "")).lower()
                 token = str(body.get("token", ""))
@@ -3576,7 +3634,41 @@ def _account_fake_reset(state):
                     return self._send(400, {"code": "invalid_grant"})
                 return self._send(200, _issue(user))
             if path == "/auth/v1/recover":
+                _ACCOUNT_FAKE["last_recover"] = {
+                    "email": str(body.get("email", "")).lower()}
                 return self._send(200, {})
+            if path == "/auth/v1/resend":
+                _ACCOUNT_FAKE["last_resend"] = {
+                    "type": str(body.get("type", "")),
+                    "email": str(body.get("email", "")).lower()}
+                return self._send(200, {})
+            if path == "/functions/v1/account-delete":
+                token = str(self.headers.get("Authorization", "")).replace(
+                    "Bearer ", "").strip()
+                email = sessions.get(token, "")
+                outcome = _ACCOUNT_FAKE.get("delete_outcome", "deleted")
+                _ACCOUNT_FAKE["delete_calls"].append(
+                    {"email": email, "confirm": body.get("confirm"),
+                     "username": body.get("username"),
+                     "password": body.get("password")})
+                if outcome != "deleted":
+                    return self._send(
+                        int(_ACCOUNT_FAKE.get("delete_status", 400)),
+                        {"error": outcome})
+                user = users.get(email)
+                if user is None:
+                    return self._send(401, {"error": "invalid_session"})
+                display = (user.get("user_metadata") or {}).get(
+                    "username_display", "")
+                if body.get("confirm") != "DELETE" or \
+                        str(body.get("username", "")) != display:
+                    return self._send(400, {"error": "invalid_confirmation"})
+                if str(body.get("password", "")) != \
+                        _ACCOUNT_FAKE["passwords"].get(email):
+                    return self._send(401, {"error": "invalid_credentials"})
+                users.pop(email, None)
+                _ACCOUNT_FAKE["deleted"].append(email)
+                return self._send(200, {"deleted": True})
             if path == "/rest/v1/rpc/link_game":
                 _ACCOUNT_FAKE["linked"] = True
                 return self._send(200, {"game_uuid": body.get("p_game_uuid"),
@@ -3623,7 +3715,11 @@ def _account_fake_reset(state):
     thread.start()
     _ACCOUNT_FAKE.update({"server": server, "port": server.server_port,
                           "submitted": [], "accepted": 0, "linked": False,
-                          "passwords": {}, "users": users})
+                          "passwords": {}, "users": users,
+                          "signup_posts": [], "last_resend": {},
+                          "last_recover": {}, "delete_calls": [],
+                          "deleted": [], "delete_outcome": "deleted",
+                          "delete_status": 400, "status_force_new_calls": 0})
     state["account_fake_port"] = server.server_port
     return _ACCOUNT_FAKE
 
@@ -3696,6 +3792,54 @@ def _account_diagnostic(dlg):
         return f"page={page} busy={busy} error={error!r}"
     except Exception as exc:
         return f"diag_failed={exc!r}"
+
+
+def _account_widget(dlg, name):
+    try:
+        from aqt.qt import QWidget
+    except Exception:
+        return None
+    page = _account_page_widget(dlg)
+    child = page.findChild(QWidget, name) if page is not None else None
+    if child is None:
+        child = dlg.findChild(QWidget, name)
+    return child
+
+
+def _account_set_local(dlg, checked):
+    try:
+        from aqt.qt import QCheckBox
+    except Exception:
+        return False
+    box = _account_widget(dlg, "ankiscape-account-delete-local")
+    if not isinstance(box, QCheckBox):
+        return False
+    box.setChecked(bool(checked))
+    return True
+
+
+def _account_label_text(dlg, name):
+    try:
+        from aqt.qt import QLabel
+    except Exception:
+        return ""
+    widget = _account_widget(dlg, name)
+    return str(widget.text()) if isinstance(widget, QLabel) else ""
+
+
+def _find_fresh_start_notice():
+    try:
+        from aqt.qt import QApplication
+        for widget in QApplication.topLevelWidgets():
+            try:
+                if (widget.objectName() == "ankiscape-fresh-start-notice"
+                        and widget.isVisible()):
+                    return widget
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
 
 
 def _account_click(dlg, name):
@@ -3774,6 +3918,7 @@ def _poll_ui_account_lifecycle(state):
         state["username"] = f"acct{stamp}"
         state["password"] = "correct horse 9"
         state["new_password"] = "correct horse 10"
+        state["edited_email"] = f"edited{stamp}@example.invalid"
         if mode == "faults":
             fake = _account_fake_reset(state)
             fake["passwords"][state["email"].lower()] = state["password"]
@@ -3845,7 +3990,12 @@ def _poll_ui_account_lifecycle(state):
         page = _account_page(dlg)
         if page == "verify":
             _step("registration_reached_verify", True)
-            state["stage"] = "await_code"
+            check = _account_widget(dlg, "ankiscape-account-check-status")
+            # A flat GoTrue signup response must reach verification without
+            # the manual "Check status" fallback ever appearing.
+            _step("no_manual_status_needed",
+                  check is None or not check.isVisible(), "check visible")
+            state["stage"] = "verify_edit_email"
             state["code_ticks"] = 0
             return
         state["stage_ticks"] = state.get("stage_ticks", 0) + 1
@@ -3854,6 +4004,84 @@ def _poll_ui_account_lifecycle(state):
                   _account_diagnostic(dlg))
             _account_fake_stop()
             _finish(1)
+        return
+
+    if stage == "verify_edit_email":
+        dlg = _account_window()
+        if dlg is None:
+            _step("resend_route", False, "window closed before resend")
+            _account_fake_stop()
+            _finish(1)
+            return
+        edited = state.get("edited_email", "")
+        _account_fill(dlg, {"ankiscape-account-verify-email-input": edited})
+        # Deterministic control: the signup cooldown is real, so clear the
+        # deadline rather than waiting a wall-clock minute (dev harness only).
+        try:
+            flow = getattr(dlg, "_account_flow", None)
+            if flow is not None:
+                flow._resend_available_at = 0.0
+                _account_click(dlg, "ankiscape-account-resend")
+        except Exception:
+            pass
+        state["stage"] = "verify_await_resend"
+        state["resend_ticks"] = 0
+        return
+
+    if stage == "verify_await_resend":
+        dlg = _account_window()
+        if dlg is None:
+            _step("resend_route", False, "window closed during resend")
+            _account_fake_stop()
+            _finish(1)
+            return
+        if mode == "faults":
+            sent = _ACCOUNT_FAKE.get("last_resend") or {}
+            if (sent.get("type") == "signup"
+                    and sent.get("email") == state.get("edited_email", "").lower()):
+                _step("resend_route", True, f"signup -> {sent.get('email')}")
+                state["stage"] = "verify_code"
+                return
+            if "requested" not in _account_label_text(
+                    dlg, "ankiscape-account-status").lower():
+                # The cooldown button may still be catching up: keep trying.
+                _account_fill(dlg, {"ankiscape-account-verify-email-input":
+                                    state.get("edited_email", "")})
+                try:
+                    flow = getattr(dlg, "_account_flow", None)
+                    if flow is not None:
+                        flow._resend_available_at = 0.0
+                except Exception:
+                    pass
+                _account_click(dlg, "ankiscape-account-resend")
+        else:
+            status = _account_label_text(dlg, "ankiscape-account-status")
+            if "requested" in status.lower():
+                # Real stack: the resend endpoint accepted the request; the
+                # recipient stays the edited address from the field.
+                _step("resend_route", True, status[:60])
+                state["stage"] = "verify_code"
+                return
+        state["resend_ticks"] = state.get("resend_ticks", 0) + 1
+        if state["resend_ticks"] > 300:
+            _step("resend_route", False,
+                  f"last_resend={_ACCOUNT_FAKE.get('last_resend')} "
+                  + _account_diagnostic(dlg))
+            state["stage"] = "abort"
+        return
+
+    if stage == "verify_code":
+        dlg = _account_window()
+        if dlg is None:
+            _step("signup_code_received", False, "window vanished")
+            _account_fake_stop()
+            _finish(1)
+            return
+        # Restore the authoritative address before verifying.
+        _account_fill(dlg, {"ankiscape-account-verify-email-input":
+                            state["email"]})
+        state["stage"] = "await_code"
+        state["code_ticks"] = 0
         return
 
     if stage == "await_code":
@@ -3970,6 +4198,113 @@ def _poll_ui_account_lifecycle(state):
               any(r.get("is_demo") for r in rows if r.get("username") == "DemoWillow")
               or mode != "faults",  # auth mode: checked by demo verify
               f"rows={len(rows)}")
+        state["stage"] = "duplicate_signup"
+        return
+
+    if stage == "duplicate_signup":
+        # Re-register an already-confirmed email. In faults mode the status
+        # probe is forced to "new" once so the signup path returns the
+        # obfuscated duplicate shape and the ONE automatic status recheck
+        # must resolve it: email-exists copy plus the reset shortcut, and
+        # never a second creation attempt.
+        if mode == "faults":
+            _ACCOUNT_FAKE["status_force_new_calls"] = 1
+        state["window_result"] = None
+        from aqt.qt import QTimer
+
+        def _open_dup():
+            try:
+                import ankiscape
+                state["window_result"] = ankiscape._evolved_account_window(
+                    "register")
+            except Exception as exc:
+                state["window_result"] = {"ok": False, "error": repr(exc)}
+        QTimer.singleShot(0, _open_dup)
+        state["stage"] = "duplicate_drive"
+        state["dup_ticks"] = 0
+        return
+
+    if stage == "duplicate_drive":
+        dlg = _account_window()
+        if dlg is None:
+            state["dup_ticks"] = state.get("dup_ticks", 0) + 1
+            if state["dup_ticks"] > 400:
+                _step("duplicate_signup_resolved", False,
+                      f"window gone: {state.get('window_result')}")
+                state["stage"] = "abort"
+            return
+        if _account_page(dlg) != "register":
+            state["dup_ticks"] = state.get("dup_ticks", 0) + 1
+            if state["dup_ticks"] > 400:
+                _step("duplicate_signup_resolved", False,
+                      _account_diagnostic(dlg))
+                state["stage"] = "abort"
+            return
+        _account_fill(dlg, {
+            "ankiscape-account-username": state["username"],
+            "ankiscape-account-email": state["email"],
+            "ankiscape-account-register-password": state["password"]})
+        _account_click(dlg, "ankiscape-account-primary")
+        state["stage"] = "duplicate_await"
+        state["dup_ticks"] = 0
+        return
+
+    if stage == "duplicate_await":
+        dlg = _account_window()
+        if dlg is None:
+            _step("duplicate_signup_resolved", False,
+                  f"window closed: {state.get('window_result')}")
+            state["stage"] = "abort"
+            return
+        error_text = _account_label_text(dlg, "ankiscape-account-error")
+        shortcut = _account_widget(dlg, "ankiscape-account-reset-shortcut")
+        if "already exists" in error_text.lower():
+            posts = [e for e in _ACCOUNT_FAKE.get("signup_posts", [])
+                     if e == state["email"].lower()]
+            # Two posts are expected: the original signup and this duplicate
+            # attempt. A third would mean an automatic creation retry.
+            _step("duplicate_signup_resolved",
+                  (len(posts) <= 2 if mode == "faults" else True)
+                  and shortcut is not None and shortcut.isVisible(),
+                  f"posts={len(posts)} shortcut={shortcut is not None and shortcut.isVisible()}")
+            if shortcut is not None and shortcut.isVisible():
+                _account_click(dlg, "ankiscape-account-reset-shortcut")
+                state["stage"] = "duplicate_shortcut"
+                state["dup_ticks"] = 0
+                return
+            state["stage"] = "duplicate_close"
+            return
+        state["dup_ticks"] = state.get("dup_ticks", 0) + 1
+        if state["dup_ticks"] > 400:
+            _step("duplicate_signup_resolved", False,
+                  _account_diagnostic(dlg))
+            state["stage"] = "abort"
+        return
+
+    if stage == "duplicate_shortcut":
+        dlg = _account_window()
+        if dlg is None:
+            state["stage"] = "duplicate_close"
+            return
+        if _account_page(dlg) == "recovery_request":
+            prefilled = _account_widget(dlg, "ankiscape-account-email")
+            ok = (prefilled is not None
+                  and prefilled.text().strip() == state["email"])
+            _step("reset_shortcut_prefilled", ok,
+                  f"text={prefilled.text() if prefilled is not None else '?'}")
+            state["stage"] = "duplicate_close"
+            return
+        state["dup_ticks"] = state.get("dup_ticks", 0) + 1
+        if state["dup_ticks"] > 300:
+            _step("reset_shortcut_prefilled", False,
+                  _account_diagnostic(dlg))
+            state["stage"] = "abort"
+        return
+
+    if stage == "duplicate_close":
+        dlg = _account_window()
+        if dlg is not None:
+            _account_click(dlg, "ankiscape-account-cancel")
         state["stage"] = "recovery_open"
         return
 
@@ -4060,6 +4395,244 @@ def _poll_ui_account_lifecycle(state):
                                          password=state["new_password"],
                                          session=fresh)
         _step("new_password_works", bool(login.ok), login.status)
+        state["stage"] = "home_signin"
+        return
+
+    if stage == "home_signin":
+        state["window_result"] = None
+        from aqt.qt import QTimer
+
+        def _open_login():
+            try:
+                import ankiscape
+                state["window_result"] = ankiscape._evolved_account_window(
+                    "login")
+            except Exception as exc:
+                state["window_result"] = {"ok": False, "error": repr(exc)}
+        QTimer.singleShot(0, _open_login)
+        state["stage"] = "home_signin_drive"
+        state["home_ticks"] = 0
+        return
+
+    if stage == "home_signin_drive":
+        dlg = _account_window()
+        if dlg is None:
+            state["home_ticks"] = state.get("home_ticks", 0) + 1
+            if state["home_ticks"] > 400:
+                _step("delete_flow", False, "login window never opened")
+                state["stage"] = "abort"
+            return
+        _account_fill(dlg, {"ankiscape-account-identity": state["email"],
+                            "ankiscape-account-password":
+                                state["new_password"]})
+        _account_click(dlg, "ankiscape-account-primary")
+        state["stage"] = "home_signin_wait"
+        state["home_ticks"] = 0
+        return
+
+    if stage == "home_signin_wait":
+        if _account_window() is not None:
+            state["home_ticks"] = state.get("home_ticks", 0) + 1
+            if state["home_ticks"] > 400:
+                _step("delete_flow", False, "login window did not close")
+                state["stage"] = "abort"
+            return
+        state["stage"] = "home_open"
+        return
+
+    if stage == "home_open":
+        state["window_result"] = None
+        from aqt.qt import QTimer
+
+        def _open_home():
+            try:
+                import ankiscape
+                state["window_result"] = ankiscape._evolved_account_window(
+                    "home")
+            except Exception as exc:
+                state["window_result"] = {"ok": False, "error": repr(exc)}
+        QTimer.singleShot(0, _open_home)
+        state["stage"] = "home_visible"
+        state["home_ticks"] = 0
+        return
+
+    if stage == "home_visible":
+        dlg = _account_window()
+        if dlg is None:
+            state["home_ticks"] = state.get("home_ticks", 0) + 1
+            if state["home_ticks"] > 400:
+                _step("account_home", False,
+                      f"closed: {state.get('window_result')}")
+                state["stage"] = "abort"
+            return
+        if _account_page(dlg) != "home":
+            state["home_ticks"] = state.get("home_ticks", 0) + 1
+            if state["home_ticks"] > 400:
+                _step("account_home", False, _account_diagnostic(dlg))
+                state["stage"] = "abort"
+            return
+        name_text = _account_label_text(dlg, "ankiscape-account-home-username")
+        has_logout = _account_widget(dlg, "ankiscape-account-logout") is not None
+        has_delete = _account_widget(
+            dlg, "ankiscape-account-delete-open") is not None
+        _step("account_home", bool(name_text) and has_logout and has_delete,
+              f"name={name_text[:40]!r} delete={has_delete}")
+        _account_click(dlg, "ankiscape-account-delete-open")
+        state["stage"] = "delete_page"
+        state["home_ticks"] = 0
+        return
+
+    if stage == "delete_page":
+        dlg = _account_window()
+        if dlg is None or _account_page(dlg) != "delete":
+            state["home_ticks"] = state.get("home_ticks", 0) + 1
+            if state["home_ticks"] > 300:
+                _step("delete_flow", False,
+                      f"delete page missing: {state.get('window_result')}")
+                state["stage"] = "abort"
+            return
+        confirm = _account_widget(dlg, "ankiscape-account-delete-confirm")
+        # Both local choices change the visible wording without a third step.
+        _account_set_local(dlg, True)
+        warning_on = _account_widget(
+            dlg, "ankiscape-account-delete-local-warning")
+        local_warning = warning_on is not None and warning_on.isVisible()
+        text_on = confirm.text() if confirm is not None else ""
+        _account_set_local(dlg, False)
+        text_off = confirm.text() if confirm is not None else ""
+        _step("delete_local_choice", local_warning
+              and "local progress" in text_on.lower()
+              and "local progress" not in text_off.lower(),
+              f"on={text_on!r} off={text_off!r} warning={local_warning}")
+        # Wrong username keeps the confirm disabled; the correct one unlocks.
+        _account_fill(dlg, {"ankiscape-account-delete-username": "wrongname",
+                            "ankiscape-account-delete-password": "irrelevant"})
+        locked = confirm is not None and not confirm.isEnabled()
+        _account_fill(dlg, {
+            "ankiscape-account-delete-username": state["username"],
+            "ankiscape-account-delete-password": "wrong-password-Aa9"})
+        unlocked = confirm is not None and confirm.isEnabled()
+        _step("delete_confirm_gate", locked and unlocked,
+              f"locked={locked} unlocked={unlocked}")
+        _account_click(dlg, "ankiscape-account-delete-confirm")
+        state["stage"] = "delete_error_wait"
+        state["home_ticks"] = 0
+        return
+
+    if stage == "delete_error_wait":
+        dlg = _account_window()
+        if dlg is None:
+            _step("delete_error_path", False, "window closed on refusal")
+            state["stage"] = "abort"
+            return
+        error_text = _account_label_text(dlg, "ankiscape-account-error")
+        if error_text:
+            calls = len(_ACCOUNT_FAKE.get("delete_calls", []))
+            _step("delete_error_path", calls == 1,
+                  f"calls={calls} error={error_text[:60]!r}")
+            state["stage"] = "delete_cancel"
+            return
+        state["home_ticks"] = state.get("home_ticks", 0) + 1
+        if state["home_ticks"] > 400:
+            _step("delete_error_path", False, _account_diagnostic(dlg))
+            state["stage"] = "abort"
+        return
+
+    if stage == "delete_cancel":
+        dlg = _account_window()
+        if dlg is not None:
+            _account_click(dlg, "ankiscape-account-cancel")
+        state["stage"] = "delete_cancel_wait"
+        state["home_ticks"] = 0
+        return
+
+    if stage == "delete_cancel_wait":
+        if _account_window() is not None:
+            state["home_ticks"] = state.get("home_ticks", 0) + 1
+            if state["home_ticks"] > 300:
+                _step("delete_cancel_path", False, "window stayed open")
+                state["stage"] = "abort"
+            return
+        result = state.get("window_result") or {}
+        calls = len(_ACCOUNT_FAKE.get("delete_calls", []))
+        ok = bool(result.get("cancelled")) and calls == 1
+        _step("delete_cancel_path", ok,
+              f"result={str(result)[:60]} calls={calls}")
+        state["stage"] = "delete_reopen"
+        return
+
+    if stage == "delete_reopen":
+        state["window_result"] = None
+        from aqt.qt import QTimer
+
+        def _open_home2():
+            try:
+                import ankiscape
+                state["window_result"] = ankiscape._evolved_account_window(
+                    "home")
+            except Exception as exc:
+                state["window_result"] = {"ok": False, "error": repr(exc)}
+        QTimer.singleShot(0, _open_home2)
+        state["stage"] = "delete_reopen_wait"
+        state["home_ticks"] = 0
+        return
+
+    if stage == "delete_reopen_wait":
+        dlg = _account_window()
+        if dlg is None or _account_page(dlg) != "home":
+            state["home_ticks"] = state.get("home_ticks", 0) + 1
+            if state["home_ticks"] > 300:
+                _step("delete_flow", False, "home did not reopen")
+                state["stage"] = "abort"
+            return
+        _account_click(dlg, "ankiscape-account-delete-open")
+        state["stage"] = "delete_submit"
+        state["home_ticks"] = 0
+        return
+
+    if stage == "delete_submit":
+        dlg = _account_window()
+        if dlg is None or _account_page(dlg) != "delete":
+            state["home_ticks"] = state.get("home_ticks", 0) + 1
+            if state["home_ticks"] > 300:
+                _step("delete_flow", False, "delete page did not reopen")
+                state["stage"] = "abort"
+            return
+        _account_set_local(dlg, False)  # keep local progress
+        _account_fill(dlg, {
+            "ankiscape-account-delete-username": state["username"],
+            "ankiscape-account-delete-password": state["new_password"]})
+        _account_click(dlg, "ankiscape-account-delete-confirm")
+        state["stage"] = "delete_wait"
+        state["home_ticks"] = 0
+        return
+
+    if stage == "delete_wait":
+        if _account_window() is not None:
+            state["home_ticks"] = state.get("home_ticks", 0) + 1
+            if state["home_ticks"] > 600:
+                _step("delete_flow", False, "delete window stayed open")
+                state["stage"] = "abort"
+            return
+        import ankiscape
+        from ankiscape.evolved.deletion import read_marker
+        from ankiscape.evolved.link import read_binding
+        profile_dir = ankiscape._evolved_deletion_profile_dir()
+        marker = read_marker(profile_dir) if profile_dir else None
+        engine = ankiscape._EVOLVED_CTX.get("engine")
+        binding = read_binding(engine.journal) if engine is not None else None
+        game_dir = ""
+        if engine is not None and profile_dir:
+            from ankiscape.evolved.deletion import canonical_game_dir
+            game_dir = canonical_game_dir(profile_dir, engine.cfg.game_uuid) or ""
+        deleted_local = mode == "faults" and (
+            state["email"].lower() in _ACCOUNT_FAKE.get("deleted", []))
+        local_kept = bool(game_dir) and os.path.isdir(game_dir)
+        _step("delete_flow",
+              (deleted_local if mode == "faults" else True)
+              and marker is None and binding is None and local_kept,
+              f"deleted={deleted_local} marker={marker} binding={binding} "
+              f"local_kept={local_kept}")
         state["stage"] = "logged_out_browse"
         return
 

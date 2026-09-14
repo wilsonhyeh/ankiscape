@@ -47,3 +47,9 @@ port = 55324
 
 [storage]
 enabled = true
+
+# account-delete is a destructive endpoint and must never be reachable
+# without a platform-verified JWT. The function also proves the live session
+# and reauthenticates the password itself.
+[functions.account-delete]
+verify_jwt = true

@@ -43,15 +43,17 @@ class TestTargetNormalization(unittest.TestCase):
 
 
 class TestRecordValidation(unittest.TestCase):
-    def _record(self, key, *, exit_code=0, failed=None):
+    def _record(self, key, *, exit_code=0, failed=None, journey="",
+                assertions=None):
         return {"target_key": key, "exit_code": exit_code,
-                "failed": failed or []}
+                "failed": failed or [], "journey": journey,
+                "assertions": assertions or {}}
 
     def test_all_targets_present_passes(self):
-        required = [
+        required = ([
             {"os": "macos", "anki": "23.10", "qt": "6"},
             {"os": "linux", "anki": "26.8.1", "qt": "6"},
-        ]
+        ], [])
         records = {
             "macos-23.10-qt6": self._record("macos-23.10-qt6"),
             "linux-26.8.1-qt6": self._record("linux-26.8.1-qt6"),
@@ -59,9 +61,9 @@ class TestRecordValidation(unittest.TestCase):
         self.assertEqual(runner._validate(records, required), [])
 
     def test_missing_and_failed_and_unexpected_report(self):
-        required = [
+        required = ([
             {"os": "macos", "anki": "23.10", "qt": "6"},
-        ]
+        ], [])
         records = {
             "linux-26.8.1-qt6": self._record("linux-26.8.1-qt6"),
         }
@@ -70,7 +72,7 @@ class TestRecordValidation(unittest.TestCase):
         self.assertIn("unexpected_target:linux-26.8.1-qt6", errors)
 
     def test_failed_journey_is_a_failure(self):
-        required = [{"os": "macos", "anki": "23.10", "qt": "6"}]
+        required = ([{"os": "macos", "anki": "23.10", "qt": "6"}], [])
         records = {
             "macos-23.10-qt6": self._record(
                 "macos-23.10-qt6", failed=["linkage_automatic"]),
@@ -80,13 +82,43 @@ class TestRecordValidation(unittest.TestCase):
                             for error in errors), errors)
 
     def test_nonzero_exit_is_a_failure(self):
-        required = [{"os": "macos", "anki": "23.10", "qt": "6"}]
+        required = ([{"os": "macos", "anki": "23.10", "qt": "6"}], [])
         records = {
             "macos-23.10-qt6": self._record("macos-23.10-qt6",
                                             exit_code=1),
         }
         errors = runner._validate(records, required)
         self.assertIn("journey_exit:macos-23.10-qt6", errors)
+
+    def test_required_journey_assertions_must_pass(self):
+        required = ([{"os": "macos", "anki": "23.10", "qt": "6"}], [
+            {"target": {"os": "macos", "anki": "23.10", "qt": "6"},
+             "journey": "ui-account-lifecycle",
+             "assertions": ["resend_route", "delete_flow"]},
+        ])
+        records = {
+            "macos-23.10-qt6": self._record(
+                "macos-23.10-qt6", journey="ui-account-lifecycle",
+                assertions={"resend_route": True, "delete_flow": False}),
+        }
+        errors = runner._validate(records, required)
+        self.assertNotIn(
+            "missing_assertion:macos-23.10-qt6:resend_route", errors)
+        self.assertIn("failed_assertion:macos-23.10-qt6:delete_flow",
+                      errors)
+
+    def test_assertion_requirement_is_scoped_to_its_journey(self):
+        required = ([{"os": "macos", "anki": "23.10", "qt": "6"}], [
+            {"target": {"os": "macos", "anki": "23.10", "qt": "6"},
+             "journey": "ui-test-leaderboard",
+             "assertions": ["test_leaderboard_labeled"]},
+        ])
+        records = {
+            "macos-23.10-qt6": self._record(
+                "macos-23.10-qt6", journey="ui-account-lifecycle",
+                assertions={"resend_route": True}),
+        }
+        self.assertEqual(runner._validate(records, required), [])
 
 
 if __name__ == "__main__":
