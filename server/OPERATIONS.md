@@ -106,6 +106,11 @@ against production without it.
   `supabase functions deploy account-delete --project-ref <ref>` with JWT
   verification ON (config.toml sets `[functions.account-delete] verify_jwt =
   true`). Never use a global `--no-verify-jwt`; never redeploy 0008/0009.
+- Verified on the 2026-09-14 hosted deploy: a request with an invalid bearer
+  JWT is rejected at the edge (401 `Invalid JWT`), while an apikey-only
+  request without any Authorization header still reaches the function — which
+  fails closed with 401 `invalid_session` before reading any data. Both the
+  edge check and the function's own session proof are load-bearing.
 - Scope: the server account, game progress, backups, scores and leaderboard
   presence are removed. Provider backups, provider operational logs and
   short-lived shared anti-abuse buckets are out of scope. Local progress is
