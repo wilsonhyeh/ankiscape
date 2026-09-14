@@ -352,8 +352,19 @@ def _server_xp(transport: Transport, user_token: str,
     if not isinstance(data, dict):
         return None
     state = data.get("state") if isinstance(data.get("state"), dict) else data
-    xp = state.get("xp_micro") if isinstance(state, dict) else None
+    xp = state.get("xp") if isinstance(state, dict) else None
     return xp if isinstance(xp, dict) else None
+
+
+def _score_problems(expected: Dict[str, Any],
+                    xp: Optional[Dict[str, Any]]) -> List[str]:
+    problems = []
+    actual = xp or {}
+    for skill, value in (expected.get("xp_micro") or {}).items():
+        have = int(actual.get(skill, 0) or 0)
+        if have != int(value):
+            problems.append(f"{skill}: {have} != {value}")
+    return problems
 
 
 def _publish_demo(transport: Transport, norm: str, user_id: str) -> None:
@@ -454,11 +465,26 @@ def cmd_apply(args) -> int:
                       if str(r.get("username_norm")) == norm), None)
         players = _players_by_norm(transport, [norm])
         player = players.get(norm)
+        adopted_user_id = ""
         if player is not None and owned is None:
-            raise DemoError(
-                f"{norm} already exists but is not registry-owned; refusing "
-                "to adopt or modify it")
-        user_id = str((owned or {}).get("user_id") or "")
+            # Partial apply from an earlier failed run: adopt ONLY when the
+            # existing player's exact reserved .example.invalid email belongs
+            # to this demo identity. Anything else is refused.
+            candidate_id = str(player.get("user_id") or "")
+            account = transport.request(
+                "GET", f"/auth/v1/admin/users/{candidate_id}", service=True,
+                expect=(200,))
+            email = str((account or {}).get("email", "") or "").lower()
+            if not candidate_id or email != trace["email"].lower():
+                raise DemoError(
+                    f"{norm} already exists but is not registry-owned; "
+                    "refusing to adopt or modify it")
+            _upsert_registry(transport, trace, candidate_id)
+            adopted_user_id = candidate_id
+            print(f"demo apply: {norm:<12} adopted a partial identity from "
+                  "an earlier run")
+        user_id = (str((owned or {}).get("user_id") or "")
+                   or adopted_user_id)
         if not user_id:
             user_id = _create_user(transport, trace, secret)
         if not user_id:
@@ -485,9 +511,10 @@ def cmd_apply(args) -> int:
         accepted, total = _submit_trace(transport, token, trace["game_uuid"],
                                         trace, batch_size)
         xp = _server_xp(transport, token, trace["game_uuid"])
-        if xp != trace["expected"]["xp_micro"]:
-            raise DemoError(f"score mismatch for {norm}: server state does "
-                            "not match the deterministic trace")
+        problems = _score_problems(trace["expected"], xp)
+        if problems:
+            raise DemoError(f"score mismatch for {norm}: "
+                            + "; ".join(problems[:4]))
         _publish_demo(transport, norm, user_id)
         _upsert_registry(transport, trace, user_id)
         completed[f"demo:{norm}"] = {"user_id": user_id,
@@ -581,8 +608,9 @@ def cmd_verify(args) -> int:
                          password_for(secret, display))
         xp = _server_xp(transport, token, trace["game_uuid"])
         counts["players"] += 1
-        if xp != trace["expected"]["xp_micro"]:
-            failures.append(f"{display}: server state differs from the trace")
+        problems = _score_problems(trace["expected"], xp)
+        if problems:
+            failures.append(f"{display}: " + "; ".join(problems[:3]))
     report = {
         "target": target.get("kind"),
         "checked_at": _now_iso(),

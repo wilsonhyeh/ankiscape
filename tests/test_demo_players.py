@@ -148,6 +148,28 @@ class TestSurplusOwnership(unittest.TestCase):
         self.assertEqual(registry_delete["params"]["suite_id"], "eq.hosted-v1")
 
 
+class TestScoreComparison(unittest.TestCase):
+    def test_server_xp_reads_the_game_state_xp_table(self):
+        def _post(body, params):
+            return {"game_uuid": "g1", "xp": {"mining": 5000000},
+                    "inventory": {}, "revision": 3}
+        transport = _FakeTransport({
+            "POST /rest/v1/rpc/get_game_state": _post,
+        })
+        xp = demo_players._server_xp(transport, "tok", "g1")
+        self.assertEqual(xp, {"mining": 5000000})
+
+    def test_score_problems_reports_each_skill(self):
+        expected = {"xp_micro": {"mining": 5, "cooking": 7}}
+        self.assertEqual(demo_players._score_problems(
+            expected, {"mining": 5, "cooking": 7}), [])
+        problems = demo_players._score_problems(
+            expected, {"mining": 4, "cooking": 7})
+        self.assertEqual(problems, ["mining: 4 != 5"])
+        missing = demo_players._score_problems(expected, None)
+        self.assertEqual(len(missing), 2)
+
+
 class TestPlanFilePaths(unittest.TestCase):
     def test_local_and_hosted_plan_paths(self):
         self.assertTrue(demo_players._plan_path(True)

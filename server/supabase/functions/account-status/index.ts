@@ -120,7 +120,7 @@ serve(async (req: Request) => {
   const emailDigest = await digestHex(key, `email:${email.toLowerCase()}`);
   const checks: Array<{ key: string; limit: number }> = [
     { key: `e:${emailDigest}`, limit: 10 },
-    { key: "global", limit: 120 },
+    { key: "global:all", limit: 120 },
   ];
   for (const check of checks) {
     let limited = false;
