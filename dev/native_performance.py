@@ -206,6 +206,26 @@ def _collect_field(runs, field, mode=None):
     return values
 
 
+def _collect_counter(runs, field, mode=None):
+    """Sum a driver counter across runs; None when no run reports it.
+
+    A payload from before the counter existed (old shape) makes
+    reconciliation not applicable, never a failure."""
+    total = 0
+    seen = False
+    for run in runs:
+        if mode and run["raw"].get("run_mode") != mode:
+            continue
+        if run["rc"] != 0:
+            continue
+        seen = True
+        value = run["raw"].get(field)
+        if value is None:
+            return None
+        total += int(value)
+    return total if seen else None
+
+
 def _run_paired(profile: str, cfg: dict, anki: str, qt: str,
                 anki_bin: str, evidence_root: str = "") -> list:
     runs = []
@@ -301,6 +321,9 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
     lag = _collect_perf(addon_runs, "addon")
     control_lag = _collect_perf(control_runs, "control")
     rewards = _collect_field(addon_runs, "reward_ms", mode="addon")
+    rebuild_lag = _collect_field(addon_runs, "rebuild_lag_ms", mode="addon")
+    rebuild_rewards = _collect_field(addon_runs, "rebuild_reward_ms",
+                                     mode="addon")
     shells = _collect_field(addon_runs, "shell_ms", mode="addon")
     warm_shells = shells[1:] if len(shells) > 1 else shells
     rebuilds = _collect_field(addon_runs, "rebuilds_ms", mode="addon")
@@ -311,10 +334,12 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
     metrics["event_loop_lag"] = _summary(lag)
     metrics["event_loop_lag"]["control_p95_ms"] = \
         rel.nearest_rank_percentile(control_lag, 95) if control_lag else None
+    metrics["event_loop_lag"]["rebuild_window"] = _summary(rebuild_lag)
     metrics["warm_shell_open"] = _summary(warm_shells)
     metrics["cold_shell_appearance"] = {"ms": min(colds) if colds else None,
                                         "samples": len(colds)}
     metrics["reward_completion"] = _summary(rewards)
+    metrics["reward_completion"]["rebuild_window"] = _summary(rebuild_rewards)
     metrics["late_retraction_rebuild"] = {
         "max_ms": max(rebuilds) if rebuilds else None,
         "samples": len(rebuilds),
@@ -338,6 +363,20 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
         if ":target_missed:" in failure:
             continue
         failures.append(failure)
+
+    rebuild_count = int(metrics["late_retraction_rebuild"].get("samples") or 0)
+    if rebuild_count > 0 and not rebuild_lag:
+        failures.append("rebuild_window_lag:not_measured")
+    if rebuild_count == 0 and rebuild_lag:
+        failures.append("rebuild_window_lag:unreconciled")
+    if rebuild_count == 0 and rebuild_rewards:
+        failures.append("rebuild_reward_samples:unreconciled")
+    probes = _collect_counter(addon_runs, "lag_probes", mode="addon")
+    if probes is not None and probes != len(lag) + len(rebuild_lag):
+        failures.append("lag_samples:unreconciled")
+    published = _collect_counter(addon_runs, "rewards_published", mode="addon")
+    if published is not None and published != len(rewards) + len(rebuild_rewards):
+        failures.append("reward_samples:unreconciled")
 
     def _floor(name, values, key):
         minimum = int(floors.get(key, 0) or 0)

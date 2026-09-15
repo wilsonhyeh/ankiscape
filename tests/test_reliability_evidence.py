@@ -862,6 +862,120 @@ class BudgetEvaluationTests(unittest.TestCase):
                                                   "max_limit_ms": 200.0}}}
         self.assertEqual(REL.evaluate_budgets({}, budgets), [])
 
+    # ------------------------------------------------ paired control delta
+
+    DELTA_BUDGETS = {"budgets": {"event_loop_lag": {
+        "metric": "p95_ms", "limit": 50.0,
+        "p95_control_delta_ms": 50.0, "max_limit_ms": 200.0}}}
+
+    def test_p95_over_absolute_within_control_delta_passes(self):
+        metrics = {"event_loop_lag": {"p95_ms": 154.0, "max_ms": 160.0,
+                                      "control_p95_ms": 152.0}}
+        self.assertEqual(REL.evaluate_budgets(metrics, self.DELTA_BUDGETS), [])
+
+    def test_p95_over_absolute_beyond_control_delta_fails(self):
+        metrics = {"event_loop_lag": {"p95_ms": 220.0, "max_ms": 220.0,
+                                      "control_p95_ms": 150.0}}
+        failures = REL.evaluate_budgets(metrics, self.DELTA_BUDGETS)
+        self.assertIn("budget:event_loop_lag:p95:220.0", failures)
+
+    def test_control_p95_missing_fails_absolute(self):
+        metrics = {"event_loop_lag": {"p95_ms": 220.0, "max_ms": 220.0}}
+        failures = REL.evaluate_budgets(metrics, self.DELTA_BUDGETS)
+        self.assertIn("budget:event_loop_lag:p95:220.0", failures)
+
+    def test_fast_control_baseline_still_holds_absolute_limit(self):
+        metrics = {"event_loop_lag": {"p95_ms": 60.0, "max_ms": 60.0,
+                                      "control_p95_ms": 2.0}}
+        failures = REL.evaluate_budgets(metrics, self.DELTA_BUDGETS)
+        self.assertIn("budget:event_loop_lag:p95:60.0", failures)
+
+    # ------------------------------------------------- old-shape budget fix
+
+    def test_old_budget_without_new_keys_keeps_absolute_semantics(self):
+        budgets = {"budgets": {
+            "event_loop_lag": {"metric": "p95_ms", "limit": 50.0,
+                               "max_limit_ms": 200.0},
+            "reward_completion": {"metric": "p95_ms", "limit": 250.0,
+                                  "min_samples": 30}}}
+        failures = REL.evaluate_budgets({
+            "event_loop_lag": {"p95_ms": 154.0, "max_ms": 160.0,
+                               "control_p95_ms": 152.0,
+                               "rebuild_window": {"samples": 1,
+                                                  "max_ms": 4000.0}},
+            "reward_completion": {"samples": 600, "p95_ms": 20.0,
+                                  "rebuild_window": {"samples": 1,
+                                                     "p95_ms": 9000.0}},
+        }, budgets, required={"event_loop_lag", "reward_completion"})
+        # No delta limit configured: the paired control does not excuse the
+        # absolute breach; unbounded rebuild windows are never fabricated.
+        self.assertIn("budget:event_loop_lag:p95:154.0", failures)
+        self.assertFalse(
+            any("rebuild_window" in f for f in failures), failures)
+
+    # ---------------------------------------------------- rebuild-window bounds
+
+    AMENDED_BUDGETS = {"budgets": {
+        "event_loop_lag": {"metric": "p95_ms", "limit": 50.0,
+                           "p95_control_delta_ms": 50.0,
+                           "max_limit_ms": 200.0,
+                           "rebuild_window": {"metric": "max_ms",
+                                              "max_limit_ms": 5000.0}},
+        "reward_completion": {"metric": "p95_ms", "limit": 250.0,
+                              "rebuild_window": {"metric": "p95_ms",
+                                                 "p95_limit_ms": 10000.0}}}}
+
+    def test_rebuild_window_bounds_within_limits_pass(self):
+        metrics = {
+            "event_loop_lag": {"p95_ms": 45.0, "max_ms": 200.0,
+                               "rebuild_window": {"samples": 3,
+                                                  "max_ms": 4000.0}},
+            "reward_completion": {"samples": 600, "p95_ms": 240.0,
+                                  "rebuild_window": {"samples": 2,
+                                                     "p95_ms": 9000.0}}}
+        self.assertEqual(
+            REL.evaluate_budgets(metrics, self.AMENDED_BUDGETS,
+                                 required={"event_loop_lag",
+                                           "reward_completion"}), [])
+
+    def test_rebuild_window_max_over_limit_fails(self):
+        metrics = {"event_loop_lag": {"p95_ms": 45.0, "max_ms": 200.0,
+                                      "rebuild_window": {"samples": 3,
+                                                         "max_ms": 6000.0}}}
+        failures = REL.evaluate_budgets(
+            metrics, self.AMENDED_BUDGETS,
+            required={"event_loop_lag", "reward_completion"})
+        self.assertIn("budget:event_loop_lag:rebuild_window:max:6000.0",
+                      failures)
+
+    def test_reward_rebuild_window_p95_over_limit_fails(self):
+        metrics = {"reward_completion": {"samples": 600, "p95_ms": 240.0,
+                                         "rebuild_window": {"samples": 2,
+                                                            "p95_ms": 11000.0}}}
+        failures = REL.evaluate_budgets(
+            metrics, self.AMENDED_BUDGETS,
+            required={"event_loop_lag", "reward_completion"})
+        self.assertIn("budget:reward_completion:rebuild_window:p95:11000.0",
+                      failures)
+
+    # ------------------------------------------------- shipped budget contract
+
+    def test_shipped_budget_file_carries_amendment(self):
+        budgets = json.load(open(os.path.join(ROOT, "dev",
+                                              "reliability-budgets.json"),
+                                 encoding="utf-8"))
+        self.assertEqual(budgets["version"], 2)
+        self.assertEqual(budgets["amendment"]["date"], "2026-09-14")
+        self.assertEqual(budgets["amendment"]["approved_by"], "Wilson")
+        lag = budgets["budgets"]["event_loop_lag"]
+        self.assertEqual(lag["limit"], 50.0)
+        self.assertEqual(lag["max_limit_ms"], 200.0)
+        self.assertEqual(lag["p95_control_delta_ms"], 50.0)
+        self.assertEqual(lag["rebuild_window"]["max_limit_ms"], 5000.0)
+        rewards = budgets["budgets"]["reward_completion"]
+        self.assertEqual(rewards["limit"], 250.0)
+        self.assertEqual(rewards["rebuild_window"]["p95_limit_ms"], 10000.0)
+
 
 class MatrixInventoryTests(unittest.TestCase):
     def test_repo_matrix_has_seven_targets_and_roles(self):

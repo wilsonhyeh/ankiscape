@@ -5103,6 +5103,8 @@ def _lag_probe_start(state):
     import time as _time
 
     state.setdefault("lag_samples", [])
+    state.setdefault("rebuild_lag_samples", [])
+    state.setdefault("lag_probes", 0)
 
     def tick():
         if state.get("lag_probe_off"):
@@ -5110,8 +5112,12 @@ def _lag_probe_start(state):
         now = _time.perf_counter()
         expected = state.get("lag_expected")
         if expected is not None:
-            state["lag_samples"].append(
-                round(max(0.0, now - expected) * 1000.0, 3))
+            sample = round(max(0.0, now - expected) * 1000.0, 3)
+            state["lag_probes"] += 1
+            if state.get("rebuild_watch"):
+                state["rebuild_lag_samples"].append(sample)
+            else:
+                state["lag_samples"].append(sample)
         state["lag_expected"] = now + 0.1
         QTimer.singleShot(100, tick)
 
@@ -5163,13 +5169,16 @@ def _perf_register_reward_watches(state):
         pending = {}
     known = state.setdefault("watch_keys", set())
     start = state.pop("watch_answer_start", None)
+    blocked = bool(state.get("rebuild_watch"))
     for key in pending:
         if key in known:
             continue
         known.add(key)
-        state.setdefault("reward_watches", []).append(
-            {"key": key,
-             "start": start if start is not None else time.perf_counter()})
+        watch = {"key": key,
+                 "start": start if start is not None else time.perf_counter()}
+        if blocked:
+            watch["blocked_by_rebuild"] = True
+        state.setdefault("reward_watches", []).append(watch)
 
 
 def _resolve_reward_watches(state):
@@ -5197,8 +5206,13 @@ def _resolve_reward_watches(state):
             except Exception:
                 outcome = None
         if outcome is not None:
-            state["reward_ms"].append(round(
-                (_time.perf_counter() - watch["start"]) * 1000.0, 2))
+            sample = round(
+                (_time.perf_counter() - watch["start"]) * 1000.0, 2)
+            state["rewards_published"] = state.get("rewards_published", 0) + 1
+            if watch.get("blocked_by_rebuild"):
+                state.setdefault("rebuild_reward_ms", []).append(sample)
+            else:
+                state["reward_ms"].append(sample)
         else:
             still.append(watch)
     state["reward_watches"] = still
@@ -5410,11 +5424,15 @@ def _poll_native_performance(state):
         state["answers_done"] = 0
         state["accept_ms"] = []
         state["reward_ms"] = []
+        state["rebuild_reward_ms"] = []
         state["rebuilds"] = []
         state["rebuild_watch"] = []
+        state["rebuild_lag_samples"] = []
         state["rebuild_at"] = [int(v) for v in (cfg.get("rebuilds_at") or [])]
         state["answer_started"] = None
         state["reward_watches"] = []
+        state["lag_probes"] = 0
+        state["rewards_published"] = 0
         return
     if stage == "answers":
         _perf_register_reward_watches(state)
@@ -5449,6 +5467,8 @@ def _poll_native_performance(state):
                             state["rebuild_watch"].append({
                                 "start": _time.perf_counter(),
                                 "target": engine.journal.operation_count()})
+                            for watch in state.get("reward_watches") or []:
+                                watch["blocked_by_rebuild"] = True
                     except Exception as exc:
                         RESULT["errors"].append(f"rebuild trigger: {exc!r}")
             return
@@ -5464,6 +5484,7 @@ def _poll_native_performance(state):
             # No pending key ever appeared for this answer: the reward was
             # displayed synchronously inside the accepted-answer hook.
             state["reward_ms"].append(state["accept_ms"][-1])
+            state["rewards_published"] = state.get("rewards_published", 0) + 1
         state["answer_started"] = None
         state["awaiting"] = 0
         return
@@ -5555,7 +5576,11 @@ def _poll_native_performance(state):
                    "answers": state["answers_done"],
                    "accept_ms": state.get("accept_ms", []),
                    "reward_ms": state.get("reward_ms", []),
+                   "rebuild_reward_ms": state.get("rebuild_reward_ms", []),
                    "lag_ms": state.get("lag_samples", []),
+                   "rebuild_lag_ms": state.get("rebuild_lag_samples", []),
+                   "lag_probes": state.get("lag_probes", 0),
+                   "rewards_published": state.get("rewards_published", 0),
                    "shell_ms": state.get("shell_ms", []),
                    "cold_ms": state.get("cold_ms"),
                    "rebuilds_ms": state.get("rebuilds", []),

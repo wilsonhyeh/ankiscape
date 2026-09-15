@@ -102,3 +102,55 @@ same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
 p95/p99, event-loop lag, scaling ratio, shell timing, reward completion,
 100k rebuild, idle CPU, endurance memory). `dev/perf_runtime.py` measures the
 pure/live pipeline; native lanes supply event-loop, CPU and UI-cycle numbers.
+
+### 2026-09-14 amendment (approved by Wilson)
+
+The paired native gate measures ordinary responsiveness and rebuild-window
+behavior separately. Ordinary budgets are unchanged: event-loop-lag p95
+50 ms / max 200 ms, reward completion p95 250 ms.
+
+Rationale: after a late retraction with a very large review history, the
+projection worker replays that history on the main thread and stalls it for
+seconds while publishing rewards; the worst observed stall (~3.7 s, see
+`docs/release/3.0.0/KNOWN-LIMITATIONS.md`) sits far above the ordinary
+event-loop-lag budget but is inherent to a main-thread projection, and the
+rewards it publishes only appear when the projection completes. Bounding
+rebuild-window behavior with its own limits keeps the ordinary budgets
+honest without failing every release on a known, bounded stall. The
+amendment is recorded in the budget file's `amendment` object; changing any
+of these limits again requires a documented plan amendment.
+
+Amended semantics, exactly as implemented in `dev/native_performance.py`
+and `dev/reliability.py`:
+
+- **Separate rebuild-window buckets.** The driver classifies each event-loop
+  lag sample and each reward sample as ordinary or rebuild-window (a sample
+  whose measurement overlapped a late-retraction rebuild) and records them
+  in `rebuild_lag_ms` and `rebuild_reward_ms`, never in `lag_ms` /
+  `reward_ms`. Ordinary and rebuild-window summaries are computed
+  independently; rebuild samples never leak into the ordinary summaries.
+- **Rebuild-window bounds.** `event_loop_lag.rebuild_window.max_ms` is
+  bounded at 5000 ms (~37% above the worst observed 3660 ms) and
+  `reward_completion.rebuild_window.p95_ms` at 10000 ms (equal to the
+  rebuild hard gate). Exceeding either fails with
+  `budget:event_loop_lag:rebuild_window:max:<ms>` /
+  `budget:reward_completion:rebuild_window:p95:<ms>`.
+- **Paired control delta on macOS.** The runner baseline alone can exceed
+  the 50 ms absolute p95 (observed on macOS), so when `event_loop_lag.p95_ms`
+  exceeds the absolute limit the gate compares it against the paired
+  control's p95: it passes only if `control_p95_ms` is known and
+  `p95 - control_p95 <= p95_control_delta_ms` (50 ms). With no control
+  baseline or no configured delta limit, the absolute limit alone decides.
+  The absolute limit still applies even over a fast control.
+- **Reconciliation counters.** The driver reports `lag_probes` and
+  `rewards_published` totals; the orchestrator reconciles them against the
+  classified sample counts. Mismatches fail with `lag_samples:unreconciled`
+  / `reward_samples:unreconciled`. Reconciling across runs sums the
+  counters; a payload without the counters (old shape) makes
+  reconciliation not applicable — never a fabricated failure. Missing
+  driver counters are never treated as zero.
+- **Rebuild count guards.** Rebuilds recorded with no rebuild-window stall
+  samples fail `rebuild_window_lag:not_measured`; stall or reward samples
+  present with zero recorded rebuilds fail `rebuild_window_lag:unreconciled`
+  / `rebuild_reward_samples:unreconciled` (the empty-bucket guard applies
+  to payloads of either shape).

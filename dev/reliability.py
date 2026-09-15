@@ -282,6 +282,14 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
                 _fail("reward_completion", f"samples:{entry.get('samples')}")
             if _num(entry.get("p95_ms")) > _num(cfg["reward_completion"]["limit"]):
                 _fail("reward_completion", f"p95:{entry.get('p95_ms')}")
+            rebuild = entry.get("rebuild_window")
+            rebuild_limit = (cfg["reward_completion"].get("rebuild_window")
+                             or {}).get("p95_limit_ms")
+            if (isinstance(rebuild, dict) and rebuild.get("p95_ms") is not None
+                    and rebuild_limit is not None
+                    and _num(rebuild.get("p95_ms")) > _num(rebuild_limit)):
+                _fail("reward_completion",
+                      f"rebuild_window:p95:{rebuild.get('p95_ms')}")
 
     # late_retraction_rebuild: max of runs against hard gate (target reported).
     if "late_retraction_rebuild" in cfg:
@@ -301,10 +309,22 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
     # Native-only budgets: enforced when measured, required when named.
     lag = metrics.get("event_loop_lag")
     if lag:
-        if _num(lag.get("p95_ms")) > _num(cfg["event_loop_lag"]["limit"]):
-            _fail("event_loop_lag", f"p95:{lag.get('p95_ms')}")
+        p95 = _num(lag.get("p95_ms"))
+        if p95 > _num(cfg["event_loop_lag"]["limit"]):
+            control_p95 = lag.get("control_p95_ms")
+            delta_limit = cfg["event_loop_lag"].get("p95_control_delta_ms")
+            if not (control_p95 is not None and delta_limit is not None
+                    and p95 - _num(control_p95) <= _num(delta_limit)):
+                _fail("event_loop_lag", f"p95:{lag.get('p95_ms')}")
         if _num(lag.get("max_ms"), 0.0) > _num(cfg["event_loop_lag"]["max_limit_ms"]):
             _fail("event_loop_lag", f"max:{lag.get('max_ms')}")
+        rebuild = lag.get("rebuild_window")
+        rebuild_limit = (cfg["event_loop_lag"].get("rebuild_window")
+                         or {}).get("max_limit_ms")
+        if (isinstance(rebuild, dict) and rebuild.get("max_ms") is not None
+                and rebuild_limit is not None
+                and _num(rebuild.get("max_ms")) > _num(rebuild_limit)):
+            _fail("event_loop_lag", f"rebuild_window:max:{rebuild.get('max_ms')}")
     elif "event_loop_lag" in required:
         _fail("event_loop_lag", "not_measured")
     shell = metrics.get("warm_shell_open")

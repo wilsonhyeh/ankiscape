@@ -28,19 +28,37 @@ NP = _load("ankiscape_native_performance_under_test",
            "dev/native_performance.py")
 
 
+COUNTER_SOURCES = {"lag_probes": ("lag_ms", "rebuild_lag_ms"),
+                   "rewards_published": ("reward_ms", "rebuild_reward_ms")}
+
+
+def _derive_counters(raw):
+    """Counters default to the bucket lengths of the merged payload; an
+    explicit value in overrides wins. An explicit None removes the key,
+    reproducing an old-shape payload without counters."""
+    for key, buckets in COUNTER_SOURCES.items():
+        if raw.get(key) is None:
+            raw.pop(key, None)
+        else:
+            raw.setdefault(key, sum(len(raw[bucket]) for bucket in buckets))
+    return raw
+
+
 def _addon_raw(**overrides):
     raw = {
         "mode": "perf", "run_mode": "addon", "answers": 20,
         "accept_ms": [120.0, 130.0, 125.0, 140.0, 150.0],
         "reward_ms": [20.0, 25.0, 30.0],
         "lag_ms": [float(i) for i in range(1, 26)],
+        "rebuild_lag_ms": [3200.0, 3400.0, 3100.0],
+        "rebuild_reward_ms": [1870.0, 1600.0],
         "shell_ms": [500.0, 40.0, 45.0, 50.0],
         "cold_ms": 500.0,
         "rebuilds_ms": [3000.0, 3200.0, 2800.0],
         "idle_seconds": 15, "idle_cpu_pct": 0.4,
     }
     raw.update(overrides)
-    return raw
+    return _derive_counters(raw)
 
 
 def _control_raw(**overrides):
@@ -48,16 +66,31 @@ def _control_raw(**overrides):
         "mode": "perf", "run_mode": "control", "answers": 20,
         "accept_ms": [], "reward_ms": [],
         "lag_ms": [float(i) / 2 for i in range(1, 26)],
+        "rebuild_lag_ms": [], "rebuild_reward_ms": [],
         "shell_ms": [], "cold_ms": None, "rebuilds_ms": [],
         "idle_seconds": 15, "idle_cpu_pct": 0.2,
     }
     raw.update(overrides)
-    return raw
+    return _derive_counters(raw)
 
 
 def _run(install, raw):
     return {"install_addon": install, "rc": 0, "runtime": {},
             "raw": raw, "journey": "native-performance"}
+
+
+def _synthetic_cfg():
+    """Smoke-like profile with measurement floors disabled so individual
+    synthetic payloads are judged only by budgets and reconciliation."""
+    cfg = dict(NP.PROFILES["smoke"])
+    cfg["floors"] = {}
+    return cfg
+
+
+def _paired(addon=None, control=None):
+    runs = [_run(False, _control_raw(**(control or {}))),
+            _run(True, _addon_raw(**(addon or {})))]
+    return runs
 
 
 class NativePerformanceEvaluationTests(unittest.TestCase):
@@ -101,6 +134,131 @@ class NativePerformanceEvaluationTests(unittest.TestCase):
                 _run(True, _addon_raw(lag_ms=[900.0] * 10))]
         _metrics, failures = NP._evaluate("smoke", cfg, runs)
         self.assertTrue(any("event_loop_lag" in f for f in failures), failures)
+
+    def test_rebuild_samples_routed_out_of_ordinary_summaries(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"lag_ms": [10.0, 20.0, 30.0],
+                              "reward_ms": [100.0, 150.0]})
+        metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertEqual(failures, [])
+        self.assertEqual(metrics["event_loop_lag"]["p95_ms"], 30.0)
+        self.assertEqual(
+            metrics["event_loop_lag"]["rebuild_window"]["max_ms"], 3400.0)
+        self.assertEqual(metrics["reward_completion"]["p95_ms"], 150.0)
+        self.assertEqual(
+            metrics["reward_completion"]["rebuild_window"]["p95_ms"], 1870.0)
+
+    def test_paired_control_delta_allows_regression_within_delta(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"lag_ms": [154.0]},
+                       control={"lag_ms": [152.0]})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertEqual(failures, [])
+
+    def test_paired_control_delta_exceeded_fails(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"lag_ms": [220.0]},
+                       control={"lag_ms": [150.0]})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("budget:event_loop_lag:p95:220.0", failures)
+
+    def test_absolute_p95_limit_still_applies_over_fast_control(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"lag_ms": [60.0]},
+                       control={"lag_ms": [2.0]})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("budget:event_loop_lag:p95:60.0", failures)
+
+    def test_p95_under_absolute_limit_passes_with_slow_control(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"lag_ms": [45.0]},
+                       control={"lag_ms": [900.0]})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertEqual(failures, [])
+
+    def test_rebuild_window_max_within_budget_passes(self):
+        cfg = _synthetic_cfg()
+        runs = _paired()
+        metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            metrics["event_loop_lag"]["rebuild_window"]["max_ms"], 3400.0)
+
+    def test_rebuild_window_max_over_budget_fails(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"rebuild_lag_ms": [6000.0]})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn(
+            "budget:event_loop_lag:rebuild_window:max:6000.0", failures)
+
+    def test_rebuilds_recorded_without_stall_samples_fail(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"rebuild_lag_ms": []})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("rebuild_window_lag:not_measured", failures)
+
+    def test_rebuild_lag_key_absent_is_not_measured(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"rebuild_lag_ms": None})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("rebuild_window_lag:not_measured", failures)
+
+    def test_stall_samples_without_rebuilds_unreconciled(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"rebuilds_ms": [], "rebuild_reward_ms": []})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("rebuild_window_lag:unreconciled", failures)
+
+    def test_reward_ordinary_and_rebuild_bounds_pass(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"reward_ms": [240.0],
+                              "rebuild_reward_ms": [1870.0]})
+        metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertEqual(failures, [])
+        self.assertEqual(metrics["reward_completion"]["p95_ms"], 240.0)
+        self.assertEqual(
+            metrics["reward_completion"]["rebuild_window"]["p95_ms"], 1870.0)
+
+    def test_reward_ordinary_over_budget_fails(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"reward_ms": [256.0]})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("budget:reward_completion:p95:256.0", failures)
+
+    def test_reward_rebuild_window_over_budget_fails(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"reward_ms": [240.0],
+                              "rebuild_reward_ms": [11000.0]})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn(
+            "budget:reward_completion:rebuild_window:p95:11000.0", failures)
+
+    def test_rebuild_rewards_without_rebuilds_unreconciled(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"rebuilds_ms": [], "rebuild_lag_ms": []})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("rebuild_reward_samples:unreconciled", failures)
+
+    def test_lag_probes_mismatch_unreconciled(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"lag_probes": 99})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("lag_samples:unreconciled", failures)
+
+    def test_rewards_published_mismatch_unreconciled(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"rewards_published": 99})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("reward_samples:unreconciled", failures)
+
+    def test_old_shape_payload_reconciliation_not_applicable(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"lag_probes": None, "rewards_published": None,
+                              "rebuild_lag_ms": []})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertNotIn("lag_samples:unreconciled", failures)
+        self.assertNotIn("reward_samples:unreconciled", failures)
+        self.assertIn("rebuild_window_lag:not_measured", failures)
 
     def test_missing_native_metric_is_failure_never_zero(self):
         cfg = dict(NP.PROFILES["smoke"])

@@ -48,6 +48,18 @@ decides otherwise.
   reconciliation are listed as human checks in `RELEASE-SMOKE.md` and have
   not been performed yet.
 
+## Performance
+
+- After a late retraction with a very large review history (~100k game
+  operations), the projection worker replays the history and the interface
+  can stall up to ~3.7 s at worst observed on the slowest supported runner
+  class (~0.9-1.2 s typical on Linux/Windows). Rewards waiting on that
+  projection appear when it completes. Ordinary reviews are unaffected:
+  accepted-answer p50 is ~102 ms and event-loop lag p95 stays under 50 ms
+  on Linux/Windows. Moving the projection to a separate process is planned
+  stabilization work, not a 3.0 change; the stall is bounded by the
+  rebuild-window budgets in `dev/reliability-budgets.json`, not fixed.
+
 ## Recovery
 
 - Reinstalling 2.0.2 does not restore Evolved progress; see
