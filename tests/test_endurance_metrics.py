@@ -229,6 +229,24 @@ class EnduranceMetricsTests(unittest.TestCase):
         self.assertEqual(report["answers"], 1800)
         self.assertNotIn("no_answers_measured", report["failures"])
 
+    def test_falling_memory_is_not_a_leak(self):
+        # The sampler used getrusage().ru_maxrss, a HIGH-WATER MARK that can
+        # never decrease -- so a negative slope was impossible to observe and
+        # this shape had no coverage. Current RSS really does fall (measured:
+        # -282 MiB across one 8-minute run), and a falling series must pass.
+        samples = []
+        for t in range(0, 1800 + 1, 30):
+            samples.append({"at_s": float(t),
+                            "rss_mib": 900.0 - (t / 1800.0) * 300.0,
+                            "phase": "fixed", "answers": int(t * 2.0)})
+        report = END.evaluate_endurance(samples, profile="nightly",
+                                        duration_min=30.0)
+        self.assertLess(report["slope_mib_per_min"], 0)
+        self.assertFalse(any("slope" in f for f in report["failures"]),
+                         report["failures"])
+        self.assertFalse(any("settled" in f for f in report["failures"]),
+                         report["failures"])
+
     def test_engine_smoke_labels_ineligible(self):
         report = END.evaluate_endurance(_series(1), profile="engine-smoke",
                                         duration_min=1.0)
