@@ -709,9 +709,21 @@ def _backend_suite() -> int:
     if proc.returncode != 0:
         print("dev: (backend) pgTAP FAILED", file=sys.stderr)
         return 1
-    tap_results = re.findall(r"^(ok|not ok)\b", tap_text, re.MULTILINE)
-    pgtap_passed = tap_results.count("ok")
-    pgtap_failed = tap_results.count("not ok")
+    # `supabase test db` prints pg_prove's summary form, not bare TAP:
+    #   /path/0001_core.test.sql .......... ok
+    #   Files=7, Tests=157, 3 wallclock secs
+    #   Result: PASS
+    # Matching bare ^ok/^not ok therefore counted zero tests and recorded
+    # passed=<smoke only>, hiding all 157 pgTAP tests from the evidence record.
+    tap_summary = re.search(r"^Files=(\d+),\s*Tests=(\d+)", tap_text,
+                            re.MULTILINE)
+    if tap_summary and re.search(r"^Result:\s*PASS", tap_text, re.MULTILINE):
+        pgtap_passed = int(tap_summary.group(2))
+        pgtap_failed = 0
+    else:
+        tap_results = re.findall(r"^(ok|not ok)\b", tap_text, re.MULTILINE)
+        pgtap_passed = tap_results.count("ok")
+        pgtap_failed = tap_results.count("not ok")
     proc = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "auth_smoke.py")],
                           cwd=ROOT, timeout=600, capture_output=True, text=True)
     smoke_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
@@ -720,7 +732,7 @@ def _backend_suite() -> int:
         print("dev: (backend) auth smoke FAILED", file=sys.stderr)
         return 1
     # Machine-readable totals for the reliability record (nonzero real test
-    # counts; pgTAP emits TAP, the smoke prints one PASS line per check).
+    # counts; pgTAP prints a pg_prove summary, the smoke one PASS per check).
     smoke_passed = len(re.findall(r"^PASS\b", smoke_text, re.MULTILINE))
     smoke_failed = len(re.findall(r"^FAIL\b", smoke_text, re.MULTILINE))
     print(f"dev: (backend) counts: passed={pgtap_passed + smoke_passed} "

@@ -33,7 +33,14 @@ from .logic_pure import (
     can_mine_ore_pure,
     can_cut_tree_pure,
 )
-from .logic import level_up_check, check_achievements, calculate_woodcutting_probability, calculate_mining_probability
+from .logic import (
+    level_up_check,
+    check_achievements,
+    show_level_up_popups,
+    show_achievement_popups,
+    calculate_woodcutting_probability,
+    calculate_mining_probability,
+)
 from .ui import (
     ExpPopup,
     show_error_message,
@@ -225,9 +232,15 @@ def on_crafting_answer():
     # Update player data and UI
     player_data["inventory"] = new_inv
     player_data["crafting_exp"] += exp_gained
-    level_up_check("Crafting", player_data)
-    check_achievements(player_data)
+    # Durability (D-3): finish every state mutation and persist BEFORE any modal
+    # dialog runs — a UI failure must never discard a credited reward or abort
+    # the answer. Presentation is best-effort and happens after the save.
+    levels_gained = level_up_check("Crafting", player_data)
+    achievements = check_achievements(player_data)
     save_player_data()
+
+    show_level_up_popups("Crafting", levels_gained)
+    show_achievement_popups(achievements)
 
     # Refresh availability for Crafting/Smithing in the open menu (enables, never auto-selects)
     try:
@@ -366,9 +379,14 @@ def on_smithing_answer():
 
     player_data["inventory"] = new_inv
     player_data["smithing_exp"] += exp_gained
-    level_up_check("Smithing", player_data)
-    check_achievements(player_data)
+    # Durability (D-3): persist before any modal dialog — a UI failure must
+    # never discard a credited reward or abort the answer.
+    levels_gained = level_up_check("Smithing", player_data)
+    achievements = check_achievements(player_data)
     save_player_data()
+
+    show_level_up_popups("Smithing", levels_gained)
+    show_achievement_popups(achievements)
 
     # Refresh availability for Crafting/Smithing in the open menu after smelting
     try:
@@ -399,9 +417,14 @@ def on_woodcutting_answer():
         player_data["logs_cut_today"] += 1
         player_data["inventory"] = new_inv
         player_data["woodcutting_exp"] += exp_gained
-        level_up_check("Woodcutting", player_data)
-        check_achievements(player_data)
+        # Durability (D-3): persist before any modal dialog — a UI failure must
+        # never discard a credited reward or abort the answer.
+        levels_gained = level_up_check("Woodcutting", player_data)
+        achievements = check_achievements(player_data)
         save_player_data()
+
+        show_level_up_popups("Woodcutting", levels_gained)
+        show_achievement_popups(achievements)
 
     _show_exp(exp_gained)
 
@@ -440,9 +463,14 @@ def on_good_answer():
             player_data["ores_mined_today"] += 1
             player_data["inventory"] = new_inv
             player_data["mining_exp"] += exp_gained
-            level_up_check("Mining", player_data)
-            check_achievements(player_data)
+            # Durability (D-3): persist before any modal dialog — a UI failure must
+            # never discard a credited reward or abort the answer.
+            levels_gained = level_up_check("Mining", player_data)
+            achievements = check_achievements(player_data)
             save_player_data()
+
+            show_level_up_popups("Mining", levels_gained)
+            show_achievement_popups(achievements)
 
             # If the main menu is open, auto-enable Smithing/Crafting when they become possible.
             _refresh_skill_availability()
