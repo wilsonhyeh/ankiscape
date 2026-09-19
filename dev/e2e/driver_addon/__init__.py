@@ -2748,16 +2748,57 @@ def _addon_tree_snapshot():
     return out
 
 
-def _install_addon_network_guard(state):
-    """Deny and record any HTTP(S) connection attempted from ankiscape code.
+def _addon_allowed_hosts():
+    """Hosts the add-on is *designed* to contact at runtime, as names and IPs.
 
-    The image path must be fully offline; anything from the add-on itself is
-    recorded, refused, and fails the journey. Connections from Anki or the
-    driver are left alone so the check cannot lie about unrelated traffic.
+    The public Hiscores board is fetched over HTTPS from the baked backend for
+    every profile - including one that chose "Play offline" - and two pinned
+    assertions (`public_board_logged_out`, `test_leaderboard_public_browse`)
+    require exactly that fetch. The offline guarantee this journey enforces is
+    about the *image and asset* path, so the backend host is allowed through the
+    guard and recorded separately rather than counted as a violation. Before
+    this, the assertion forbade the very traffic two green assertions demanded,
+    and no product change could satisfy both.
+
+    Hosts are resolved to addresses here, before `connect` is patched, because
+    the wrapper sees the resolved IP and never the hostname.
+    """
+    import socket as _socket
+    import urllib.parse
+    names, addresses = set(), set()
+    try:
+        import ankiscape
+        from ankiscape.evolved import prod_config
+        for attr in ("PROD_URL", "SUPABASE_URL"):
+            url = getattr(prod_config, attr, "") or ""
+            host = urllib.parse.urlsplit(url).hostname if url else None
+            if host:
+                names.add(host.lower())
+    except Exception:
+        pass
+    for name in names:
+        try:
+            for info in _socket.getaddrinfo(name, 443, proto=_socket.IPPROTO_TCP):
+                addresses.add(str(info[4][0]).lower())
+        except Exception:
+            continue
+    return names | addresses
+
+
+def _install_addon_network_guard(state):
+    """Deny and record HTTP(S) connections to non-backend hosts from ankiscape.
+
+    The image path must be fully offline; anything from the add-on to a host
+    other than its own backend is recorded, refused, and fails the journey.
+    Connections from Anki or the driver are left alone so the check cannot lie
+    about unrelated traffic, and backend traffic is recorded separately so the
+    report still shows it happened.
     """
     import socket
     import sys as _sys
     attempts = state.setdefault("net_attempts", [])
+    allowed = _addon_allowed_hosts()
+    backend_attempts = state.setdefault("net_backend_attempts", [])
 
     def _from_addon():
         frame = _sys._getframe()
@@ -2772,6 +2813,10 @@ def _install_addon_network_guard(state):
         def wrapper(self, address, *args, **kwargs):
             if isinstance(address, tuple) and len(address) > 1 \
                     and address[1] in (80, 443) and _from_addon():
+                host = str(address[0]).lower()
+                if host in allowed:
+                    backend_attempts.append(str(address))
+                    return real(self, address, *args, **kwargs)
                 attempts.append(str(address))
                 raise ConnectionRefusedError(
                     "AnkiScape offline test: image network denied")
@@ -3039,8 +3084,9 @@ def _poll_ui_art(state):
 def _verify_art_environment(state):
     """Offline + immutability assertions for the installed add-on."""
     attempts = state.get("net_attempts") or []
+    backend = state.get("net_backend_attempts") or []
     _step("art_no_image_network", not attempts,
-          f"attempts={attempts[:3]}")
+          f"attempts={attempts[:3]} backend_allowed={backend[:3]}")
     before = state.get("install_snapshot") or {}
     after = _addon_tree_snapshot()
     if before:
