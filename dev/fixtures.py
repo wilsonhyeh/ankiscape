@@ -79,7 +79,23 @@ def endgame_ops(game_uuid: str, seed: int = 11) -> List[Dict[str, Any]]:
 
 
 def classic_player_data() -> Dict[str, Any]:
-    """2.0.2-shape Classic data (config_version 2) for the upgrade fixture."""
+    """2.0.2-shape Classic data (config_version 2) for the upgrade fixture.
+
+    The stored levels deliberately LAG the stored exp in EVERY skill. Measured
+    implied levels against `EXP_TABLE`:
+
+        mining      23 / 50000  -> 42   (+19)
+        woodcutting 17 / 20000  -> 33   (+16)
+        smithing    12 /  8000  -> 25   (+13)
+        crafting     9 /  5000  -> 20   (+11)
+
+    That is not a typo in one field - it is the shape a real 2.0.2 profile
+    arrives in, and it is the state that opened 26 stacked modal dialogs on the
+    first award before 3.0.0 capped the level-up burst at one. Making these
+    pairs self-consistent would quietly delete coverage of the upgrade path
+    this fixture exists to exercise. The lag is asserted on purpose in
+    tests/test_award_durability.py; do not "fix" it.
+    """
     ores = {ore: 0 for ore in ORES}
     ores.update({"Rune essence": 320, "Clay": 140, "Copper ore": 90,
                  "Tin ore": 88, "Iron ore": 40, "Coal": 25})
