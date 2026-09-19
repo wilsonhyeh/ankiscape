@@ -17,6 +17,8 @@ Qt is deliberately absent in this suite (the fake-Anki bootstrap provides no
 production state that used to raise ``NameError`` from the popup path.
 """
 import copy
+import importlib.util
+import os
 import random
 import sys
 import unittest
@@ -56,6 +58,17 @@ class _RecordingCol:
         return self._store.get("ankiscape_player_data")
 
 
+def upgrade_fixture_data():
+    """The repo's own 2.0.2 upgrade fixture, loaded by path like the other
+    suites do (`dev/` is not an importable package)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    spec = importlib.util.spec_from_file_location(
+        "ankiscape_upgrade_fixture", os.path.join(root, "dev", "fixtures.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.classic_player_data()
+
+
 def classic_player_data():
     """A *self-consistent* Classic profile: level 1 with 80 exp, one award from
     level 2. Deliberately not dev/fixtures.classic_player_data(), whose
@@ -85,7 +98,7 @@ class AwardDurabilityTest(unittest.TestCase):
 
     def _drive(self, *, level_up_raises=False, achievement_raises=False,
                force_achievement=False, skip_achievement_patch=False,
-               level=None, exp=None):
+               level=None, exp=None, use_repo_fixture=False):
         """Answer one card through the real hook order and return the fixture."""
         addon = _load_addon_as_package(mod_name="ankiscape_award_durability")
 
@@ -105,7 +118,8 @@ class AwardDurabilityTest(unittest.TestCase):
         except Exception:
             pass
 
-        addon.player_data = classic_player_data()
+        addon.player_data = (upgrade_fixture_data() if use_repo_fixture
+                             else classic_player_data())
         if level is not None:
             addon.player_data["mining_level"] = level
         if exp is not None:
@@ -220,6 +234,44 @@ class AwardDurabilityTest(unittest.TestCase):
         self.assertEqual(col.persisted()["mining_level"],
                          addon.player_data["mining_level"],
                          "the reached level must be persisted")
+        self.assertEqual(answered, [3])
+
+    def test_the_upgrade_fixture_deliberately_lags_its_levels(self):
+        """The 2.0.2 fixture stores levels that lag their exp in EVERY skill.
+
+        That is the shape a real upgrading profile arrives in, and it is the
+        state that produced a 26-dialog burst before the cap. A future
+        "cleanup" that made these pairs self-consistent would silently delete
+        coverage of the upgrade path, so the lag is asserted here on purpose.
+        """
+        from constants import EXP_TABLE
+        from logic_pure import calculate_new_level
+
+        data = upgrade_fixture_data()
+        lag = {}
+        for skill, level_key, exp_key in (
+                ("mining", "mining_level", "mining_exp"),
+                ("woodcutting", "woodcutting_level", "woodcutting_exp"),
+                ("smithing", "smithing_level", "smithing_exp"),
+                ("crafting", "crafting_level", "crafting_exp")):
+            implied = calculate_new_level(data[exp_key], data[level_key],
+                                          EXP_TABLE)
+            if implied > data[level_key]:
+                lag[skill] = implied - data[level_key]
+        self.assertEqual(
+            lag,
+            {"mining": 19, "woodcutting": 16, "smithing": 13, "crafting": 11},
+            "the upgrade fixture must keep modelling a lagging 2.0.2 profile")
+
+    def test_the_repo_upgrade_fixture_shows_one_dialog(self):
+        """The fixture the `upgrade` journey actually seeds, end to end."""
+        addon, col, events, answered, _ = self._drive(use_repo_fixture=True)
+        level_ups = [e for e in events if str(e[1]).startswith("level_up")]
+        self.assertEqual(len(level_ups), 1,
+                         f"expected one summarised dialog, got {events}")
+        self.assertEqual(addon.player_data["mining_level"], 42,
+                         "50000 exp is level 42")
+        self.assertEqual(col.persisted()["mining_level"], 42)
         self.assertEqual(answered, [3])
 
     def test_dialog_helpers_are_safe_without_qt(self):
