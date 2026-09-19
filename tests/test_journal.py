@@ -80,5 +80,62 @@ class TestJournal(unittest.TestCase):
         self.assertIn(os.path.join("ankiscape-evolved", "game-9", "game.sqlite3"), p)
 
 
+class TestRetireOutboxUnboundGuard(unittest.TestCase):
+    """S4/R1: retirement applies only to a journal with no account_binding."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "g1", "game.sqlite3")
+        self.j = Journal(self.path)
+
+    def tearDown(self):
+        try:
+            self.j.close()
+        except Exception:
+            pass
+        self.tmp.cleanup()
+
+    def _op(self, op_id, seq):
+        return {"op_id": op_id, "game_uuid": "game-1", "device_id": "dev-a",
+                "device_seq": seq, "lamport": seq, "kind": "review_award",
+                "payload": {"review_key": f"rk{seq}"}}
+
+    def test_unbound_journal_drains_and_records_the_marker(self):
+        self.j.append_operation(self._op("op-1", 1))
+        self.j.append_operation(self._op("op-2", 2))
+        removed = self.j.retire_outbox()
+        self.assertEqual(removed, 2)
+        self.assertEqual(self.j.count_pending_operations(), 0)
+        self.assertEqual(len(self.j.all_operations()), 2, "operations retained")
+        self.assertEqual(self.j.get_metadata("outbox_retired"), "1")
+        rows = self.j._conn.execute("SELECT acked FROM operations").fetchall()
+        self.assertEqual([int(r["acked"]) for r in rows], [0, 0],
+                         "acked is never set by retirement")
+        self.assertEqual(self.j.retire_outbox(), 0, "retirement is idempotent")
+
+    def test_bound_journal_is_untouched(self):
+        self.j.append_operation(self._op("op-1", 1))
+        self.j.set_metadata("account_binding",
+                            '{"game_uuid": "b", "user_id": "u"}')
+        self.assertEqual(self.j.retire_outbox(), 0)
+        self.assertEqual(self.j.count_pending_operations(), 1)
+        self.assertIsNone(self.j.get_metadata("outbox_retired"))
+
+    def test_retirement_ignores_an_empty_metadata_binding(self):
+        # The deletion path clears the binding by writing an empty string;
+        # an empty value is "no binding" and the drain still applies.
+        self.j.set_metadata("account_binding", "")
+        self.j.append_operation(self._op("op-1", 1))
+        self.assertEqual(self.j.retire_outbox(), 1)
+        self.assertEqual(self.j.count_pending_operations(), 0)
+
+    def test_projection_inputs_survive_retirement(self):
+        self.j.append_operation(self._op("op-1", 1))
+        self.j.append_operation(self._op("op-2", 2))
+        before = self.j.all_operations()
+        self.j.retire_outbox()
+        self.assertEqual(self.j.all_operations(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

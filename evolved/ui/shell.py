@@ -207,9 +207,11 @@ def status_text(status: Optional[Dict[str, Any]]) -> str:
         return "Session expired · sign in again — progress saved" + suffix
     if state == "server_upgrade":
         return "Sync paused · Server update required — update the add-on"
-    if state == "game_mismatch":
-        return ("Signed in · this game belongs to another account — "
-                "progress is safe on this computer")
+    if state in ("relogin_required", "game_mismatch"):
+        # `game_mismatch` is retained for one release as mixed-version
+        # defense; the live state a new server emits is `relogin_required`.
+        return ("Signed in · sync paused — sign out and sign in again to "
+                "reconnect. Your progress is safe on this computer.")
     if state == "rejected_progress":
         return ("Some changes couldn't sync"
                 + (f" ({rejected})" if rejected else "")

@@ -74,26 +74,29 @@ class TestJourneyFixtureServer(unittest.TestCase):
                                code="123456", kind="signup", session=session)
         self.assertTrue(verified.ok)
         self.assertTrue(session.logged_in)
-        # Linkage through the authoritative RPC.
+        # Linkage through the authoritative RPC. The local literal survives
+        # only as the offered p_game_uuid; the fake's returned uuid is the
+        # identity every later call adopts (S14/S11 — remember-vs-generate).
         link = ensure_link(post_json, self.endpoint, session,
                            game_uuid="game-fixture-1")
         self.assertTrue(link.linked)
+        game_uuid = link.game_uuid or "game-fixture-1"
         self.assertTrue(persist_binding(self.journal, link,
-                                        game_uuid="game-fixture-1",
+                                        game_uuid=game_uuid,
                                         user_id=session.user_id,
                                         endpoint_project=self.endpoint.base_url))
         self.assertEqual(read_binding(self.journal)["game_uuid"],
-                         "game-fixture-1")
+                         game_uuid)
         # Upload through the real sync service into the fixture server.
         self.journal.append_operation({
-            "op_id": "op-fixture-1", "game_uuid": "game-fixture-1",
+            "op_id": "op-fixture-1", "game_uuid": game_uuid,
             "device_id": "dev-a", "device_seq": 1, "lamport": 1,
             "kind": "review_award",
             "payload": {"review_key": "rk-fixture-1"}})
         svc = SyncService(
-            generation=1, game_uuid="game-fixture-1", journal=self.journal,
+            generation=1, game_uuid=game_uuid, journal=self.journal,
             transport=make_transport(ServiceConfig(
-                endpoint=self.endpoint, game_uuid="game-fixture-1",
+                endpoint=self.endpoint, game_uuid=game_uuid,
                 post=post_json), session),
             apply_remote=lambda page: None,
             get_user_id=lambda: session.user_id)

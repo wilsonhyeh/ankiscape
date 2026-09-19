@@ -109,15 +109,56 @@ def _runtime_problems(requested_anki, requested_qt, runtime) -> list:
     return problems
 
 
+def _read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _retire_previous_result(base: str) -> None:
+    """Retire the last run's result before this run's Anki is launched.
+
+    The per-journey base survives between invocations, and a journey can bail
+    before it rewrites anything (runtime resolution, a leftover Anki process,
+    a packaging failure all return before the driver wipes the base). Reading
+    `e2e-assertions.json` afterwards would then report the *previous* run's
+    steps as this run's evidence. The files are rotated aside (kept as *.prev
+    for forensics, never read) so "missing" is unambiguous.
+    `artifact_sha256.txt` is deliberately untouched: its absence is reported
+    as a stale package, which is not what a missing result means.
+    """
+    for name, retired in (("e2e-assertions.json", "e2e-assertions.prev.json"),
+                          ("run-id.txt", "run-id.prev.txt")):
+        src = os.path.join(base, name)
+        if not os.path.exists(src):
+            continue
+        try:
+            os.replace(src, os.path.join(base, retired))
+        except OSError:
+            try:
+                os.unlink(src)
+            except OSError:
+                pass
+
+
 def _run_journey(dev, args, journey):
+    """Run one journey; return (rc, result-or-None, this run's expected id).
+
+    Any result left on disk by an earlier invocation is retired first, so the
+    returned result can only ever have been written by this run.
+    """
+    base = os.path.join(dev.DEV_DIR, "e2e", journey)
+    _retire_previous_result(base)
     try:
         rc = dev._e2e_suite(args.anki, str(args.qt), journey, args.anki_bin,
                             getattr(args, "anki_actual", ""))
     except Exception as exc:  # noqa: BLE001
         rc = 1
         print(f"ui_ux_verify: {journey} raised {exc!r}", file=sys.stderr)
-    base = os.path.join(dev.DEV_DIR, "e2e", journey)
-    return int(rc), _read_json(os.path.join(base, "e2e-assertions.json"))
+    return (int(rc), _read_json(os.path.join(base, "e2e-assertions.json")),
+            _read_text(os.path.join(base, "run-id.txt")))
 
 
 def _compose_combined_report() -> None:
@@ -226,7 +267,7 @@ def main(argv=None) -> int:
     for journey in scenarios:
         print(f"ui_ux_verify: === {journey} (Anki {installed}, Qt {args.qt}) ===")
         _wait_for_anki_exit()
-        rc, assertions = _run_journey(dev, args, journey)
+        rc, assertions, expected_run = _run_journey(dev, args, journey)
         if rc != 0 and assertions is None:
             # Launch races (a lingering process or base handle right after a
             # previous scenario) must not masquerade as a result. Settle and
@@ -234,22 +275,37 @@ def main(argv=None) -> int:
             print(f"ui_ux_verify: {journey}: launch failed early; retrying once")
             _wait_for_anki_exit(120)
             time.sleep(10)
-            rc, assertions = _run_journey(dev, args, journey)
+            rc, assertions, expected_run = _run_journey(dev, args, journey)
         # Compare against the artifact the run itself built (the suite
         # rebuilds dist/ before launching Anki).
         built_hash = _dist_hash()
         base = os.path.join(dev.DEV_DIR, "e2e", journey)
         entry = {"journey": journey, "returncode": int(rc),
                  "screenshots": [], "qt_version": "",
-                 "artifact_sha256": built_hash, "steps": 0, "failed": []}
+                 "artifact_sha256": built_hash, "steps": 0, "failed": [],
+                 "failed_checks": []}
+        # Every journey-level failure is recorded on the entry as well as in
+        # the summary, so the report row cannot disagree with the verdict.
+        journey_failures = entry["failed_checks"]
+
+        def _failed(reason: str) -> None:
+            journey_failures.append(reason)
+            failures.append(f"{journey}: {reason}")
+
         if rc != 0:
-            failures.append(f"{journey}: journey failed (rc={rc})")
+            _failed(f"journey failed (rc={rc})")
         if journey == "sync":
             # The sync journey is a standalone local-stack script (no Anki
             # driver result); rc=0 is the assertion.
             entry["artifact_sha256"] = built_hash
         elif assertions is None:
-            failures.append(f"{journey}: no assertions written (stale result)")
+            _failed("no assertions written (fresh run)")
+        elif not assertions.get("run_id") \
+                or assertions.get("run_id") != expected_run:
+            # The file on disk is not this run's result. None of its contents
+            # - steps, runtime, Qt, hash - may be reported as this run's
+            # evidence, so freshness is settled before all of them.
+            _failed("stale result (run_id mismatch)")
         else:
             runtime = assertions.get("runtime") or {}
             if observed_runtime is None and runtime:
@@ -260,43 +316,28 @@ def main(argv=None) -> int:
                     return 2
                 observed_runtime = runtime
             entry["runtime"] = runtime
-            run_id = assertions.get("run_id")
-            run_file = os.path.join(base, "run-id.txt")
-            expected_run = ""
-            try:
-                with open(run_file, encoding="utf-8") as fh:
-                    expected_run = fh.read().strip()
-            except OSError:
-                pass
-            if not run_id or run_id != expected_run:
-                failures.append(f"{journey}: stale result (run_id mismatch)")
             steps = assertions.get("steps", [])
             failed_steps = [s for s in steps if not s.get("ok")]
             entry["steps"] = len(steps)
             entry["failed"] = [s.get("name") for s in failed_steps]
             if failed_steps:
-                failures.append(f"{journey}: failed steps {entry['failed']}")
+                _failed(f"failed steps {entry['failed']}")
             if not assertions.get("screenshots"):
                 # Shell scenarios must produce visual evidence.
                 if journey in SHELL_SCENARIOS:
-                    failures.append(f"{journey}: no screenshots")
+                    _failed("no screenshots")
             qt_version = str(assertions.get("qt_version", ""))
             entry["qt_version"] = qt_version
             if not qt_version.startswith(str(args.qt)):
-                failures.append(
-                    f"{journey}: Qt mismatch (ran {qt_version!r}, "
-                    f"want major {args.qt})")
-            recorded_hash = ""
-            try:
-                with open(os.path.join(base, "artifact_sha256.txt"),
-                          encoding="utf-8") as fh:
-                    recorded_hash = fh.read().strip()
-            except OSError:
-                pass
+                _failed(f"Qt mismatch (ran {qt_version!r}, "
+                        f"want major {args.qt})")
+            recorded_hash = _read_text(
+                os.path.join(base, "artifact_sha256.txt"))
             entry["artifact_sha256"] = recorded_hash or built_hash
             if built_hash and recorded_hash != built_hash:
-                failures.append(f"{journey}: stale package "
-                                f"({recorded_hash[:12]} != {built_hash[:12]})")
+                _failed(f"stale package "
+                        f"({recorded_hash[:12]} != {built_hash[:12]})")
+        entry["ok"] = int(rc) == 0 and not journey_failures
         entry["screenshots"] = _collect_screenshots(
             base, os.path.join(out_dir, journey))
         results.append(entry)
@@ -326,7 +367,10 @@ def main(argv=None) -> int:
         "|---|---|---|---|---|---|",
     ]
     for entry in results:
-        ok = entry["returncode"] == 0 and not entry["failed"]
+        # The row is read as the lane's result (it is copied to
+        # native-matrix-report.md), so it must reflect every check that
+        # failed, not just the step list.
+        ok = bool(entry.get("ok"))
         lines.append(
             f"| {entry['journey']} | {'PASS' if ok else 'FAIL'} "
             f"| {entry['steps']} | {', '.join(entry['failed']) or '-'} "

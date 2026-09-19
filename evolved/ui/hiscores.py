@@ -103,9 +103,11 @@ def build_hiscores_screen(shell, deps: Dict[str, Any]):
     cta_head.addWidget(display_label("Add your score"), 1)
     cta.body.addLayout(cta_head)
     cta.body.addWidget(body_label(
-        "Anyone can browse the Hiscores. Create a free account to sync this "
-        "game, keep an online backup and appear on the board yourself. Your "
-        "reviews always earn XP locally; an account is optional.", wrap=True))
+        "Anyone can browse the Hiscores. Create a free account to start your "
+        "own synced game, keep an online backup and appear on the board "
+        "yourself. Your offline game on this computer is separate, always "
+        "earns XP locally and is never uploaded. An account is optional.",
+        wrap=True))
     cta_row = QHBoxLayout()
     login_btn = QPushButton("Log in")
     login_btn.setObjectName("ankiscape-hiscores-login")

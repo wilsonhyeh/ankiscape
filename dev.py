@@ -16,7 +16,7 @@ Commands:
   python3 dev.py test --suite backend
   python3 dev.py test --suite e2e --anki 26.8.1 --qt 6
   python3 dev.py verify --release
-  python3 dev.py verify-evidence --matrix dev/matrix.json
+  python3 dev.py verify-evidence --stage pr
 """
 from __future__ import annotations
 
@@ -1147,11 +1147,15 @@ def cmd_verify_evidence(args) -> int:
     skipped required scenarios, zero-test reports and budget violations.
     """
     evidence = getattr(args, "evidence", None) or os.path.join(ROOT, "artifacts", "reliability")
-    proc = subprocess.run(
-        [sys.executable, os.path.join(ROOT, "dev", "reliability.py"),
-         "verify-evidence", "--matrix", args.matrix, "--evidence", evidence,
-         "--stage", getattr(args, "stage", "release")],
-        cwd=ROOT)
+    cmd = [sys.executable, os.path.join(ROOT, "dev", "reliability.py"),
+           "verify-evidence", "--matrix", args.matrix, "--evidence", evidence,
+           "--stage", getattr(args, "stage", "release")]
+    for flag in ("expected_commit", "expected_artifact_sha256",
+                 "expected_run_id"):
+        value = getattr(args, flag, "")
+        if value:
+            cmd += [f"--{flag.replace('_', '-')}", value]
+    proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
 
 
@@ -1200,11 +1204,18 @@ def main(argv=None) -> int:
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("--release", action="store_true")
     p_ev = sub.add_parser("verify-evidence")
-    p_ev.add_argument("--matrix", default=os.path.join(ROOT, "dev", "matrix.json"))
+    p_ev.add_argument("--matrix",
+                      default=os.path.join(ROOT, "dev",
+                                           "reliability-matrix.json"))
     p_ev.add_argument("--evidence",
                       default=os.path.join(ROOT, "artifacts", "reliability"))
     p_ev.add_argument("--stage", default="release",
                       choices=("pr", "nightly", "release"))
+    # Forwarded verbatim to dev/reliability.py, which requires all three for
+    # the nightly/release stages: they bind the verdict to one candidate.
+    p_ev.add_argument("--expected-commit", default="")
+    p_ev.add_argument("--expected-artifact-sha256", default="")
+    p_ev.add_argument("--expected-run-id", default="")
     args = parser.parse_args(argv)
     if args.cmd == "setup":
         return cmd_setup(args)

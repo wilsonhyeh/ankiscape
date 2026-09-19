@@ -33,6 +33,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -63,6 +64,8 @@ MAX_RPS = 2.0
 TIMEOUT_S = 30
 MAX_RETRIES = 3
 ABORT_AFTER = 3
+_UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 
 class SeedError(Exception):
@@ -300,25 +303,52 @@ def _provision_one(transport: Transport, name: str, trace: Dict[str, Any],
             "email": email}
 
 
+def _linked_game_uuid(transport: Transport, trace: Dict[str, Any],
+                      token: str) -> str:
+    """Call link_game and return the server-owned uuid to use from then on.
+
+    D5: the offered trace uuid is ignored for identity. `created` is a
+    key-presence rule, never `created is True`, and resumed/created are pinned
+    complementary (S11/S16). Returns "" when the reply violates the contract."""
+    reply = transport.request("POST", "/rest/v1/rpc/link_game",
+                              body={"p_game_uuid": trace["game_uuid"]},
+                              token=token, expect=(200,))
+    reply = reply if isinstance(reply, dict) else {}
+    created = reply.get("created")
+    adopted = str(reply.get("game_uuid") or "")
+    if (created is not True and created is not False) \
+            or reply.get("resumed") != (not created) \
+            or not _UUID_RE.match(adopted):
+        return ""
+    return adopted
+
+
 def _submit_trace(transport: Transport, trace: Dict[str, Any], token: str,
-                  batch_size: int) -> Dict[str, int]:
-    game = trace["game_uuid"]
-    transport.request("POST", "/rest/v1/rpc/link_game",
-                      body={"p_game_uuid": game}, token=token, expect=(200,))
+                  batch_size: int) -> Dict[str, Any]:
+    """Link, then replay the trace under the SERVER-owned game uuid (D5).
+
+    p_game_uuid is offered only; the reply's `game_uuid` is adopted and is the
+    only game id used for the submits (S11/S16). The returned dict carries the
+    adopted uuid so callers key `get_game_state` and registry writes on it."""
+    adopted = _linked_game_uuid(transport, trace, token)
+    if not adopted:
+        raise SeedError(f"{trace['display']}: link_game reply violates the "
+                        "created/resumed contract")
     accepted = 0
     applied = 0
     ops = trace["ops"]
     for start in range(0, len(ops), batch_size):
         batch = ops[start:start + batch_size]
         result = transport.request("POST", "/rest/v1/rpc/submit_operations",
-                                   body={"p_game_uuid": game, "p_ops": batch},
+                                   body={"p_game_uuid": adopted, "p_ops": batch},
                                    token=token, expect=(200,))
         accepted += len((result or {}).get("accepted") or [])
         applied += int((result or {}).get("applied") or 0)
         conflicts = (result or {}).get("conflicts") or []
         if conflicts:
             raise SeedError(f"{trace['display']}: conflicts {conflicts[:2]}")
-    return {"accepted": accepted, "applied": applied, "ops": len(ops)}
+    return {"accepted": accepted, "applied": applied, "ops": len(ops),
+            "game_uuid": adopted}
 
 
 def _server_state(transport: Transport, game: str, token: str) -> Dict:
@@ -413,12 +443,14 @@ def cmd_apply(args) -> int:
         created += 1 if not reserved.get(
             provisioned["username_norm"], {}).get("user_id") else 0
         stats = _submit_trace(transport, trace, provisioned["token"], batch)
-        state = _server_state(transport, trace["game_uuid"], provisioned["token"])
+        state = _server_state(transport, stats["game_uuid"],
+                              provisioned["token"])
         problems = _compare_state(trace, state)
         if problems:
             raise SeedError(f"{name}: server state mismatch: {problems[:3]}")
         _update_registry(transport, provisioned["username_norm"], {
-            "user_id": provisioned["user_id"], "game_uuid": trace["game_uuid"],
+            "user_id": provisioned["user_id"],
+            "game_uuid": stats["game_uuid"],
             "expected_trace_hash": trace["trace_hash"], "seed_state": "seeded"})
         seeded += 1
         print(f"seed: {name:<14} ops={stats['ops']} accepted={stats['accepted']} "
@@ -442,7 +474,12 @@ def cmd_verify(args) -> int:
         trace = traces[name]
         token = _sign_in(transport, traces_mod.email_for(name),
                          password_for(secret, name))
-        state = _server_state(transport, trace["game_uuid"], token)
+        game_uuid = _linked_game_uuid(transport, trace, token)
+        if not game_uuid:
+            failures.append(f"{name}: link_game reply violates the "
+                            "created/game_uuid contract")
+            continue
+        state = _server_state(transport, game_uuid, token)
         problems = _compare_state(trace, state)
         if problems:
             failures.extend(f"{name}: {p}" for p in problems[:3])
@@ -487,14 +524,20 @@ def cmd_verify(args) -> int:
     trace = traces[sample]
     token = _sign_in(transport, traces_mod.email_for(sample),
                      password_for(secret, sample))
-    before = _server_state(transport, trace["game_uuid"], token)
-    stats = _submit_trace(transport, trace, token,
-                          int(suite["trace"]["batch_size"]))
-    after = _server_state(transport, trace["game_uuid"], token)
-    if before.get("revision") != after.get("revision"):
-        failures.append("retry changed the server revision")
-    if int(stats.get("applied") or 0) != 0:
-        failures.append(f"retry applied {stats.get('applied')} new operations")
+    game_uuid = _linked_game_uuid(transport, trace, token)
+    if not game_uuid:
+        failures.append("retry sample: link_game reply violates the "
+                        "created/game_uuid contract")
+        before = after = {}
+    else:
+        before = _server_state(transport, game_uuid, token)
+        stats = _submit_trace(transport, trace, token,
+                              int(suite["trace"]["batch_size"]))
+        after = _server_state(transport, game_uuid, token)
+        if int(stats.get("applied") or 0) != 0:
+            failures.append(f"retry applied {stats.get('applied')} new operations")
+        if before.get("revision") != after.get("revision"):
+            failures.append("retry changed the server revision")
     report = {"target": target["kind"], "counts": counts,
               "failures": failures,
               "public_top": {s: public_rows[s][:3] for s in public_rows},

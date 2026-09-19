@@ -138,16 +138,29 @@ def main():
     check("username claim trigger created players row",
           out.stdout.strip() == username, out.stdout.strip()[:100])
 
-    # 5. link_game binds then resumes.
-    game = "11111111-2222-3333-4444-555555555555"
-    status, data = _req("POST", "/rest/v1/rpc/link_game", {"p_game_uuid": game},
-                        token=token, anon=anon)
-    check("link_game binds", status in (200, 201) and data.get("resumed") is False,
+    # 5. link_game creates then resumes. The server owns the game uuid (D5),
+    # so the returned uuid is the only game id used from here on (S11/S16):
+    # created/resumed are pinned complementary, and `created` is a
+    # key-presence rule, never `created is True` on a repeat call.
+    offered = "11111111-2222-3333-4444-555555555555"
+    status, data = _req("POST", "/rest/v1/rpc/link_game",
+                        {"p_game_uuid": offered}, token=token, anon=anon)
+    reply = data if isinstance(data, dict) else {}
+    game = str(reply.get("game_uuid") or "")
+    check("link_game creates with the pinned created/resumed reply",
+          status in (200, 201) and reply.get("created") is True
+          and reply.get("resumed") is False, f"{status} {data}")
+    check("link_game returns the server-owned uuid",
+          bool(re.match(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z", game)),
           f"{status} {data}")
-    status, data = _req("POST", "/rest/v1/rpc/link_game", {"p_game_uuid": game},
-                        token=token, anon=anon)
-    check("link_game resumes", status in (200, 201) and data.get("resumed") is True,
-          f"{status} {data}")
+    status, data = _req("POST", "/rest/v1/rpc/link_game",
+                        {"p_game_uuid": offered}, token=token, anon=anon)
+    reply = data if isinstance(data, dict) else {}
+    check("link_game resumes with created=False, resumed=True, same uuid",
+          status in (200, 201) and reply.get("created") is False
+          and reply.get("resumed") is True
+          and str(reply.get("game_uuid") or "") == game, f"{status} {data}")
 
     # 6. Submit + idempotent retry + changed-payload conflict.
     # Fresh op_id per run: op_ids are globally unique, so fixed ids would

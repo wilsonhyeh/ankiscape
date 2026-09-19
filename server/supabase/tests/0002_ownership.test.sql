@@ -3,7 +3,8 @@
 begin;
 select plan(13);
 
--- Verified Alice links a fresh game; repeat resumes; other game conflicts.
+-- Verified Alice links a fresh game; repeat resumes; a second offered uuid
+-- returns the same (server-owned) game rather than raising.
 insert into auth.users(id, aud, role, email, encrypted_password,
                        email_confirmed_at, created_at, updated_at,
                        raw_user_meta_data)
@@ -15,15 +16,20 @@ on conflict (id) do nothing;
 select set_config('request.jwt.claims',
   '{"sub":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","role":"authenticated"}', true);
 set local role authenticated;
+-- S5: the first link's return is authoritative (D5: the server owns the game
+-- uuid). Capture it once here; every later call in this file passes
+-- :bound_uuid - the offered literal is dead after this call.
+select public.link_game('11111111-1111-1111-1111-111111111111') as first_link \gset
+select (:'first_link'::jsonb)->>'game_uuid' as bound_uuid \gset
 select is(
-  (select public.link_game('11111111-1111-1111-1111-111111111111')->>'resumed'),
+  (:'first_link'::jsonb)->>'resumed',
   'false', 'first link binds the game');
 select is(
   (select public.link_game('11111111-1111-1111-1111-111111111111')->>'resumed'),
   'true', 'repeat link resumes the same binding');
-select throws_ok(
-  $$ select public.link_game('22222222-2222-2222-2222-222222222222') $$,
-  '23505', 'game_mismatch', 'second game mismatches');
+select is(
+  (select public.link_game('22222222-2222-2222-2222-222222222222')->>'game_uuid'),
+  :'bound_uuid', 'a different offered uuid returns the bound game');
 reset role;
 
 -- Submit one op; exact retry returns the same acceptance; changed payload
@@ -33,19 +39,19 @@ select set_config('request.jwt.claims',
 set local role authenticated;
 select is(
   (select jsonb_array_length(
-     public.submit_operations('11111111-1111-1111-1111-111111111111',
+     public.submit_operations(:'bound_uuid',
        '[{"op_id":"bbbbbbbb-2222-4444-8888-eeeeeeeeeeee","device_id":"dev-a","device_seq":1,"lamport":1,"kind":"review_award","payload":{"review_key":"rk-1"}}]'::jsonb)
      -> 'accepted')),
   1, 'first submit accepted');
 select is(
   (select jsonb_array_length(
-     public.submit_operations('11111111-1111-1111-1111-111111111111',
+     public.submit_operations(:'bound_uuid',
        '[{"op_id":"bbbbbbbb-2222-4444-8888-eeeeeeeeeeee","device_id":"dev-a","device_seq":1,"lamport":1,"kind":"review_award","payload":{"review_key":"rk-1"}}]'::jsonb)
      -> 'accepted')),
   1, 'exact retry returns the same acceptance');
 select is(
   (select jsonb_array_length(
-     public.submit_operations('11111111-1111-1111-1111-111111111111',
+     public.submit_operations(:'bound_uuid',
        '[{"op_id":"bbbbbbbb-2222-4444-8888-eeeeeeeeeeee","device_id":"dev-a","device_seq":1,"lamport":1,"kind":"review_award","payload":{"review_key":"rk-CHANGED"}}]'::jsonb)
      -> 'conflicts')),
   1, 'reused id with changed content conflicts');
@@ -102,8 +108,7 @@ select set_config('request.jwt.claims',
 set local role authenticated;
 select ok(jsonb_typeof(public.hiscores('mining', 10)) = 'array',
           'hiscores returns an array');
-select ok((public.fetch_operations('11111111-1111-1111-1111-111111111111',
-                                   0, 200) ->> 'revision') is not null,
+select ok((public.fetch_operations(:'bound_uuid', 0, 200) ->> 'revision') is not null,
           'fetch returns a revision');
 reset role;
 

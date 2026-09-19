@@ -1,17 +1,24 @@
 # evolved/link.py - Verified account/game linkage coordinator (Qt-free).
-"""One place that links the local game to the signed-in account through the
-server's own idempotent `link_game` RPC, before any fetch or upload.
+"""One place that links the signed-in account to ITS game through the server's
+own idempotent `link_game` RPC, before any fetch or upload.
 
-Server rules (0003_registration_gate.sql): the session must be verified, the
-account must have a player row, an unclaimed game is bound to the account,
-the same game resumes, and anything else raises game_claimed/game_mismatch.
-Ownership is never transferred, never silently reassigned and never reset by
-this module. Failed linkage does not undo a successful login: callers show
-the precise state and keep local progress intact.
+Server rules (0011, re-issuing 0003): the session must be verified and the
+account must have a player row. The server owns the game uuid: it returns the
+account's game, creating one when the account has none. The client-offered
+`p_game_uuid` is an argument only and is ignored for identity. The reply is
+`{game_uuid, created, resumed}`; `resumed` iff the game already existed
+(`resumed == not created`). The impossible `game_claimed`/`game_mismatch`
+raises are retained as link-reply states for the mixed-version window only,
+with copy that points at updating. Failed linkage does not undo a successful
+login: callers show the precise state and keep local progress intact.
+
+The account game starts fresh: linking imports nothing and deletes nothing,
+and the offline (local) game never uploads.
 
 The successful binding is persisted locally as non-secret metadata
-{game_uuid, user_id, endpoint_project}. It is a convenience guard only; the
-server remains the sole authority.
+{game_uuid, user_id, endpoint_project} in the ACCOUNT game's journal, carrying
+the account game's uuid. It is a convenience guard only; the server remains
+the sole authority.
 """
 from __future__ import annotations
 
@@ -29,8 +36,8 @@ LINK_STATES = (
 _STATE_COPY = {
     "linked": "Progress sync is on.",
     "already_linked": "Progress sync is on.",
-    "game_claimed": "Signed in; this game belongs to another account.",
-    "game_mismatch": "Signed in; this game belongs to another account.",
+    "game_claimed": "Update AnkiScape to set up sync for this account.",
+    "game_mismatch": "Update AnkiScape to set up sync for this account.",
     "no_profile": "Signed in, but the account profile is missing. "
                   "Recreate the account or contact support.",
     "unverified": "Verify your email before progress can sync.",
@@ -58,10 +65,42 @@ class LinkResult:
     detail: str = ""
     message: str = ""
     resumed: bool = False
+    created: bool = False
+    created_present: bool = False
+    game_uuid: str = ""
 
     @property
     def linked(self) -> bool:
         return self.state in ("linked", "already_linked")
+
+
+def _uuid_shaped(value: str) -> bool:
+    """True only for a canonical dashed UUID string (the server's shape)."""
+    text = str(value or "")
+    if len(text) != 36 or text.count("-") != 4:
+        return False
+    try:
+        import uuid as _uuid
+
+        return str(_uuid.UUID(text)) == text.lower()
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def link_reply_adoptable(result: LinkResult) -> bool:
+    """S11/R18: the reply may be adopted iff it carried the `created` KEY and
+    a uuid-shaped, server-owned game uuid.
+
+    `created == True` is never required: a repeat call legitimately returns
+    `created: false, resumed: true`. A reply without the key comes from an
+    older server whose uuid is not confirmed as server-owned, so the
+    coordinator leaves the active game alone.
+    """
+    if result is None or not result.linked:
+        return False
+    if not result.created_present:
+        return False
+    return _uuid_shaped(result.game_uuid)
 
 
 def _fail(state: str, detail: str = "") -> LinkResult:
@@ -133,8 +172,14 @@ def ensure_link(post: Callable[..., Dict[str, Any]], endpoint: Optional[Endpoint
             return _fail("service_error", "server")
         return _fail("offline", exc.kind)
     resumed = bool(isinstance(data, dict) and data.get("resumed"))
+    created = bool(isinstance(data, dict) and data.get("created"))
+    created_present = bool(isinstance(data, dict) and "created" in data)
+    game_uuid = ""
+    if isinstance(data, dict) and data.get("game_uuid") is not None:
+        game_uuid = str(data.get("game_uuid") or "")
     return LinkResult(True, "already_linked" if resumed else "linked",
-                      resumed=resumed,
+                      resumed=resumed, created=created,
+                      created_present=created_present, game_uuid=game_uuid,
                       message=_STATE_COPY["already_linked" if resumed
                                           else "linked"])
 

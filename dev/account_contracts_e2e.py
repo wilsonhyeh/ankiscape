@@ -39,6 +39,8 @@ sys.path.insert(0, ROOT)
 API = "http://127.0.0.1:55321"
 MAILPIT = "http://127.0.0.1:55324"
 FAILURES: list = []
+_UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 from evolved.accounts import (delete_account, login_password, logout,  # noqa: E402
                               register, resend_signup_code, verify_code,
@@ -257,9 +259,16 @@ def _deletion_contract_checks(*, anon, service, endpoint, check, stamp,
     login = login_password(post_json, endpoint, email=email,
                            password=password, session=memory)
     check("deletion fixture can sign in", login.ok, login.status)
-    game = str(uuid.uuid4())
-    post_json(endpoint, "/rest/v1/rpc/link_game", {"p_game_uuid": game},
-              access_token=memory.access_token)
+    offered_game = str(uuid.uuid4())
+    link = post_json(endpoint, "/rest/v1/rpc/link_game",
+                     {"p_game_uuid": offered_game},
+                     access_token=memory.access_token)
+    reply = link if isinstance(link, dict) else {}
+    game = str(reply.get("game_uuid") or "")
+    check("deletion fixture adopts the server-owned game uuid",
+          bool(_UUID_RE.match(game)), str(link)[:120])
+    if not game:
+        return
     journal = Journal(os.path.join(tempfile.gettempdir(),
                                    f"ankiscape-delete-{stamp}.sqlite3"))
     try:
@@ -488,13 +497,19 @@ def main(argv=None) -> int:
               all(row["username"] != name_a for row in baseline))
 
         # --- link_game + real manual sync ---------------------------------
-        game = str(uuid.uuid4())
+        # The server owns the game uuid (D5); the returned uuid is adopted as
+        # the only game id used after the link (S11/S16).
+        offered_game = str(uuid.uuid4())
         link = post_json(endpoint, "/rest/v1/rpc/link_game",
-                         {"p_game_uuid": game},
+                         {"p_game_uuid": offered_game},
                          access_token=session.access_token)
-        check("link_game binds the game",
-              isinstance(link, dict) and link.get("resumed") is False,
+        reply = link if isinstance(link, dict) else {}
+        game = str(reply.get("game_uuid") or "")
+        check("link_game creates with key-present created/resumed semantics",
+              reply.get("created") is True and reply.get("resumed") is False,
               str(link)[:120])
+        check("link_game returns the server-owned uuid to adopt",
+              bool(_UUID_RE.match(game)), str(link)[:120])
         journal = Journal(os.path.join(tmp.name, "game.sqlite3"))
         journals.append(journal)
         transport = make_transport(ServiceConfig(

@@ -49,7 +49,7 @@ python3 dev.py test --suite python
 python3 dev.py test --suite backend
 python3 dev.py test --suite e2e --anki 26.8.1 --qt 6
 python3 dev.py verify --release
-python3 dev.py verify-evidence --matrix dev/matrix.json
+python3 dev.py verify-evidence --stage pr
 ```
 
 Journeys: `--journey fresh|upgrade|undo|catchup` (real-Anki Qt),

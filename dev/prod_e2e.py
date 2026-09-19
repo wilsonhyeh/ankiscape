@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -34,6 +35,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 FAILURES = []
+_UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 from evolved.auth import MemorySession  # noqa: E402
 from evolved.draws import draw_r, frac_hits  # noqa: E402
@@ -187,16 +190,24 @@ def main():
             sessions.append(mem)
 
         mem_a, mem_b = sessions
-        game_uuid = str(uuid.uuid4())
-        games.append(game_uuid)
+        offered_game = str(uuid.uuid4())
 
         # 2. A links, credits 2 ops offline, uploads via the real service.
+        # D5: the server owns the game uuid; adopt the returned uuid as the
+        # only game id used afterwards (S11/S16). created/resumed are pinned
+        # complementary and `created` is a key-presence rule.
         status, data = _authed("POST", "/rest/v1/rpc/link_game",
-                               {"p_game_uuid": game_uuid},
+                               {"p_game_uuid": offered_game},
                                token=mem_a.access_token, anon=anon)
-        check("prod link_game binds",
-              status in (200, 201) and data.get("resumed") is False,
+        reply = data if isinstance(data, dict) else {}
+        game_uuid = str(reply.get("game_uuid") or "")
+        check("prod link_game creates with the pinned reply",
+              status in (200, 201) and reply.get("created") is True
+              and reply.get("resumed") is False, f"{status} {data}")
+        check("prod link_game returns the server-owned uuid to adopt",
+              bool(_UUID_RE.match(game_uuid)) and game_uuid != offered_game,
               f"{status} {data}")
+        games.append(game_uuid)
         tmp_a = tempfile.TemporaryDirectory()
         journal_a = Journal(os.path.join(tmp_a.name, "a.sqlite3"))
         journals.append((journal_a, tmp_a))
@@ -377,52 +388,63 @@ def main():
             mem_c.set(access_token=sess.get("access_token", ""),
                       refresh_token=sess.get("refresh_token", ""),
                       user_id=(sess.get("user") or {}).get("id", ""))
-            game_c = str(uuid.uuid4())
-            games.append(game_c)
-            _authed("POST", "/rest/v1/rpc/link_game", {"p_game_uuid": game_c},
-                    token=mem_c.access_token, anon=anon)
-            # Fresh level-1 Clay: success chance min(.80+.02, .95) x .90.
-            prob = Fraction(82, 100) * Fraction(9, 10)
-            gem_key = ""
-            for rid in range(1, 200_001):
-                candidate = reviews_mod.make_review_key(game_c, rid, rid + 1000)
-                if (frac_hits(draw_r(1, game_c, candidate, "action"), prob)
-                        and frac_hits(draw_r(1, game_c, candidate, "gem_drop"),
-                                      Fraction(1, 256))
-                        and frac_hits(draw_r(1, game_c, candidate, "gem_pick"),
-                                      Fraction(1, 4))):
-                    gem_key = candidate
-                    break
-            check("prod deterministic gem key found", bool(gem_key))
-            if gem_key:
-                status, data = _authed(
-                    "POST", "/rest/v1/rpc/submit_operations",
-                    {"p_game_uuid": game_c, "p_ops": [{
-                        "op_id": str(uuid.uuid4()), "game_uuid": game_c,
-                        "device_id": "dev-c", "device_seq": 1, "lamport": 1,
-                        "kind": "review_award",
-                        "payload": {"review_key": gem_key,
-                                    "review_ts": 1_800_000_000, "rating": 3,
-                                    "review_kind": "review",
-                                    "provenance": "direct",
-                                    "reward_policy": 2, "skill": "mining",
-                                    "resource": "Clay"}}]},
-                    token=mem_c.access_token, anon=anon)
-                check("prod gem op accepted",
-                      status == 200 and not data.get("conflicts"),
-                      f"{status} {str(data)[:200]}")
-                status, state = _authed(
-                    "POST", "/rest/v1/rpc/get_game_state",
-                    {"p_game_uuid": game_c}, token=mem_c.access_token,
-                    anon=anon)
-                state = state if isinstance(state, dict) else {}
-                inventory = state.get("inventory") or {}
-                xp = (state.get("xp") or {}).get("mining", 0)
-                check("prod mined gem granted to Bank",
-                      status == 200 and inventory.get("Uncut sapphire") == 1,
-                      f"{status} {str(state)[:200]}")
-                check("prod gem bonus XP applied (57.75)",
-                      int(xp) == 57_750_000, f"xp={xp}")
+            offered_c = str(uuid.uuid4())
+            status_c, reply_c = _authed(
+                "POST", "/rest/v1/rpc/link_game", {"p_game_uuid": offered_c},
+                token=mem_c.access_token, anon=anon)
+            reply_c = reply_c if isinstance(reply_c, dict) else {}
+            game_c = str(reply_c.get("game_uuid") or "")
+            # The gem search, the op envelope and every later call use the
+            # server-returned uuid only (S16).
+            check("prod gem-check link adopts the pinned reply",
+                  status_c in (200, 201) and reply_c.get("created") is True
+                  and reply_c.get("resumed") is False
+                  and bool(_UUID_RE.match(game_c)), f"{status_c} {reply_c}")
+            if game_c:
+                games.append(game_c)
+                # Fresh level-1 Clay: success chance min(.80+.02, .95) x .90.
+                prob = Fraction(82, 100) * Fraction(9, 10)
+                gem_key = ""
+                for rid in range(1, 200_001):
+                    candidate = reviews_mod.make_review_key(game_c, rid,
+                                                            rid + 1000)
+                    if (frac_hits(draw_r(1, game_c, candidate, "action"), prob)
+                            and frac_hits(draw_r(1, game_c, candidate,
+                                                 "gem_drop"), Fraction(1, 256))
+                            and frac_hits(draw_r(1, game_c, candidate,
+                                                 "gem_pick"), Fraction(1, 4))):
+                        gem_key = candidate
+                        break
+                check("prod deterministic gem key found", bool(gem_key))
+                if gem_key:
+                    status, data = _authed(
+                        "POST", "/rest/v1/rpc/submit_operations",
+                        {"p_game_uuid": game_c, "p_ops": [{
+                            "op_id": str(uuid.uuid4()), "game_uuid": game_c,
+                            "device_id": "dev-c", "device_seq": 1, "lamport": 1,
+                            "kind": "review_award",
+                            "payload": {"review_key": gem_key,
+                                        "review_ts": 1_800_000_000, "rating": 3,
+                                        "review_kind": "review",
+                                        "provenance": "direct",
+                                        "reward_policy": 2, "skill": "mining",
+                                        "resource": "Clay"}}]},
+                        token=mem_c.access_token, anon=anon)
+                    check("prod gem op accepted",
+                          status == 200 and not data.get("conflicts"),
+                          f"{status} {str(data)[:200]}")
+                    status, state = _authed(
+                        "POST", "/rest/v1/rpc/get_game_state",
+                        {"p_game_uuid": game_c}, token=mem_c.access_token,
+                        anon=anon)
+                    state = state if isinstance(state, dict) else {}
+                    inventory = state.get("inventory") or {}
+                    xp = (state.get("xp") or {}).get("mining", 0)
+                    check("prod mined gem granted to Bank",
+                          status == 200 and inventory.get("Uncut sapphire") == 1,
+                          f"{status} {str(state)[:200]}")
+                    check("prod gem bonus XP applied (57.75)",
+                          int(xp) == 57_750_000, f"xp={xp}")
     finally:
         cleanup()
         check("prod cleanup ran", True)

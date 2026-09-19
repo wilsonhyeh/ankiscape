@@ -42,6 +42,8 @@ MIGRATIONS = (MIGRATION,
 API_URL = "http://127.0.0.1:55321"
 NS = uuid.NAMESPACE_URL
 PW = "parity-pass-1"
+UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 
 class ParityError(RuntimeError):
@@ -411,7 +413,7 @@ def _http(method: str, url: str, *, payload=None, headers=None, timeout=30):
 def api_case(container: str, anon: str) -> None:
     username = "parity_api"
     user_id = uid_for(username)
-    game = str(uuid.uuid5(NS, "parity-api-game"))
+    offered_game = str(uuid.uuid5(NS, "parity-api-game"))
     psql(container, reset_user_sql(user_id, username))
     psql(container, ensure_user_sql(user_id, username, confirmed=True))
 
@@ -426,9 +428,18 @@ def api_case(container: str, anon: str) -> None:
     auth = {"apikey": anon, "Authorization": f"Bearer {token}",
             "X-AnkiScape-Protocol": "2"}
     status, data = _http("POST", f"{API_URL}/rest/v1/rpc/link_game",
-                         payload={"p_game_uuid": game}, headers=auth)
+                         payload={"p_game_uuid": offered_game}, headers=auth)
     if status != 200:
         raise ParityError(f"link_game failed: {status} {str(data)[:300]}")
+    # D5: the server owns the game uuid. Adopt the returned uuid as the only
+    # game id used afterwards (S11/S16); created/resumed are pinned
+    # complementary and `created` stays a key-presence rule.
+    reply = data if isinstance(data, dict) else {}
+    if reply.get("created") is not True or reply.get("resumed") is not False:
+        raise ParityError(f"link_game reply violates the pin: {str(data)[:300]}")
+    game = str(reply.get("game_uuid") or "")
+    if not UUID_RE.match(game) or game == offered_game:
+        raise ParityError(f"link_game returned no adoptable uuid: {str(data)[:300]}")
 
     ops = []
     for i in range(6):

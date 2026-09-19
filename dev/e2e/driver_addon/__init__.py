@@ -685,6 +685,27 @@ def _drive_onboarding(state, want_skill="mining"):
         _step("onboarding_skill", True, want_skill)
         _shot("onboarding-resource")
         return False
+    offline = _shell_child(shell, "ankiscape-onboarding-offline")
+    if offline is not None:
+        # D6: the welcome step's generic primary is now "Create account",
+        # which opens the account modal and waits on a human. Take the
+        # offline path explicitly so the journey never hangs there; the
+        # primary below still drives the later Continue/Start studying steps.
+        if state.get("onboarding_offline_clicked"):
+            state["onboarding_wait"] = state.get("onboarding_wait", 0) + 1
+            if state["onboarding_wait"] > 40:
+                _step("onboarding_advance", False, "step did not advance")
+                return None
+            return False
+        state["onboarding_offline_clicked"] = True
+        text = ""
+        try:
+            text = str(offline.text())
+        except Exception:
+            pass
+        offline.click()
+        _step("onboarding_offline", True, text)
+        return False
     primary = _shell_child(shell, "ankiscape-onboarding-primary")
     if primary is None:
         return False
@@ -3519,7 +3540,8 @@ def _poll_ui_test_leaderboard(state):
 
 _ACCOUNT_FAKE: dict = {"server": None, "port": 0, "submitted": [],
                        "accepted": 0, "linked": False, "passwords": {},
-                       "users": {}}
+                       "users": {}, "game_uuid": "", "game_uuids": {},
+                       "visible_on_board": True}
 
 
 def _account_fake_reset(state):
@@ -3566,6 +3588,25 @@ def _account_fake_reset(state):
                 return _json.loads(raw.decode("utf-8") or "{}")
             except ValueError:
                 return {}
+
+        def _account_key(self):
+            token = str(self.headers.get("Authorization", "")).replace(
+                "Bearer ", "").strip()
+            return sessions.get(token, "")
+
+        def _remembered_game_uuid(self):
+            """S14 remember-vs-generate: one fixture uuid per account, minted
+            on first link and returned on every later call. The offered
+            p_game_uuid is ignored for identity, like the real 0011 RPC."""
+            key = self._account_key()
+            remembered = _ACCOUNT_FAKE["game_uuids"].get(key)
+            if remembered:
+                _ACCOUNT_FAKE["game_uuid"] = remembered
+                return remembered, False
+            remembered = str(_uuid.uuid4())
+            _ACCOUNT_FAKE["game_uuids"][key] = remembered
+            _ACCOUNT_FAKE["game_uuid"] = remembered
+            return remembered, True
 
         def do_POST(self):  # noqa: N802 (http.server API)
             path = self.path.split("?")[0]
@@ -3671,15 +3712,38 @@ def _account_fake_reset(state):
                 return self._send(200, {"deleted": True})
             if path == "/rest/v1/rpc/link_game":
                 _ACCOUNT_FAKE["linked"] = True
-                return self._send(200, {"game_uuid": body.get("p_game_uuid"),
-                                        "resumed": False})
+                remembered, created = self._remembered_game_uuid()
+                if created:
+                    return self._send(200, {"game_uuid": remembered,
+                                            "created": True, "resumed": False})
+                return self._send(200, {"game_uuid": remembered,
+                                        "created": False, "resumed": True})
             if path == "/rest/v1/rpc/evolved_capabilities":
                 return self._send(200, {"protocol_version": 2,
-                                        "authoritative_scoring": True})
+                                        "authoritative_scoring": True,
+                                        "board_visibility": True})
+            if path == "/rest/v1/rpc/self_context":
+                return self._send(200, {
+                    "username": state.get("username", "acct"),
+                    "is_test": False,
+                    "visible_on_board": bool(
+                        _ACCOUNT_FAKE.get("visible_on_board", True))})
+            if path == "/rest/v1/rpc/set_board_visibility":
+                visible = bool(body.get("p_visible"))
+                _ACCOUNT_FAKE["visible_on_board"] = visible
+                return self._send(200, {"visible_on_board": visible})
             if path == "/rest/v1/rpc/fetch_operations":
                 return self._send(200, {"operations": [], "next_cursor": 0,
                                         "revision": 1})
             if path == "/rest/v1/rpc/submit_operations":
+                # Mirror the retained ownership guard (0004:894-897): only the
+                # remembered account game may submit, so a mis-bound client
+                # cannot mask the failure behind a fixture success.
+                expected = _ACCOUNT_FAKE["game_uuids"].get(
+                    self._account_key(), "")
+                if not expected or str(body.get("p_game_uuid") or "") != expected:
+                    return self._send(403, {"code": "42501",
+                                            "message": "game_mismatch"})
                 ops = body.get("p_ops") or []
                 ids = [str(op.get("op_id")) for op in ops]
                 _ACCOUNT_FAKE["submitted"].extend(ids)
@@ -3716,6 +3780,8 @@ def _account_fake_reset(state):
     _ACCOUNT_FAKE.update({"server": server, "port": server.server_port,
                           "submitted": [], "accepted": 0, "linked": False,
                           "passwords": {}, "users": users,
+                          "game_uuid": "", "game_uuids": {},
+                          "visible_on_board": True,
                           "signup_posts": [], "last_resend": {},
                           "last_recover": {}, "delete_calls": [],
                           "deleted": [], "delete_outcome": "deleted",

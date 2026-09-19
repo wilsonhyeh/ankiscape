@@ -46,7 +46,7 @@ Beyond the unit suite, the reliability workstream adds:
 python3 dev/reliability.py verify --stage pr
 python3 dev/reliability.py verify --stage nightly
 python3 dev/reliability.py verify --stage release --evidence artifacts/reliability
-python3 dev/reliability.py verify-evidence --matrix dev/reliability-matrix.json --evidence artifacts/reliability
+python3 dev/reliability.py verify-evidence --stage pr --matrix dev/reliability-matrix.json --evidence artifacts/reliability
 python3 dev/perf_runtime.py --profile release
 python3 dev/endurance.py --minutes 30
 python3 dev/generated_traces.py --stage pr

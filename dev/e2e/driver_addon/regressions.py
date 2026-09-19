@@ -32,14 +32,17 @@ def run(step, shot):
         assert host.draft.step == expected, (name, host.draft.step, expected)
     primary = 'ankiscape-onboarding-primary'
     back = 'ankiscape-onboarding-back'
+    offline = 'ankiscape-onboarding-offline'
+    # D6: welcome advances through Play offline; the welcome primary is now
+    # Create account and opens the account modal instead.
     for _ in range(2):
-        click(primary,'skill')
+        click(offline,'skill')
         click(back,'welcome')
-    click(primary,'skill')
+    click(offline,'skill')
     click('ankiscape-onboarding-skill-mining','resource')
     click(back,'skill')
     click(back,'welcome')
-    click(primary,'skill')
+    click(offline,'skill')
     click('ankiscape-onboarding-skill-fishing','resource')
     click(primary,'explain')
     click(back,'resource')

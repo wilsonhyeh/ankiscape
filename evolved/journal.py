@@ -367,6 +367,36 @@ class Journal:
                 self._conn.execute("ROLLBACK")
                 raise
 
+    def retire_outbox(self) -> int:
+        """S4/R1: drain an UNBOUND journal's outbox; never touch operations.
+
+        Applies only to a journal that has no `account_binding`: a bound
+        journal belongs to the account game and is never drained, so a
+        re-login can never delete the account game's pending work. On an
+        unbound (offline) journal the outbox rows are deleted, `operations`
+        rows are retained unchanged, `acked` is never set, and the
+        `outbox_retired` marker is recorded. Returns the number of outbox
+        rows removed; idempotent.
+        """
+        with self._lock:
+            binding = self._conn.execute(
+                "SELECT value FROM metadata WHERE key='account_binding'"
+            ).fetchone()
+            if binding is not None and str(binding["value"] or "").strip():
+                return 0
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self._conn.execute("DELETE FROM outbox")
+                removed = int(cur.rowcount or 0)
+                self._conn.execute(
+                    "INSERT INTO metadata(key, value) VALUES('outbox_retired','1')"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return removed
+
     def pending_operations(self, limit: int = 200) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(

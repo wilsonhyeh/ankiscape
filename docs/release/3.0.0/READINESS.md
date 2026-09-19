@@ -19,7 +19,7 @@ Evidence run: _pending release-verify run id/URL_
 | Shared checks + engine benchmarks | pending | `shared` record |
 | Linux backend: suite, parity, account contracts, sync, full mutation | pending | `backend` record |
 | Public demo board: five labeled demos, retried 24-account suite retired | pending | `hosted` record + `dev/demo_players.py --verify` |
-| Account repair: typed outcomes, one account window, linkage, durable sync, ten-second scheduling | pending | `ui-account-lifecycle` lane records + `dev/account_journey_e2e.py` |
+| Account identity: two-game model (local vs account), server-owned game uuid, login adoption, retired local outbox never uploaded, durable download-first sync, ten-second scheduling | pending | ui-account-lifecycle lane records + dev/account_journey_e2e.py + tests/test_bricked_recovery.py |
 | Hosted migrations 0008/0009 and `account-status` deploy | blocked — authorization | repair-plan hosted runbook |
 | Hosted native public browsing/labels per current OS | pending | `native-journeys` target requirements |
 | Real-inbox delivery (human) | blocked | Wilson |

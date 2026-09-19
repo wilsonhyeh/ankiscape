@@ -107,6 +107,17 @@ class TestScheduler(unittest.TestCase):
         s.fire()
         self.assertEqual(s.armed, [])
 
+    def test_relogin_required_pauses_without_timer(self):
+        from evolved.scheduler import PERMANENT_STATES
+        self.assertIn("relogin_required", PERMANENT_STATES)
+        self.assertIn("game_mismatch", PERMANENT_STATES,
+                      "mixed-version defense is retained for one release")
+        svc = _Service([{"ok": False, "status": "relogin_required"}])
+        s = _Sched(svc)
+        s.scheduler.request(reason="manual")
+        s.fire()
+        self.assertEqual(s.armed, [])
+
     def test_rate_limit_deadline_gates_manual_retry(self):
         now = {"t": 0.0}
         svc = _Service([{"ok": False, "status": "rate_limited",

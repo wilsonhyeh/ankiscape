@@ -42,6 +42,34 @@ nothing.
   otherwise session-only. Passwords are never stored.
 - Anki compatibility remains 23.10+ on Qt5/Qt6 (macOS/Linux/Windows).
 
+## Account & identity (3.0.0 rework)
+
+- **Two games coexist per profile.** The offline game born on this computer
+  and the account game are separate: separate uuids, journals, XP and stats.
+  One active-game pointer decides which is live. The offline game never
+  uploads, even while signed in; the account game never imports the offline
+  game's history.
+- **Login activates the account game; logout activates the offline game.**
+  Creating an account imports nothing and deletes nothing — the account game
+  starts fresh at level 1 / 0 XP, stated before the user commits.
+- **Server-owned game uuid.** `link_game` returns the account's game,
+  creating one when absent; it never raises "game claimed"/"mismatch". The
+  client offers a uuid only as an argument and adopts the returned one.
+- **First run is a choice:** Create account (primary) or Play offline. No
+  game is minted before the user picks a path.
+- **Durable download-first sync.** A fresh desktop materializes the account
+  game by downloading its history into a new journal before activating it.
+- **Un-brick path.** An install with stray pending local operations drains
+  its outbox (rows removed, operations kept, never marked acked, never
+  uploaded) the next time an account is linked.
+- **Public-board visibility.** A Settings control (shown only when the server
+  advertises the capability) persists via `set_board_visibility`; it filters
+  the public Hiscores only. The toggle is disclosed on the register notice.
+- **Account deletion** is discoverable from Settings → Account; the copy
+  distinguishes the account game from the offline game.
+- **Email-limit 429 copy** names the email limit and asks for a spam check at
+  every Retry-After value.
+
 ## Fixed
 
 - Sync/hiscores contract failures found after 2.x: array-mode Hiscores,

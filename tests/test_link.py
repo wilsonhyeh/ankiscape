@@ -52,18 +52,21 @@ class TestEnsureLink(unittest.TestCase):
         self.assertTrue(result.linked)
         self.assertEqual(result.state, "already_linked")
 
-    def test_game_claimed_is_explicit(self):
+    def test_game_claimed_points_at_updating(self):
         result = ensure_link(_post_error("conflict",
                                          json.dumps({"code": "game_claimed"})),
                              _endpoint(), _Session(), game_uuid="g")
         self.assertFalse(result.ok)
         self.assertEqual(result.state, "game_claimed")
-        self.assertIn("another account", result.message)
+        self.assertEqual(result.message,
+                         "Update AnkiScape to set up sync for this account.")
 
     def test_game_mismatch_and_no_profile(self):
         mismatch = ensure_link(_post_error("forbidden", '{"code":"game_mismatch"}'),
                                _endpoint(), _Session(), game_uuid="g")
         self.assertEqual(mismatch.state, "game_mismatch")
+        self.assertEqual(mismatch.message,
+                         "Update AnkiScape to set up sync for this account.")
         missing = ensure_link(_post_error("conflict", '{"code":"no_profile"}'),
                               _endpoint(), _Session(), game_uuid="g")
         self.assertEqual(missing.state, "no_profile")
@@ -103,6 +106,53 @@ class TestEnsureLink(unittest.TestCase):
     def test_unconfigured(self):
         result = ensure_link(_post_result({}), None, _Session(), game_uuid="g")
         self.assertEqual(result.state, "unconfigured")
+
+
+class TestServerOwnedUuidContract(unittest.TestCase):
+    """S11: the server owns the game uuid; `created` is read by key presence.
+
+    `created == True` is never required: a repeat call legitimately returns
+    `created: false, resumed: true` and must still be adoptable.
+    """
+
+    B = "22222222-2222-2222-2222-222222222222"
+
+    def test_first_link_adopts_the_returned_uuid(self):
+        result = ensure_link(
+            _post_result({"game_uuid": self.B, "created": True,
+                          "resumed": False}),
+            _endpoint(), _Session(), game_uuid="offered-local")
+        self.assertTrue(result.linked)
+        self.assertEqual(result.state, "linked")
+        self.assertTrue(result.created_present)
+        self.assertTrue(result.created)
+        self.assertFalse(result.resumed)
+        self.assertEqual(result.game_uuid, self.B)
+
+    def test_repeat_link_is_created_false_and_still_adoptable(self):
+        result = ensure_link(
+            _post_result({"game_uuid": self.B, "created": False,
+                          "resumed": True}),
+            _endpoint(), _Session(), game_uuid="offered-local")
+        self.assertTrue(result.linked)
+        self.assertEqual(result.state, "already_linked")
+        self.assertTrue(result.created_present)
+        self.assertFalse(result.created)
+        self.assertTrue(result.resumed)
+        self.assertEqual(result.game_uuid, self.B)
+
+    def test_old_server_reply_without_the_created_key_is_not_adoptable(self):
+        result = ensure_link(_post_result({"game_uuid": "g", "resumed": True}),
+                             _endpoint(), _Session(), game_uuid="g")
+        # Login never fails on this: the reply simply cannot be adopted.
+        self.assertTrue(result.linked)
+        self.assertFalse(result.created_present)
+
+    def test_reply_without_a_game_uuid_keeps_login_alive(self):
+        result = ensure_link(_post_result({"created": True}), _endpoint(),
+                             _Session(), game_uuid="g")
+        self.assertTrue(result.linked)
+        self.assertEqual(result.game_uuid, "")
 
 
 class TestBindingPersistence(unittest.TestCase):

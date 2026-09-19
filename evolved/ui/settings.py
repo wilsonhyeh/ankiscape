@@ -2,10 +2,41 @@
 """Appearance & HUD | Training & Catch-up | Account & Sync | Advanced.
 No Save button: changes persist and apply immediately. Advanced holds backups,
 diagnostics and the mode switch; diagnostics are collapsed by default and
-credential-redacted by the provider."""
+credential-redacted by the provider. Account & Sync also holds the public-board
+visibility control — rendered only when the server capability is known-true
+(S1) — and the account-deletion entry point (ACC-13).
+"""
 from __future__ import annotations
 
 from typing import Any, Dict
+
+
+def board_visibility_row(shell) -> Dict[str, Any]:
+    """S1: the render decision for the board-visibility control.
+
+    Renders ONLY on known-true: `shell.call("get_evolved_capabilities")` must
+    report `board_visibility` as {"state": "known", "value": true}. Unknown
+    and known-false both hide it. On hidden, no value is read from
+    self_context and nothing is persisted. When shown, the value comes from
+    `shell.call("get_self_context")`; a missing or non-boolean value hides the
+    control rather than guessing.
+    """
+    caps = shell.call("get_evolved_capabilities", default={}) or {}
+    entry = caps.get("board_visibility") if isinstance(caps, dict) else None
+    if not (isinstance(entry, dict) and entry.get("state") == "known"
+            and entry.get("value") is True):
+        return {"show": False, "checked": False}
+    context = shell.call("get_self_context", default={}) or {}
+    value = context.get("visible_on_board") if isinstance(context, dict) else None
+    if not isinstance(value, bool):
+        return {"show": False, "checked": False}
+    return {"show": True, "checked": value}
+
+
+def board_visibility_toggled(shell, checked: bool) -> bool:
+    """S1/D7: the only write route for the preference (named shell handler)."""
+    result = shell.call("on_board_visibility", bool(checked), default={}) or {}
+    return bool(result.get("ok")) if isinstance(result, dict) else False
 
 
 def build_settings_screen(shell, deps: Dict[str, Any]):
@@ -106,6 +137,31 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
     recover.setObjectName("ankiscape-settings-recovery")
     recover.clicked.connect(lambda: shell.call("on_recovery"))
     account.layout().addWidget(recover)
+    # D7/S1: rendered only when the capability is known-true (board_visibility_row).
+    board_row = QHBoxLayout()
+    board_visible = QCheckBox("Show my progress on the public Hiscores board")
+    board_visible.setObjectName("ankiscape-setting-board-visible")
+    board_visible.setToolTip(
+        "Only affects the public Hiscores board; your game and its stats are "
+        "unaffected either way")
+    board_row.addWidget(board_visible)
+    board_row.addStretch(1)
+    account.layout().addLayout(board_row)
+    # ACC-13: account deletion is discoverable here, not only inside the
+    # account window; the copy distinguishes the account game from the
+    # offline game on this computer.
+    delete_row = QHBoxLayout()
+    delete_account = QPushButton("Delete account\u2026")
+    delete_account.setObjectName("ankiscape-settings-delete-account")
+    delete_account.setProperty("class", "danger")
+    delete_row.addWidget(delete_account)
+    delete_row.addStretch(1)
+    account.layout().addLayout(delete_row)
+    delete_hint = muted_label(
+        "Deleting your account removes its online progress and its place on "
+        "the leaderboard. Your offline game on this computer is a separate "
+        "game and stays.", wrap=True)
+    account.layout().addWidget(delete_hint)
     account.layout().addStretch(1)
     tabs.addTab(account, "&Account")
 
@@ -158,7 +214,7 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
 
     def _refresh():
         blockers = [QSignalBlocker(w) for w in (scale, hud_visible, hud_position,
-                    celebrations, reduced, sound, preset)]
+                    celebrations, reduced, sound, preset, board_visible)]
         settings = shell.call("get_settings", default={}) or {}
         scale.setCurrentText(str(settings.get("ui_scale", 100)))
         hud_visible.setChecked(bool(settings.get("hud_visible", True)))
@@ -169,6 +225,9 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
         reduced.setChecked(bool(settings.get("reduced_motion", False)))
         sound.setChecked(bool(settings.get("sound", False)))
         preset.setCurrentText(str(shell.call("get_preset", default="mining")))
+        board = board_visibility_row(shell)
+        board_visible.setVisible(bool(board["show"]))
+        board_visible.setChecked(bool(board["checked"]))
 
         status = shell.call("get_status", default={}) or {}
         account_info = shell.call("get_account", default={}) or {}
@@ -203,7 +262,9 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
             register.setVisible(True)
             sync_now.setVisible(False)
             logout.setVisible(False)
-        switch_btn.setText("Switch to Classic…")
+        delete_account.setVisible(bool(account_info.get("logged_in")))
+        delete_hint.setVisible(bool(account_info.get("logged_in")))
+        switch_btn.setText("Switch to Classic\u2026")
 
     def _setting_changed(key: str):
         def _apply():
@@ -237,6 +298,9 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
     register.clicked.connect(lambda: shell.call("on_register"))
     sync_now.clicked.connect(lambda: shell.call("on_sync"))
     logout.clicked.connect(lambda: shell.call("on_logout"))
+    board_visible.toggled.connect(
+        lambda checked: board_visibility_toggled(shell, checked))
+    delete_account.clicked.connect(lambda: shell.call("on_delete_account"))
     def backup_action(name):
         result = shell.call(name, default={}) or {}
         from aqt.utils import showInfo, showWarning

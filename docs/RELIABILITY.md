@@ -47,6 +47,10 @@ same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
 - Native journey: `python3 dev.py test --suite e2e --anki 26.8.1 --qt 6
   --journey ui-rebuild-review --anki-bin <path>`; screenshots land in
   `.dev/e2e/<journey>/`.
+- Bricked-profile recovery: `python3 -m unittest tests.test_bricked_recovery -v`
+  rebuilds the synthetic unbound profile from scratch and replays the
+  post-auth coordinator against the loopback fixture server; no artifact is
+  needed.
 - One evidence record: delete that lane directory from the evidence tree (the
   tree is derived, never authority) and rerun `run-lane` for that lane.
 - Generated trace failure: the runner prints the seed and a minimized
@@ -82,6 +86,10 @@ same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
   packaged `ui-account-lifecycle` journey over the real local Auth chain and
   writes this target's record under `artifacts/account-journey/`;
   `--collect --require-all-targets` validates records from every target.
+- Bricked-profile recovery: `tests/test_bricked_recovery.py` generates its
+  synthetic profile through the Journal API. No scenario or fixture reads
+  `artifacts/account-repair/private/` — that tree is a real user's operation
+  payloads and is never a test input.
 - One provisioning/smoke run at a time; <=2 req/s; abort on repeated 429/5xx.
 - GitHub configuration: `python3 scripts/configure_github.py
   --plan|--apply|--verify` (labels, Issues, private vulnerability reporting,

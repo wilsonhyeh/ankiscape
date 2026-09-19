@@ -174,6 +174,81 @@ def identity_active(pointer: Optional[Dict[str, Any]]) -> bool:
         return False
 
 
+# Register-notice variants (S13): "upgrade" protects an existing offline game,
+# "first_run" covers a profile with nothing to preserve.
+NOTICE_UPGRADE = "upgrade"
+NOTICE_FIRST_RUN = "first_run"
+
+
+def active_local_game(*, pointer: Optional[Dict[str, Any]],
+                      journal_exists: bool, journal_has_binding: bool,
+                      account_game_uuid: str = "") -> bool:
+    """S13: does this profile currently have an active LOCAL (offline) game?
+
+    Operational against pointer/binding/slots state only — no network, no
+    mint, no engine build. True iff the pointer exists with a non-null
+    game_uuid, that uuid is NOT the account game (it has no `account_binding`
+    in its journal and is not the known account_game_uuid slot), and a journal
+    exists for it at journal_path_for_profile(profile_dir, game_uuid).
+    """
+    if not isinstance(pointer, dict):
+        return False
+    game_uuid = str(pointer.get("game_uuid") or "")
+    if not game_uuid:
+        return False
+    if str(account_game_uuid or "") == game_uuid:
+        return False
+    if journal_has_binding:
+        return False
+    return bool(journal_exists)
+
+
+def register_notice_variant(*, pointer: Optional[Dict[str, Any]],
+                            journal_exists: bool, journal_has_binding: bool,
+                            account_game_uuid: str = "") -> str:
+    """S13: the register-notice variant, decided by the predicate above."""
+    if active_local_game(pointer=pointer, journal_exists=journal_exists,
+                         journal_has_binding=journal_has_binding,
+                         account_game_uuid=account_game_uuid):
+        return NOTICE_UPGRADE
+    return NOTICE_FIRST_RUN
+
+
+def link_slots(*, prior_active: str, account_game_uuid: str) -> Dict[str, str]:
+    """R14/S7 step 5: the pointer slots a login records.
+
+    The local slot is written only when the prior active game was a different
+    (offline) game; a re-login never moves the account game into the local
+    slot.
+    """
+    account = str(account_game_uuid)
+    slots = {"account_game_uuid": account}
+    prior = str(prior_active or "")
+    if prior and prior != account:
+        slots["local_game_uuid"] = prior
+    return slots
+
+
+def coordinator_offer_uuid(*, engine_uuid: str, pointer_uuid: str,
+                           engine_available: bool) -> str:
+    """S12: the uuid the coordinator offers as `p_game_uuid`.
+
+    With a live local engine, its uuid is offered. With no local game at all,
+    ANY uuid is offered (a fresh uuid4 purely as the argument; D5 makes the
+    server's return authoritative). An empty string means the genuine-failure
+    early return: a game exists but its engine did not build.
+    """
+    engine_uuid = str(engine_uuid or "")
+    if engine_uuid:
+        return engine_uuid
+    pointer_uuid = str(pointer_uuid or "")
+    if pointer_uuid and not engine_available:
+        return ""
+    import uuid as _uuid
+
+    return str(_uuid.uuid4())
+
+
 # One-time acknowledgement shown before the first Classic -> Evolved switch.
 # Shared verbatim by the upgrade dialog and the standalone notice.
 FRESH_START_TITLE = "Evolved starts fresh."
