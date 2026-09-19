@@ -191,6 +191,20 @@ def _svc(game_uuid, journal, transport, session, generation=1):
                        get_user_id=lambda: session.user_id)
 
 
+# GoTrue refuses a second email to the SAME address inside
+# GOTRUE_SMTP_MAX_FREQUENCY (1s on the local stack) and answers HTTP 429
+# `over_email_send_rate_limit`, with the body's "after N seconds" rounding to
+# zero. Measured directly: an immediate duplicate signup is 429, the same call
+# after 1s is 200. The config.toml key that would remove the window is not
+# honoured by the CLI, so the sends are paced here instead - these checks are
+# about the signup/resend contract, not about the limiter.
+_SEND_WINDOW_S = 1.2
+
+
+def _await_send_window() -> None:
+    time.sleep(_SEND_WINDOW_S)
+
+
 def _signup_resend_verify_checks(*, anon, service, endpoint, check, stamp,
                                  users):
     """Real GoTrue signup/duplicate/resend/verify through the product client.
@@ -206,6 +220,7 @@ def _signup_resend_verify_checks(*, anon, service, endpoint, check, stamp,
     check("signup reaches verification_required against real GoTrue "
           "(flat shape)", out.status == "verification_required"
           and bool(out.session_user_id), f"{out.status} {out.detail}")
+    _await_send_window()  # second email to this address: see _SEND_WINDOW_S
     duplicate = register(post_json, endpoint, username=username,
                          email=email, password=uuid.uuid4().hex + "Aa9")
     check("duplicate signup resolves to email_exists",
@@ -218,6 +233,7 @@ def _signup_resend_verify_checks(*, anon, service, endpoint, check, stamp,
 
     original_code, original_id = _mailpit_message(email)
     check("signup OTP captured locally", bool(original_code), email)
+    _await_send_window()  # the resend is another email to the same address
     resent = resend_signup_code(post_json, endpoint, email=email)
     check("signup resend accepted (type=signup route)", resent.ok,
           resent.status)

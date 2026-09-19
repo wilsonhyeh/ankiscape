@@ -70,11 +70,44 @@ def verify_function_config() -> None:
                 f"config.toml unexpectedly requires JWT for {name}")
 
 
-def _probe(name: str) -> dict:
-    """POST with an empty body and classify the response."""
+_KEYS: dict = {}
+
+
+def _local_keys() -> dict:
+    """Local stack keys, fetched once. Empty when the stack is unreachable."""
+    if not _KEYS:
+        try:
+            out = _run(["supabase", "status", "-o", "env"], timeout=60)
+            for line in (out.stdout or "").splitlines():
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    _KEYS[key.strip()] = value.strip().strip('"')
+        except Exception:
+            pass
+    return _KEYS
+
+
+def _probe(name: str, authenticated: bool = False) -> dict:
+    """POST with an empty body and classify the response.
+
+    `authenticated=True` sends the stack's own anon key as both apikey and
+    bearer, which is a valid JWT for the local secret. Without it the gateway
+    rejects the request with 401 UNAUTHORIZED_INVALID_JWT_FORMAT *before any
+    function body runs* - so every probe looks alike and readiness cannot be
+    judged. That is precisely how a runtime with no ACCOUNT_STATUS_HMAC_SECRET
+    passed as "current": the probe never got far enough to notice.
+    """
+    headers = {"Content-Type": "application/json"}
+    if authenticated:
+        key = _local_keys().get("ANON_KEY") or _local_keys().get(
+            "PUBLISHABLE_KEY", "")
+        headers["apikey"] = key
+        headers["Authorization"] = f"Bearer {key}"
+    else:
+        headers["apikey"] = "probe"
     req = urllib.request.Request(
         f"{API}/functions/v1/{name}", data=b"{}", method="POST",
-        headers={"Content-Type": "application/json", "apikey": "probe"})
+        headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return {"status": resp.status, "body": resp.read(500).decode()}
@@ -89,23 +122,45 @@ def _probe(name: str) -> dict:
 
 
 def _function_ready(name: str) -> bool:
-    probe = _probe(name)
-    status = int(probe.get("status", 0) or 0)
-    body = str(probe.get("body", "") or "")
-    if status == 0:
-        return False
+    """Is this server serving the functions with the configuration they need?
+
+    Two independent things must hold, and each is probed the way that can
+    actually observe it:
+
+    * `account-delete` must still be behind platform JWT verification. An
+      anonymous POST must be refused by the gateway with a body that is NOT the
+      function's own `invalid_session` payload.
+    * every function must reach its body with its secrets present. Probed with
+      a valid local key and an empty body, a configured function answers with
+      its own 4xx; a runtime missing ACCOUNT_STATUS_HMAC_SECRET answers
+      503 service_unavailable, which is a server that exists but cannot work
+      and must never be reused.
+    """
     if name == "account-delete":
-        # Platform JWT verification rejects an anonymous POST with a 401
-        # whose body is NOT the function's own invalid_session payload.
+        anonymous = _probe(name)
+        status = int(anonymous.get("status", 0) or 0)
         if status not in (401, 403):
             return False
         try:
-            parsed = json.loads(body or "{}")
+            parsed = json.loads(str(anonymous.get("body", "") or "") or "{}")
         except ValueError:
             parsed = {}
-        return parsed.get("error") != "invalid_session"
-    # Public functions answer an empty body themselves; 404 means missing.
-    return status != 404
+        if parsed.get("error") == "invalid_session":
+            return False
+    probe = _probe(name, authenticated=True)
+    status = int(probe.get("status", 0) or 0)
+    if status == 0:
+        return False
+    try:
+        parsed = json.loads(str(probe.get("body", "") or "") or "{}")
+    except ValueError:
+        return False
+    if not isinstance(parsed, dict) or "error" not in parsed:
+        # A gateway rejection (`code`/`message`/`msg`) never reached the body.
+        return False
+    # 503 service_unavailable is the function's own "my secrets are missing"
+    # answer: it is running, but it cannot serve a single real request.
+    return parsed.get("error") != "service_unavailable"
 
 
 def reuse_if_current() -> bool:
