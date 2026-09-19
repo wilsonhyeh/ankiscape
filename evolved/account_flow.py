@@ -60,6 +60,8 @@ class AccountContext:
         lambda username, password, delete_local: None)
     on_delete_check: Callable[[], None] = lambda: None
     on_delete_retry_local: Callable[[], None] = lambda: None
+    # S13: the register-notice variant ('upgrade' when an offline game exists).
+    register_notice_variant: Callable[[], str] = lambda: "first_run"
 
 
 class AccountFlow:
@@ -224,6 +226,15 @@ class AccountFlow:
     def can_back(self) -> bool:
         return self.page in ("verify", "register", "recovery_request",
                              "recovery_confirm", "delete") and not self.busy
+
+    def register_notice_variant(self) -> str:
+        """S13: the variant the register page renders, from the host's
+        operational predicate. Unknown falls back to first-run."""
+        fn = getattr(self.ctx, "register_notice_variant", None)
+        try:
+            return str(fn()) if callable(fn) else "first_run"
+        except Exception:
+            return "first_run"
 
     def resend_available_in(self) -> int:
         remaining = self._resend_available_at - self.ctx.now()

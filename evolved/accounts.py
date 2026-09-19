@@ -77,9 +77,11 @@ RATE_LIMIT_UNKNOWN_COPY = ("The service is limiting requests right now. "
 def rate_limit_copy(retry_after_s: int = 0, *, email_limit: bool = False) -> str:
     """Honest 429 wording.
 
-    `retry_after_s >= 120` and an identified email-send limit may promise
-    minute-wise wait; below two minutes the short copy is used. A missing,
-    malformed or negative Retry-After never invents a reset time.
+    An identified email-send limit carries the email-specific copy at every
+    Retry-After value: with a usable wait it promises minute-wise timing,
+    without one it names the limit and asks for a spam check. Non-email
+    limits keep the generic short/unknown copy. A missing, malformed or
+    negative Retry-After never invents a reset time.
     """
     try:
         seconds = int(retry_after_s or 0)
@@ -87,10 +89,23 @@ def rate_limit_copy(retry_after_s: int = 0, *, email_limit: bool = False) -> str
         seconds = 0
     if seconds >= 120:
         minutes = -(-seconds // 60)
-        label = "Email limit reached" if email_limit else "Too many requests"
-        return f"{label} \u2014 try again in about {minutes} minutes."
+        unit = "minute" if minutes == 1 else "minutes"
+        if email_limit:
+            return (f"Email limit reached \u2014 try again in about "
+                    f"{minutes} {unit}. Check spam before requesting "
+                    "another code.")
+        return f"Too many requests \u2014 try again in about {minutes} {unit}."
     if seconds > 0:
+        if email_limit:
+            minutes = -(-seconds // 60)
+            unit = "minute" if minutes == 1 else "minutes"
+            return (f"Email limit reached \u2014 try again in about "
+                    f"{minutes} {unit}. Check spam before requesting "
+                    "another code.")
         return _COPY["rate_limited"]
+    if email_limit:
+        return ("Email limit reached. Check spam before requesting another "
+                "code, then wait a few minutes and try again.")
     return RATE_LIMIT_UNKNOWN_COPY
 
 # Bounded allowlist of Auth/PostgREST codes -> typed outcome. Anything not

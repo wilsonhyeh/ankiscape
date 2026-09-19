@@ -16,7 +16,7 @@ Commands:
   python3 dev.py test --suite backend
   python3 dev.py test --suite e2e --anki 26.8.1 --qt 6
   python3 dev.py verify --release
-  python3 dev.py verify-evidence --matrix dev/matrix.json
+  python3 dev.py verify-evidence --stage pr
 """
 from __future__ import annotations
 
@@ -709,9 +709,21 @@ def _backend_suite() -> int:
     if proc.returncode != 0:
         print("dev: (backend) pgTAP FAILED", file=sys.stderr)
         return 1
-    tap_results = re.findall(r"^(ok|not ok)\b", tap_text, re.MULTILINE)
-    pgtap_passed = tap_results.count("ok")
-    pgtap_failed = tap_results.count("not ok")
+    # `supabase test db` prints pg_prove's summary form, not bare TAP:
+    #   /path/0001_core.test.sql .......... ok
+    #   Files=7, Tests=157, 3 wallclock secs
+    #   Result: PASS
+    # Matching bare ^ok/^not ok therefore counted zero tests and recorded
+    # passed=<smoke only>, hiding all 157 pgTAP tests from the evidence record.
+    tap_summary = re.search(r"^Files=(\d+),\s*Tests=(\d+)", tap_text,
+                            re.MULTILINE)
+    if tap_summary and re.search(r"^Result:\s*PASS", tap_text, re.MULTILINE):
+        pgtap_passed = int(tap_summary.group(2))
+        pgtap_failed = 0
+    else:
+        tap_results = re.findall(r"^(ok|not ok)\b", tap_text, re.MULTILINE)
+        pgtap_passed = tap_results.count("ok")
+        pgtap_failed = tap_results.count("not ok")
     proc = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "auth_smoke.py")],
                           cwd=ROOT, timeout=600, capture_output=True, text=True)
     smoke_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
@@ -720,7 +732,7 @@ def _backend_suite() -> int:
         print("dev: (backend) auth smoke FAILED", file=sys.stderr)
         return 1
     # Machine-readable totals for the reliability record (nonzero real test
-    # counts; pgTAP emits TAP, the smoke prints one PASS line per check).
+    # counts; pgTAP prints a pg_prove summary, the smoke one PASS per check).
     smoke_passed = len(re.findall(r"^PASS\b", smoke_text, re.MULTILINE))
     smoke_failed = len(re.findall(r"^FAIL\b", smoke_text, re.MULTILINE))
     print(f"dev: (backend) counts: passed={pgtap_passed + smoke_passed} "
@@ -1147,11 +1159,15 @@ def cmd_verify_evidence(args) -> int:
     skipped required scenarios, zero-test reports and budget violations.
     """
     evidence = getattr(args, "evidence", None) or os.path.join(ROOT, "artifacts", "reliability")
-    proc = subprocess.run(
-        [sys.executable, os.path.join(ROOT, "dev", "reliability.py"),
-         "verify-evidence", "--matrix", args.matrix, "--evidence", evidence,
-         "--stage", getattr(args, "stage", "release")],
-        cwd=ROOT)
+    cmd = [sys.executable, os.path.join(ROOT, "dev", "reliability.py"),
+           "verify-evidence", "--matrix", args.matrix, "--evidence", evidence,
+           "--stage", getattr(args, "stage", "release")]
+    for flag in ("expected_commit", "expected_artifact_sha256",
+                 "expected_run_id"):
+        value = getattr(args, flag, "")
+        if value:
+            cmd += [f"--{flag.replace('_', '-')}", value]
+    proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
 
 
@@ -1200,11 +1216,18 @@ def main(argv=None) -> int:
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("--release", action="store_true")
     p_ev = sub.add_parser("verify-evidence")
-    p_ev.add_argument("--matrix", default=os.path.join(ROOT, "dev", "matrix.json"))
+    p_ev.add_argument("--matrix",
+                      default=os.path.join(ROOT, "dev",
+                                           "reliability-matrix.json"))
     p_ev.add_argument("--evidence",
                       default=os.path.join(ROOT, "artifacts", "reliability"))
     p_ev.add_argument("--stage", default="release",
                       choices=("pr", "nightly", "release"))
+    # Forwarded verbatim to dev/reliability.py, which requires all three for
+    # the nightly/release stages: they bind the verdict to one candidate.
+    p_ev.add_argument("--expected-commit", default="")
+    p_ev.add_argument("--expected-artifact-sha256", default="")
+    p_ev.add_argument("--expected-run-id", default="")
     args = parser.parse_args(argv)
     if args.cmd == "setup":
         return cmd_setup(args)

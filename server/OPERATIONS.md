@@ -22,6 +22,16 @@ Daily local dev never uses hosted projects, real SMTP, or AnkiWeb logins.
 - `server/supabase/migrations/0002_evolved_rpcs.sql` - `link_game`,
   `submit_operations`, `fetch_operations`, `get_game_state`, `hiscores`,
   `public_profile` (all `SECURITY DEFINER`, fixed `search_path`).
+- `server/supabase/migrations/0003`-`0010` - registration gate, authoritative
+  scoring, gem-inventory grant, test cohorts, fixture reservation emails,
+  account lifecycle, public demo leaderboard, account-deletion cleanup.
+- `server/supabase/migrations/0011_account_identity_rework.sql` - `link_game` returns the account's game (creates when absent; never `game_mismatch`/`game_claimed`), `players.visible_on_board`, `set_board_visibility`, `evolved_capabilities` `board_visibility`, `self_context` `visible_on_board` (all `SECURITY DEFINER`, fixed `search_path`).
+- `server/supabase/migrations/0012_service_role_table_grants.sql` - grants
+  `service_role` the table/sequence DML the postgres-owned default ACL for
+  `public` withholds, and sets matching default privileges so later migrations
+  inherit it. Without it `service_role` cannot write any migration-created
+  table (PostgREST `403` / `42501`), which made the required `account-contracts`
+  scenario un-passable on a `db reset` stack. `anon`/`authenticated` unchanged.
 
 Rollback: `supabase migration repair` + `supabase db reset` to the target
 version; restore from `supabase db dump` backups taken before each migration.
@@ -58,7 +68,8 @@ against production without it.
 - `public.fixture_registry` (private) reserves fixture usernames before any
   account exists, so a fixture player row is born classified.
 - Public `hiscores`/`public_profile` filter `is_test = false` before rank,
-  sort and limit; test profiles are indistinguishable from unknown names.
+  sort and limit, and (migration 0011) `players.visible_on_board = true`;
+  test profiles are indistinguishable from unknown names.
 - `test_hiscores`/`test_public_profile`/`self_context` are authenticated-only
   and authorize from the caller's own player row, never a client flag.
 - Seed/verify: `python3 dev/demo_players.py --hosted --apply|--verify`

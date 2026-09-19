@@ -25,6 +25,14 @@ PHASE = 1
 # Set once a phase decides its outcome; stops the poll timer and popup
 # watchdog from scheduling further work while Anki tears down.
 _QUITTING = False
+# Set once a phase has decided its own outcome (_finish/_finish_phase/_quit),
+# so the abort writer can never double-write the phase protocol's result.
+_COMPLETED = False
+# The Classic award is probabilistic by design, so a short sample can
+# legitimately miss. The upgrade journey answers up to this many cards before
+# declaring the award absent: for the fixture (level 23, Iron ore) a miss costs
+# p=0.24 per answer, so P(miss every time) is 0.24**8 ~ 1.1e-5.
+AWARD_ANSWER_BUDGET = 8
 
 
 def _load_run_id():
@@ -147,7 +155,72 @@ def _runtime_identity():
     return ident
 
 
+def _emergency_result(reason, lightweight=False):
+    """Record the steps gathered so far when a phase dies without finishing.
+
+    `_finish`/`_finish_phase` only run when a phase reaches its own decision, so
+    a kill, crash or hard hang used to leave no result file at all and the
+    harness could report nothing but "0 steps". This writes what actually
+    happened instead, clearly marked incomplete so an aborted run can never be
+    mistaken for a finished one. It never runs once a phase has decided.
+    """
+    global _COMPLETED
+    if _COMPLETED or _QUITTING:
+        return
+    _COMPLETED = True
+    try:
+        RESULT["aborted"] = True
+        RESULT["complete"] = False
+        RESULT["abort_reason"] = str(reason)[:200]
+        RESULT["finished"] = time.time()
+        RESULT["steps"].append({"name": "journey_aborted", "ok": False,
+                                "detail": str(reason)[:500]})
+        RESULT["errors"].append(f"journey_aborted: {reason}"[:500])
+        if not lightweight:
+            try:
+                RESULT["runtime"] = _runtime_identity()
+            except Exception:
+                pass
+        # Write-then-rename: the harness must never read a half-written file.
+        tmp = _out_path("assertions.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(RESULT, fh, indent=2)
+        os.replace(tmp, _out_path("assertions.json"))
+    except Exception:
+        pass
+
+
+def _install_abort_writer():
+    """Make an abnormal end produce a real, honest result file.
+
+    SIGKILL cannot be caught, but SIGTERM/SIGINT/SIGHUP and an ordinary
+    interpreter exit can — and those are the shapes that used to leave the
+    `ui-art`/`ui-visual-polish` journeys reporting no result at all.
+    """
+    import atexit
+    import signal
+
+    atexit.register(lambda: _emergency_result("process exited without finishing"))
+
+    def _handler(signum, _frame):
+        # Qt is not touched here: this may fire at an arbitrary bytecode
+        # boundary, and calling into Qt from one is how you deadlock instead.
+        _emergency_result(f"terminated by signal {signum}", lightweight=True)
+        os._exit(1)
+
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _handler)
+        except Exception:
+            pass
+
+
 def _finish(exit_code):
+    global _COMPLETED
+    _COMPLETED = True
     RESULT["finished"] = time.time()
     try:
         _profile_stop()
@@ -173,6 +246,8 @@ def _finish_phase(next_phase):
     The request carries phase pass/fail so an intermediate phase's failed
     steps fail the whole journey instead of vanishing on relaunch.
     """
+    global _COMPLETED
+    _COMPLETED = True
     try:
         with open(os.path.join(_base_dir(), "relaunch.json"), "w",
                   encoding="utf-8") as fh:
@@ -196,8 +271,9 @@ def _quit(exit_code):
     intermittently segfaults (crash report 2026-09-12:
     cleanup_on_exit -> cleanup_qobject -> EXC_BAD_ACCESS). Stop our own
     timers, ask the app to exit with the journey's code and return."""
-    global _QUITTING
+    global _QUITTING, _COMPLETED
     _QUITTING = True
+    _COMPLETED = True
     try:
         import faulthandler
         faulthandler.cancel_dump_traceback_later()
@@ -239,6 +315,7 @@ def run():
         return  # only act in E2E profiles
     _load_run_id()
     _load_journey()
+    _install_abort_writer()
 
     state = {"answered": 0, "target": 5, "ticks": 0}
 
@@ -684,6 +761,27 @@ def _drive_onboarding(state, want_skill="mining"):
         skill_btn.click()
         _step("onboarding_skill", True, want_skill)
         _shot("onboarding-resource")
+        return False
+    offline = _shell_child(shell, "ankiscape-onboarding-offline")
+    if offline is not None:
+        # D6: the welcome step's generic primary is now "Create account",
+        # which opens the account modal and waits on a human. Take the
+        # offline path explicitly so the journey never hangs there; the
+        # primary below still drives the later Continue/Start studying steps.
+        if state.get("onboarding_offline_clicked"):
+            state["onboarding_wait"] = state.get("onboarding_wait", 0) + 1
+            if state["onboarding_wait"] > 40:
+                _step("onboarding_advance", False, "step did not advance")
+                return None
+            return False
+        state["onboarding_offline_clicked"] = True
+        text = ""
+        try:
+            text = str(offline.text())
+        except Exception:
+            pass
+        offline.click()
+        _step("onboarding_offline", True, text)
         return False
     primary = _shell_child(shell, "ankiscape-onboarding-primary")
     if primary is None:
@@ -1388,6 +1486,25 @@ def _poll_upgrade_1(state):
     _finish_phase(2)
 
 
+def _classic_award_probability():
+    """P(one Classic answer awards exp), for the exhaustion diagnostic only.
+
+    Read from the same public product data the journey seeds, so it cannot
+    drift from the product. None when unavailable — never a guessed number.
+    """
+    try:
+        from aqt import mw
+        from ankiscape.constants import ORE_DATA
+        from ankiscape.logic import calculate_mining_probability
+        data = mw.col.get_config("ankiscape_player_data", {}) or {}
+        level = int(data.get("mining_level", 1))
+        ore = str(data.get("current_ore", ""))
+        return float(calculate_mining_probability(
+            level, ORE_DATA[ore]["probability"]))
+    except Exception:
+        return None
+
+
 def _poll_upgrade_2(state):
     # Classic active with real progress; no setup interference.
     from aqt import mw
@@ -1411,35 +1528,62 @@ def _poll_upgrade_2(state):
         except Exception as exc:
             _step("classic_loaded", False, repr(exc))
             return
+    # The Classic award is probabilistic by design (p = 0.76 for this fixture),
+    # so a fixed three-answer sample misses ~1.4% of the time. Asserting a
+    # single sample and then re-firing the identical assertion every tick turned
+    # that sampling event into a hard lane failure: the revlog target was
+    # already met, so the world never advanced and `classic_awards` repeated
+    # 1188 times until the watchdog killed the journey. Gate on monotone
+    # progress instead — every miss answers one more card, the budget is what
+    # ends the attempt, and the step fails exactly once, with the odds, only
+    # when the budget is genuinely exhausted.
     if not state.get("seeded"):
-        _seed_deck(state, deck="E2E Deck", count=3, prefix="UPG")
+        _seed_deck(state, deck="E2E Deck", count=AWARD_ANSWER_BUDGET,
+                   prefix="UPG")
         return
-    result = _answer_until_revlog(state, state["revlog_before"] + 3,
-                                  what="classic_three_answers")
+
+    attempts = state.get("award_answers", 0)
+    result = _answer_until_revlog(state, state["revlog_before"] + attempts + 1,
+                                  what="classic_answers")
     if result is None:
         return
     if not result:
         return
-    _step("classic_three_answers", True)
+    attempts += 1
+    state["award_answers"] = attempts
     try:
         after = (mw.col.get_config("ankiscape_player_data", {}) or {}).get(
             "mining_exp", 0)
-        if after <= state["classic_before"]:
-            _step("classic_awards", False,
-                  f"before={state['classic_before']} after={after}")
-            return
-        _step("classic_awards", True,
-              f"mining_exp {state['classic_before']} -> {after}")
-        _save_snapshot("classic-snapshot.json", _classic_snapshot())
-        # A returning user who has not chosen: clear the request so the
-        # upgrade prompt appears with real Classic progress present.
-        mw.col.set_config("ankiscape_mode_requested", None)
-        _step("request_cleared", True)
     except Exception as exc:
-        _step("classic_verify", False, repr(exc))
+        _fail(f"classic_verify: {exc!r}")
         return
-    _shot("upgrade-classic-done")
-    _finish_phase(3)
+
+    if after > state["classic_before"]:
+        _step("classic_awards", True,
+              f"mining_exp {state['classic_before']} -> {after} "
+              f"after {attempts} answer(s)")
+        try:
+            _save_snapshot("classic-snapshot.json", _classic_snapshot())
+            # A returning user who has not chosen: clear the request so the
+            # upgrade prompt appears with real Classic progress present.
+            mw.col.set_config("ankiscape_mode_requested", None)
+            _step("request_cleared", True)
+        except Exception as exc:
+            _fail(f"request_cleared: {exc!r}")
+            return
+        _shot("upgrade-classic-done")
+        _finish_phase(3)
+        return
+
+    if attempts >= AWARD_ANSWER_BUDGET:
+        probability = _classic_award_probability()
+        odds = ("p(miss) unavailable" if probability is None else
+                f"p(miss per answer)~{1 - probability:.3f}, "
+                f"p(all {attempts} miss)~{(1 - probability) ** attempts:.2e}")
+        _fail(f"classic_awards: no award in {attempts} answers "
+              f"(before={state['classic_before']} after={after}); {odds}")
+        return
+    # Not awarded yet: the next tick answers one more card.
 
 
 def _poll_upgrade_3(state):
@@ -2112,6 +2256,21 @@ def _account_submitted(state, idx, fields):
 # ui-lifecycle (the 3.0 shell journeys)
 # --------------------------------------------------------------------------
 
+def _giveup_detail(what, state, awaited):
+    """Failure detail for a bounded wait: what was awaited, and for how long.
+
+    A bare "window stayed open" says nothing about whether the product never
+    closed it or the driver simply sampled too early, so record both the
+    predicate and the elapsed wait on every give-up path.
+    """
+    try:
+        waited = time.time() - float(state.get("stage_started", time.time()))
+    except Exception:
+        waited = 0.0
+    return (f"{what}; awaited {awaited}; waited {waited:.1f}s "
+            f"({state.get('home_ticks', 0)} ticks)")
+
+
 def _find_child(widget, object_name, *, cls_name=""):
     try:
         from aqt.qt import QWidget
@@ -2589,16 +2748,57 @@ def _addon_tree_snapshot():
     return out
 
 
-def _install_addon_network_guard(state):
-    """Deny and record any HTTP(S) connection attempted from ankiscape code.
+def _addon_allowed_hosts():
+    """Hosts the add-on is *designed* to contact at runtime, as names and IPs.
 
-    The image path must be fully offline; anything from the add-on itself is
-    recorded, refused, and fails the journey. Connections from Anki or the
-    driver are left alone so the check cannot lie about unrelated traffic.
+    The public Hiscores board is fetched over HTTPS from the baked backend for
+    every profile - including one that chose "Play offline" - and two pinned
+    assertions (`public_board_logged_out`, `test_leaderboard_public_browse`)
+    require exactly that fetch. The offline guarantee this journey enforces is
+    about the *image and asset* path, so the backend host is allowed through the
+    guard and recorded separately rather than counted as a violation. Before
+    this, the assertion forbade the very traffic two green assertions demanded,
+    and no product change could satisfy both.
+
+    Hosts are resolved to addresses here, before `connect` is patched, because
+    the wrapper sees the resolved IP and never the hostname.
+    """
+    import socket as _socket
+    import urllib.parse
+    names, addresses = set(), set()
+    try:
+        import ankiscape
+        from ankiscape.evolved import prod_config
+        for attr in ("PROD_URL", "SUPABASE_URL"):
+            url = getattr(prod_config, attr, "") or ""
+            host = urllib.parse.urlsplit(url).hostname if url else None
+            if host:
+                names.add(host.lower())
+    except Exception:
+        pass
+    for name in names:
+        try:
+            for info in _socket.getaddrinfo(name, 443, proto=_socket.IPPROTO_TCP):
+                addresses.add(str(info[4][0]).lower())
+        except Exception:
+            continue
+    return names | addresses
+
+
+def _install_addon_network_guard(state):
+    """Deny and record HTTP(S) connections to non-backend hosts from ankiscape.
+
+    The image path must be fully offline; anything from the add-on to a host
+    other than its own backend is recorded, refused, and fails the journey.
+    Connections from Anki or the driver are left alone so the check cannot lie
+    about unrelated traffic, and backend traffic is recorded separately so the
+    report still shows it happened.
     """
     import socket
     import sys as _sys
     attempts = state.setdefault("net_attempts", [])
+    allowed = _addon_allowed_hosts()
+    backend_attempts = state.setdefault("net_backend_attempts", [])
 
     def _from_addon():
         frame = _sys._getframe()
@@ -2613,6 +2813,10 @@ def _install_addon_network_guard(state):
         def wrapper(self, address, *args, **kwargs):
             if isinstance(address, tuple) and len(address) > 1 \
                     and address[1] in (80, 443) and _from_addon():
+                host = str(address[0]).lower()
+                if host in allowed:
+                    backend_attempts.append(str(address))
+                    return real(self, address, *args, **kwargs)
                 attempts.append(str(address))
                 raise ConnectionRefusedError(
                     "AnkiScape offline test: image network denied")
@@ -2880,8 +3084,9 @@ def _poll_ui_art(state):
 def _verify_art_environment(state):
     """Offline + immutability assertions for the installed add-on."""
     attempts = state.get("net_attempts") or []
+    backend = state.get("net_backend_attempts") or []
     _step("art_no_image_network", not attempts,
-          f"attempts={attempts[:3]}")
+          f"attempts={attempts[:3]} backend_allowed={backend[:3]}")
     before = state.get("install_snapshot") or {}
     after = _addon_tree_snapshot()
     if before:
@@ -3519,7 +3724,8 @@ def _poll_ui_test_leaderboard(state):
 
 _ACCOUNT_FAKE: dict = {"server": None, "port": 0, "submitted": [],
                        "accepted": 0, "linked": False, "passwords": {},
-                       "users": {}}
+                       "users": {}, "game_uuid": "", "game_uuids": {},
+                       "visible_on_board": True}
 
 
 def _account_fake_reset(state):
@@ -3566,6 +3772,25 @@ def _account_fake_reset(state):
                 return _json.loads(raw.decode("utf-8") or "{}")
             except ValueError:
                 return {}
+
+        def _account_key(self):
+            token = str(self.headers.get("Authorization", "")).replace(
+                "Bearer ", "").strip()
+            return sessions.get(token, "")
+
+        def _remembered_game_uuid(self):
+            """S14 remember-vs-generate: one fixture uuid per account, minted
+            on first link and returned on every later call. The offered
+            p_game_uuid is ignored for identity, like the real 0011 RPC."""
+            key = self._account_key()
+            remembered = _ACCOUNT_FAKE["game_uuids"].get(key)
+            if remembered:
+                _ACCOUNT_FAKE["game_uuid"] = remembered
+                return remembered, False
+            remembered = str(_uuid.uuid4())
+            _ACCOUNT_FAKE["game_uuids"][key] = remembered
+            _ACCOUNT_FAKE["game_uuid"] = remembered
+            return remembered, True
 
         def do_POST(self):  # noqa: N802 (http.server API)
             path = self.path.split("?")[0]
@@ -3671,15 +3896,38 @@ def _account_fake_reset(state):
                 return self._send(200, {"deleted": True})
             if path == "/rest/v1/rpc/link_game":
                 _ACCOUNT_FAKE["linked"] = True
-                return self._send(200, {"game_uuid": body.get("p_game_uuid"),
-                                        "resumed": False})
+                remembered, created = self._remembered_game_uuid()
+                if created:
+                    return self._send(200, {"game_uuid": remembered,
+                                            "created": True, "resumed": False})
+                return self._send(200, {"game_uuid": remembered,
+                                        "created": False, "resumed": True})
             if path == "/rest/v1/rpc/evolved_capabilities":
                 return self._send(200, {"protocol_version": 2,
-                                        "authoritative_scoring": True})
+                                        "authoritative_scoring": True,
+                                        "board_visibility": True})
+            if path == "/rest/v1/rpc/self_context":
+                return self._send(200, {
+                    "username": state.get("username", "acct"),
+                    "is_test": False,
+                    "visible_on_board": bool(
+                        _ACCOUNT_FAKE.get("visible_on_board", True))})
+            if path == "/rest/v1/rpc/set_board_visibility":
+                visible = bool(body.get("p_visible"))
+                _ACCOUNT_FAKE["visible_on_board"] = visible
+                return self._send(200, {"visible_on_board": visible})
             if path == "/rest/v1/rpc/fetch_operations":
                 return self._send(200, {"operations": [], "next_cursor": 0,
                                         "revision": 1})
             if path == "/rest/v1/rpc/submit_operations":
+                # Mirror the retained ownership guard (0004:894-897): only the
+                # remembered account game may submit, so a mis-bound client
+                # cannot mask the failure behind a fixture success.
+                expected = _ACCOUNT_FAKE["game_uuids"].get(
+                    self._account_key(), "")
+                if not expected or str(body.get("p_game_uuid") or "") != expected:
+                    return self._send(403, {"code": "42501",
+                                            "message": "game_mismatch"})
                 ops = body.get("p_ops") or []
                 ids = [str(op.get("op_id")) for op in ops]
                 _ACCOUNT_FAKE["submitted"].extend(ids)
@@ -3716,6 +3964,8 @@ def _account_fake_reset(state):
     _ACCOUNT_FAKE.update({"server": server, "port": server.server_port,
                           "submitted": [], "accepted": 0, "linked": False,
                           "passwords": {}, "users": users,
+                          "game_uuid": "", "game_uuids": {},
+                          "visible_on_board": True,
                           "signup_posts": [], "last_resend": {},
                           "last_recover": {}, "delete_calls": [],
                           "deleted": [], "delete_outcome": "deleted",
@@ -3900,6 +4150,9 @@ def _poll_ui_account_lifecycle(state):
     or the real local Auth stack + captured loopback OTP (auth mode)."""
     import time as _t
     stage = state.get("stage", "setup")
+    if state.get("_stage_seen") != stage:
+        state["_stage_seen"] = stage
+        state["stage_started"] = _t.time()
     mode = _account_journey_mode()
     state["mode"] = mode
 
@@ -4419,7 +4672,8 @@ def _poll_ui_account_lifecycle(state):
         if dlg is None:
             state["home_ticks"] = state.get("home_ticks", 0) + 1
             if state["home_ticks"] > 400:
-                _step("delete_flow", False, "login window never opened")
+                _step("delete_flow", False, 
+                      _giveup_detail("login window never opened", state, "the account window to open on the sign-in page"))
                 state["stage"] = "abort"
             return
         _account_fill(dlg, {"ankiscape-account-identity": state["email"],
@@ -4434,7 +4688,8 @@ def _poll_ui_account_lifecycle(state):
         if _account_window() is not None:
             state["home_ticks"] = state.get("home_ticks", 0) + 1
             if state["home_ticks"] > 400:
-                _step("delete_flow", False, "login window did not close")
+                _step("delete_flow", False, 
+                      _giveup_detail("login window did not close", state, "the account window to close after sign-in"))
                 state["stage"] = "abort"
             return
         state["stage"] = "home_open"
@@ -4488,7 +4743,7 @@ def _poll_ui_account_lifecycle(state):
             state["home_ticks"] = state.get("home_ticks", 0) + 1
             if state["home_ticks"] > 300:
                 _step("delete_flow", False,
-                      f"delete page missing: {state.get('window_result')}")
+                      _giveup_detail(f"delete page missing: {state.get('window_result')}", state, "the account window to reopen on the delete page"))
                 state["stage"] = "abort"
             return
         confirm = _account_widget(dlg, "ankiscape-account-delete-confirm")
@@ -4582,7 +4837,8 @@ def _poll_ui_account_lifecycle(state):
         if dlg is None or _account_page(dlg) != "home":
             state["home_ticks"] = state.get("home_ticks", 0) + 1
             if state["home_ticks"] > 300:
-                _step("delete_flow", False, "home did not reopen")
+                _step("delete_flow", False, 
+                      _giveup_detail("home did not reopen", state, "the account window to reopen on the home page"))
                 state["stage"] = "abort"
             return
         _account_click(dlg, "ankiscape-account-delete-open")
@@ -4595,7 +4851,8 @@ def _poll_ui_account_lifecycle(state):
         if dlg is None or _account_page(dlg) != "delete":
             state["home_ticks"] = state.get("home_ticks", 0) + 1
             if state["home_ticks"] > 300:
-                _step("delete_flow", False, "delete page did not reopen")
+                _step("delete_flow", False, 
+                      _giveup_detail("delete page did not reopen", state, "the account window to return to the delete page"))
                 state["stage"] = "abort"
             return
         _account_set_local(dlg, False)  # keep local progress
@@ -4611,7 +4868,8 @@ def _poll_ui_account_lifecycle(state):
         if _account_window() is not None:
             state["home_ticks"] = state.get("home_ticks", 0) + 1
             if state["home_ticks"] > 600:
-                _step("delete_flow", False, "delete window stayed open")
+                _step("delete_flow", False, 
+                      _giveup_detail("delete window stayed open", state, "the account window to close after delete confirm"))
                 state["stage"] = "abort"
             return
         import ankiscape

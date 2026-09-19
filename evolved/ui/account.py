@@ -22,6 +22,28 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Dict, Optional
 
+# S2/D4/D7: the register notice, rendered for the register page in BOTH
+# variants before the user commits. The final disclosure sentence is identical
+# in both. The variant is chosen by the operational S13 predicate
+# (evolved.onboarding.register_notice_variant) through the flow; anything
+# unknown falls back to the first-run variant.
+REGISTER_NOTICE_FIRST_RUN = (
+    "Your account starts its own Evolved game at level 1 with 0 XP. "
+    "You can choose whether your progress is shown on the public hiscores "
+    "board.")
+REGISTER_NOTICE_UPGRADE = (
+    "Your account starts its own Evolved game at level 1 with 0 XP. "
+    "Progress from this computer's offline game is NOT transferred and is "
+    "never uploaded \u2014 it stays here as a separate game. The two games "
+    "keep separate stats. You can choose whether your progress is shown on "
+    "the public hiscores board.")
+
+
+def register_notice_text(variant: str) -> str:
+    """S2: 'upgrade' protects an existing offline game; else first-run."""
+    return (REGISTER_NOTICE_UPGRADE if str(variant) == "upgrade"
+            else REGISTER_NOTICE_FIRST_RUN)
+
 
 def default_runner() -> Callable[..., None]:
     """Thread + queued-signal runner for environments without Anki taskman."""
@@ -172,6 +194,18 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     inputs["email"] = email
     _secret_row(register_form, "register_password", "Password:",
                 "ankiscape-account-register-password")
+    register_notice = body_label("", wrap=True)
+    register_notice.setObjectName("ankiscape-account-register-notice")
+
+    def _notice_variant() -> str:
+        fn = getattr(flow, "register_notice_variant", None)
+        try:
+            return str(fn()) if callable(fn) else "first_run"
+        except Exception:
+            return "first_run"
+
+    register_notice.setText(register_notice_text(_notice_variant()))
+    register_layout.addWidget(register_notice)
     register_actions = QHBoxLayout()
     register_primary = QPushButton("Register")
     register_primary.setObjectName("ankiscape-account-primary")
@@ -281,11 +315,11 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     delete_page, delete_layout, delete_form = _page(
         "delete", "Deleting your account removes it permanently.")
     delete_explain = body_label(
-        "This removes your account and its online data: game progress, "
-        "backups, scores and your place on the leaderboard. Your Classic "
-        "progress is not touched. Local Evolved progress on this computer "
-        "stays unless you choose to remove it below. Any pending changes "
-        "will be lost.", wrap=True)
+        "This removes your account and its online data: the account game's "
+        "progress, backups, scores and your place on the leaderboard. Your "
+        "offline game on this computer is a separate game and stays exactly "
+        "as it is; Classic progress is not touched either. Anything the "
+        "account game has waiting to sync will be lost.", wrap=True)
     delete_explain.setObjectName("ankiscape-account-delete-explain")
     delete_layout.insertWidget(1, delete_explain)
     delete_username = QLineEdit()
@@ -296,7 +330,7 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     _secret_row(delete_form, "delete_password", "Your password:",
                 "ankiscape-account-delete-password")
     delete_local = QCheckBox(
-        "Also delete my local progress for this game on this computer \u2014 "
+        "Also remove the account game's local copy on this computer \u2014 "
         "this cannot be undone.")
     delete_local.setObjectName("ankiscape-account-delete-local")
     delete_local.setChecked(False)
@@ -308,9 +342,9 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     delete_form.addRow("", delete_local)
     inputs["delete_local"] = delete_local
     delete_local_warning = QLabel(
-        "Local Evolved progress for this game will be erased on this "
-        "computer. Other computers keep their own copies. This cannot be "
-        "undone.")
+        "The account game's local copy will be erased on this computer. "
+        "Your offline game and other computers' copies are untouched. This "
+        "cannot be undone.")
     delete_local_warning.setObjectName("ankiscape-account-delete-local-warning")
     delete_local_warning.setWordWrap(True)
     delete_local_warning.setProperty("class", "error")
@@ -374,6 +408,8 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
                 edit.clear()
         error.setText(payload.get("error", "") or "")
         status.setText(payload.get("status", "") or "")
+        if page == "register":
+            register_notice.setText(register_notice_text(_notice_variant()))
         if page == "home":
             info = flow.home_info()
             name = str(info.get("username", "") or "your account")

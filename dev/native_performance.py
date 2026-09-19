@@ -161,13 +161,24 @@ def _run_journey(journey: str, *, install_addon: bool, config: dict,
                         install_addon=install_addon, extra_config=config,
                         phase_timeout_s=phase_timeout)
     base = os.path.join(dev.DEV_DIR, "e2e", journey)
+    # Metrics truth: an absent, unreadable or empty payload used to collapse
+    # into `raw = {}`, which then surfaced as a generic `native_performance =>
+    # None` with no way to tell a crashed journey from a real measurement. The
+    # state is carried out of here so the failure can name its own cause.
+    metrics_path = os.path.join(base, "e2e-perf-native.json")
     raw = {}
+    metrics_state = "ok"
     try:
-        with open(os.path.join(base, "e2e-perf-native.json"),
-                  encoding="utf-8") as fh:
+        with open(metrics_path, encoding="utf-8") as fh:
             raw = json.load(fh)
-    except (OSError, ValueError):
-        raw = {}
+    except FileNotFoundError:
+        raw, metrics_state = {}, "missing"
+    except (OSError, ValueError) as exc:
+        raw, metrics_state = {}, f"unreadable_{exc.__class__.__name__.lower()}"
+    if metrics_state == "ok" and not isinstance(raw, dict):
+        raw, metrics_state = {}, "not_an_object"
+    if metrics_state == "ok" and not raw:
+        metrics_state = "empty"
     runtime = {}
     try:
         with open(os.path.join(base, "e2e-assertions.json"),
@@ -183,6 +194,7 @@ def _run_journey(journey: str, *, install_addon: bool, config: dict,
             evidence = []
     return {"journey": journey, "install_addon": install_addon,
             "rc": int(rc), "raw": raw, "runtime": runtime,
+            "metrics_state": metrics_state, "metrics_path": metrics_path,
             "evidence": evidence}
 
 
@@ -482,6 +494,13 @@ def main(argv=None) -> int:
     if not all(run["rc"] == 0 for run in runs):
         failures.append("journey_failed:" + ",".join(
             r["journey"] for r in runs if r["rc"] != 0))
+    # A rep with no usable metrics object is a named failure, never a silent
+    # None: the reader has to be able to tell an empty payload from a crash.
+    for index, run in enumerate(runs, start=1):
+        state = run.get("metrics_state")
+        if state and state != "ok":
+            failures.append(f"native_performance_metrics_{state} "
+                            f"rep={index} path={run.get('metrics_path', '')}")
 
     payload = {
         "schema": "ankiscape-native-performance", "version": 1,
@@ -493,6 +512,7 @@ def main(argv=None) -> int:
         "runs": [{"journey": r["journey"], "rc": r["rc"],
                   "runtime": r["runtime"],
                   "raw_len": len(json.dumps(r["raw"])),
+                  "metrics_state": r.get("metrics_state"),
                   "evidence": len(r.get("evidence") or [])} for r in runs],
         "failures": failures, "warnings": warnings,
         "pass": not failures,

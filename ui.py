@@ -603,6 +603,8 @@ def hide_review_hud() -> None:
 
 def show_error_message(title: str, message: str):
     """Centralized error dialog helper."""
+    if not HAS_QT:
+        return
     error_dialog = QMessageBox(mw)
     error_dialog.setIcon(QMessageBox.Icon.Warning)
     error_dialog.setWindowTitle(title)
@@ -613,6 +615,8 @@ def show_error_message(title: str, message: str):
 
 def show_level_up_dialog(skill: str):
     """Level-up dialog with a skill icon."""
+    if not HAS_QT:
+        return
     dialog = QDialog(mw)
     dialog.setWindowTitle("Level Up!")
     dialog.setFixedSize(380, 200)
@@ -648,6 +652,8 @@ def show_level_up_dialog(skill: str):
 
 def show_achievement_dialog(achievement: str, data: dict):
     """Achievement dialog with an icon."""
+    if not HAS_QT:
+        return
     dialog = QDialog(mw)
     dialog.setWindowTitle("Achievement Unlocked!")
     dialog.setFixedSize(420, 240)

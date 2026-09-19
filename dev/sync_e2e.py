@@ -33,6 +33,8 @@ sys.path.insert(0, ROOT)
 API = "http://127.0.0.1:55321"
 MAILPIT = "http://127.0.0.1:55324"
 FAILURES = []
+_UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 from evolved.auth import MemorySession  # noqa: E402
 from evolved.journal import Journal  # noqa: E402
@@ -128,7 +130,7 @@ def main():
     if not anon:
         return 1
     stamp = int(time.time())
-    game_uuid = str(uuid.uuid4())
+    offered_game = str(uuid.uuid4())
     endpoint = Endpoint(base_url=API, project_key=anon,
                         allow_http_loopback=True)
 
@@ -153,10 +155,19 @@ def main():
               user_id=session_b["user"]["id"])
 
     # 2. A links the game, then credits 2 ops OFFLINE (no network yet).
+    # The server owns the game uuid (D5): the returned uuid is the only game
+    # id used after the link (S11/S16). created/resumed are pinned
+    # complementary and `created` is a key-presence rule, not `is True`.
     status, data = _req("POST", "/rest/v1/rpc/link_game",
-                        {"p_game_uuid": game_uuid},
+                        {"p_game_uuid": offered_game},
                         token=mem_a.access_token, anon=anon)
-    check("A link_game binds", status in (200, 201) and data.get("resumed") is False,
+    reply = data if isinstance(data, dict) else {}
+    game_uuid = str(reply.get("game_uuid") or "")
+    check("A link_game creates with the pinned created/resumed reply",
+          status in (200, 201) and reply.get("created") is True
+          and reply.get("resumed") is False, f"{status} {data}")
+    check("A adopts the server-owned game uuid",
+          bool(_UUID_RE.match(game_uuid)) and game_uuid != offered_game,
           f"{status} {data}")
     tmp_a = tempfile.TemporaryDirectory()
     journal_a = Journal(os.path.join(tmp_a.name, "a.sqlite3"))

@@ -33,6 +33,12 @@ build/
 .dev/
 artifacts/
 .supabase/
+
+# Agent workflow reports (generated process evidence, not source).
+# Untracked files here make `git status --porcelain` non-empty, and
+# dev/reliability.py computes source.dirty from exactly that — so a single
+# stray directory here silently invalidates every local gate record.
+.opencode/
 .env
 .env.local
 

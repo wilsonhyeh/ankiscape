@@ -49,7 +49,7 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
     nav = QHBoxLayout()
     back_btn = QPushButton("Back")
     back_btn.setObjectName(OBJECT_NAMES["onboarding_back"])
-    primary = QPushButton("Get started")
+    primary = QPushButton("Create account")
     primary.setObjectName(OBJECT_NAMES["onboarding_primary"])
     try:
         primary.setStyleSheet(
@@ -62,6 +62,11 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
     classic.clicked.connect(lambda: shell.call("on_mode_switch", "classic"))
     nav.addWidget(classic)
     nav.addStretch(1)
+    # D6: the first-run choice — Create account (primary) or Play offline.
+    # No game is minted before the user picks a path.
+    offline = QPushButton("Play offline")
+    offline.setObjectName("ankiscape-onboarding-offline")
+    nav.addWidget(offline)
     nav.addWidget(primary)
     layout.addLayout(nav)
     layout.addStretch(1)
@@ -94,6 +99,7 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
         error.setVisible(False)
         primary.setVisible(True)
         primary.setEnabled(True)
+        offline.setVisible(step == "welcome")
         rules = shell.call("get_rules", default={}) or {}
 
         if step == "welcome":
@@ -102,9 +108,10 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
             body.setText(
                 "Anki stays your study app — the game rides along. Every "
                 "Hard, Good, or Easy review attempts training in one of six skills and can produce "
-                "items. This short setup picks where to start. An account is "
-                "optional and never required to play.")
-            primary.setText("Get started")
+                "items. Create an account to back up your progress and join "
+                "the Hiscores — or play offline on this computer. Nothing is "
+                "set up until you choose.")
+            primary.setText("Create account")
             primary.setEnabled(True)
             back_btn.setVisible(False)
         elif step == "skill":
@@ -195,8 +202,8 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
     def _primary():
         step = state["step"]
         if step == "welcome":
-            shell.call("advance_onboarding")
-            _refresh()
+            # D6: Create account is the primary first-run action.
+            shell.call("on_register")
             return
         if step == "resource":
             # Explicit confirmation of the starting resource.
@@ -220,7 +227,14 @@ def build_onboarding_screen(shell, deps: Dict[str, Any]):
         shell.call("back_onboarding")
         _refresh()
 
+    def _play_offline():
+        # D6: Play offline continues setup; the game is minted only when
+        # setup commits, never before the choice.
+        shell.call("advance_onboarding")
+        _refresh()
+
     primary.clicked.connect(_primary)
+    offline.clicked.connect(_play_offline)
     back_btn.clicked.connect(_back)
 
     def _set_icon(path):

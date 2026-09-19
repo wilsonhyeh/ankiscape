@@ -68,6 +68,59 @@ def _map_net_error(exc: NetError) -> Dict[str, Any]:
     return {"status": "transient", "detail": f"{exc.kind}: {exc.detail}"}
 
 
+def capabilities_state(payload: Any) -> Dict[str, Dict[str, Any]]:
+    """Raw `evolved_capabilities` reply -> per-key tri-state (S1).
+
+    Each key becomes {"state": "known", "value": <raw>}. A malformed reply
+    yields no known keys; callers layer `unknown` on top.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): {"state": "known", "value": value}
+            for key, value in payload.items()}
+
+
+def _unknown_capabilities() -> Dict[str, Dict[str, Any]]:
+    return {"board_visibility": {"state": "unknown"}}
+
+
+def fetch_capabilities(post: PostFn, endpoint: Optional[Endpoint],
+                       session) -> Dict[str, Dict[str, Any]]:
+    """Eager capability read for the UI (S1), never raising.
+
+    A network failure, a 404 from an older server, a logged-out session or a
+    malformed reply all resolve to `unknown`. `unknown` behaves exactly like
+    `known-false` for gating (the control hides) but stays distinguishable
+    for diagnostics.
+    """
+    if endpoint is None or session is None or not _session_token(session):
+        return _unknown_capabilities()
+    try:
+        data = post(endpoint, "/rest/v1/rpc/evolved_capabilities", {},
+                    access_token=_session_token(session))
+    except NetError:
+        return _unknown_capabilities()
+    except Exception:
+        return _unknown_capabilities()
+    state = capabilities_state(data)
+    if "board_visibility" not in state:
+        state["board_visibility"] = {"state": "unknown"}
+    return state
+
+
+def set_board_visibility(post: PostFn, endpoint: Endpoint, session,
+                         visible: bool) -> bool:
+    """D7/R4: persist the public-board preference. Raises NetError on
+    failure so the caller can put the control back."""
+    data = post(endpoint, "/rest/v1/rpc/set_board_visibility",
+                {"p_visible": bool(visible)},
+                access_token=_session_token(session))
+    if not isinstance(data, dict):
+        raise NetError("malformed_response",
+                       "set_board_visibility must be an object")
+    return bool(data.get("visible_on_board"))
+
+
 def make_transport(config: ServiceConfig,
                    session) -> Dict[str, Callable]:
     """Build SyncJob upload/download callables over real HTTP transport.
@@ -80,6 +133,8 @@ def make_transport(config: ServiceConfig,
     endpoint = config.endpoint
     post = config.post
     capability = {"known": False, "ok": True}
+    context_state: Dict[str, Any] = {"capabilities": _unknown_capabilities(),
+                                     "self_context": None}
 
     def _do_refresh() -> bool:
         try:
@@ -109,6 +164,9 @@ def make_transport(config: ServiceConfig,
 
     def _capabilities_ok() -> bool:
         """False only for a definitively older server (missing RPC)."""
+        eager = context_state["capabilities"].get("authoritative_scoring")
+        if isinstance(eager, dict) and eager.get("state") == "known":
+            return bool(eager.get("value"))
         if capability["known"]:
             return capability["ok"]
         try:
@@ -116,10 +174,13 @@ def make_transport(config: ServiceConfig,
         except NetError as exc:
             if exc.kind == "not_found" or getattr(exc, "status", 0) == 404:
                 capability.update(known=True, ok=False)
+                context_state["capabilities"] = {
+                    "authoritative_scoring": {"state": "known", "value": False}}
                 return False
             raise
         if not isinstance(data, dict):
             raise NetError("malformed_response", "capabilities must be an object")
+        context_state["capabilities"] = capabilities_state(data)
         ok = bool(data.get("authoritative_scoring"))
         capability.update(known=True, ok=ok)
         return ok
@@ -195,7 +256,18 @@ def make_transport(config: ServiceConfig,
                 "next_cursor": str(next_cursor),
                 "has_more": has_more}
 
-    return {"upload": upload, "download": download}
+    # S1: fetch capabilities EAGERLY, at construction, so a construct-time
+    # read is never a miss. Never let the read fail the service: a failure
+    # becomes `unknown`. (self_context is fetched eagerly by the product's
+    # service construction and again at login; see _evolved_sync_service.)
+    try:
+        context_state["capabilities"] = fetch_capabilities(post, endpoint,
+                                                           session)
+    except Exception:
+        pass
+
+    return {"upload": upload, "download": download,
+            "capabilities": context_state["capabilities"]}
 
 
 def _session_token(session) -> Optional[str]:
@@ -504,7 +576,9 @@ class SyncService:
                 if "permanent:unauthorized" in error:
                     return "session_expired"
                 if "permanent:forbidden" in error:
-                    return "game_mismatch"
+                    # The account's game is server-owned; a mismatch is
+                    # repaired by a fresh sign-in, never by a re-link.
+                    return "relogin_required"
                 if "permanent:invalid" in error:
                     return "service_error"
                 if kind == "protocol_error" or "protocol_error" in error:

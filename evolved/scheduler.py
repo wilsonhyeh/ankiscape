@@ -22,8 +22,13 @@ CONTINUATION_DELAY_S = 0.0
 # States that should not be retried on a timer: a user action, an update or a
 # new event is required. `offline`, `rate_limited`, `no_progress` and
 # transient service errors stay retryable.
+#
+# Cosmetic (S8): PERMANENT_STATES has no readers; pause already works because
+# `_after` re-arms only RETRYABLE_STATES. `relogin_required` is listed so the
+# taxonomy stays truthful for future readers, and `game_mismatch` is retained
+# for one release as mixed-version defense.
 PERMANENT_STATES = frozenset({
-    "session_expired", "game_mismatch", "server_upgrade",
+    "session_expired", "relogin_required", "game_mismatch", "server_upgrade",
     "rejected_progress", "verification_needed",
 })
 RETRYABLE_STATES = frozenset({

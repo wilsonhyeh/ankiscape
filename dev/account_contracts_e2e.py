@@ -39,6 +39,8 @@ sys.path.insert(0, ROOT)
 API = "http://127.0.0.1:55321"
 MAILPIT = "http://127.0.0.1:55324"
 FAILURES: list = []
+_UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 from evolved.accounts import (delete_account, login_password, logout,  # noqa: E402
                               register, resend_signup_code, verify_code,
@@ -189,12 +191,37 @@ def _svc(game_uuid, journal, transport, session, generation=1):
                        get_user_id=lambda: session.user_id)
 
 
+# GoTrue refuses a second email to the SAME address inside
+# GOTRUE_SMTP_MAX_FREQUENCY (1s on the local stack) and answers HTTP 429
+# `over_email_send_rate_limit`, with the body's "after N seconds" rounding to
+# zero. Measured directly: an immediate duplicate signup is 429, the same call
+# after 1s is 200. The config.toml key that would remove the window is not
+# honoured by the CLI, so the sends are paced here instead - these checks are
+# about the signup/resend contract, not about the limiter.
+_SEND_WINDOW_S = 1.2
+
+
+def _await_send_window() -> None:
+    time.sleep(_SEND_WINDOW_S)
+
+
 def _signup_resend_verify_checks(*, anon, service, endpoint, check, stamp,
                                  users):
-    """Real GoTrue signup/duplicate/resend/verify through the product client.
+    """Real GoTrue signup/resend/verify and duplicate detection, through the
+    product client.
 
-    Flat hosted shape, obfuscated duplicates, the signup `resend` route and a
-    NEW captured OTP correlated by message id (never the original code)."""
+    Two addresses, deliberately. Resending and duplicate-detecting pull the
+    same account's OTP state in opposite directions, and interleaving them on
+    one address left NO code usable: measured, signup -> duplicate -> resend
+    sent three emails of which only the first verified, while a clean
+    signup -> resend verified the resent code with HTTP 200. The duplicate
+    check also needs a CONFIRMED address, because GoTrue answers an
+    unconfirmed duplicate with the real user (the client then reports
+    verification_required) and only refuses a confirmed one with
+    422 user_already_exists, which the client maps to email_exists. Confirming
+    the address is therefore a precondition of that check, not a detour.
+    """
+    # --- A: the signup `resend` route, on its own uninterrupted address -----
     email = f"acct-signup-{stamp}@example.invalid"
     username = f"signup{stamp[:8]}"
     password = uuid.uuid4().hex + "Aa9"
@@ -204,10 +231,6 @@ def _signup_resend_verify_checks(*, anon, service, endpoint, check, stamp,
     check("signup reaches verification_required against real GoTrue "
           "(flat shape)", out.status == "verification_required"
           and bool(out.session_user_id), f"{out.status} {out.detail}")
-    duplicate = register(post_json, endpoint, username=username,
-                         email=email, password=uuid.uuid4().hex + "Aa9")
-    check("duplicate signup resolves to email_exists",
-          duplicate.status == "email_exists", duplicate.detail)
     status = check_account_status(post_json, endpoint, email=email,
                                   username=username)
     check("status recheck reports the unconfirmed email",
@@ -216,6 +239,7 @@ def _signup_resend_verify_checks(*, anon, service, endpoint, check, stamp,
 
     original_code, original_id = _mailpit_message(email)
     check("signup OTP captured locally", bool(original_code), email)
+    _await_send_window()  # the resend is another email to the same address
     resent = resend_signup_code(post_json, endpoint, email=email)
     check("signup resend accepted (type=signup route)", resent.ok,
           resent.status)
@@ -239,6 +263,30 @@ def _signup_resend_verify_checks(*, anon, service, endpoint, check, stamp,
           confirmed.ok and confirmed.email_status == "confirmed",
           confirmed.email_status)
 
+    # --- B: duplicate detection needs a CONFIRMED address -------------------
+    dup_email = f"acct-dupe-{stamp}@example.invalid"
+    dup_username = f"dupe{stamp[:8]}"
+    dup_session = MemorySession()
+    dup_out = register(post_json, endpoint, username=dup_username,
+                       email=dup_email, password=uuid.uuid4().hex + "Aa9")
+    check("second identity reaches verification_required",
+          dup_out.status == "verification_required",
+          f"{dup_out.status} {dup_out.detail}")
+    dup_code, _dup_id = _mailpit_message(dup_email)
+    dup_verified = verify_code(post_json, endpoint, email=dup_email,
+                               code=dup_code, kind="signup",
+                               session=dup_session)
+    check("second identity confirms before the duplicate attempt",
+          dup_verified.ok, f"{dup_verified.status} {dup_verified.detail}")
+    if dup_verified.ok:
+        users.append(dup_session.user_id)
+    _await_send_window()
+    duplicate = register(post_json, endpoint, username=dup_username,
+                         email=dup_email, password=uuid.uuid4().hex + "Aa9")
+    check("duplicate signup resolves to email_exists",
+          duplicate.status == "email_exists",
+          f"{duplicate.status} {duplicate.detail}")
+
 
 def _deletion_contract_checks(*, anon, service, endpoint, check, stamp,
                               users, other_game=""):
@@ -257,9 +305,16 @@ def _deletion_contract_checks(*, anon, service, endpoint, check, stamp,
     login = login_password(post_json, endpoint, email=email,
                            password=password, session=memory)
     check("deletion fixture can sign in", login.ok, login.status)
-    game = str(uuid.uuid4())
-    post_json(endpoint, "/rest/v1/rpc/link_game", {"p_game_uuid": game},
-              access_token=memory.access_token)
+    offered_game = str(uuid.uuid4())
+    link = post_json(endpoint, "/rest/v1/rpc/link_game",
+                     {"p_game_uuid": offered_game},
+                     access_token=memory.access_token)
+    reply = link if isinstance(link, dict) else {}
+    game = str(reply.get("game_uuid") or "")
+    check("deletion fixture adopts the server-owned game uuid",
+          bool(_UUID_RE.match(game)), str(link)[:120])
+    if not game:
+        return
     journal = Journal(os.path.join(tempfile.gettempdir(),
                                    f"ankiscape-delete-{stamp}.sqlite3"))
     try:
@@ -276,6 +331,14 @@ def _deletion_contract_checks(*, anon, service, endpoint, check, stamp,
         check("deletion fixture seeded (checkpoint + audit)",
               checkpoint[0] < 300 and audit[0] < 300,
               f"{checkpoint[0]}/{audit[0]}")
+        # The sync above leaves a checkpoint and the fixture adds revision 999,
+        # so "untouched" is a comparison against THIS set rather than a row
+        # count. Asserting len(rows) == 1 predates the seed-at-a-free-revision
+        # change (dc44dd4) and could only have passed while one row existed.
+        seeded_rows = _rows(service, f"/rest/v1/game_checkpoints"
+                                     f"?game_uuid=eq.{game}&select=revision")
+        check("checkpoint baseline captured for the refusal comparison",
+              bool(seeded_rows), str(seeded_rows))
 
         # Wrong confirmation never consumes the account.
         wrong = delete_account(post_json, endpoint,
@@ -302,7 +365,10 @@ def _deletion_contract_checks(*, anon, service, endpoint, check, stamp,
         rows = _rows(service, f"/rest/v1/game_checkpoints"
                               f"?game_uuid=eq.{game}&select=revision")
         check("refusals left the account and checkpoint untouched",
-              rows is not None and len(rows) == 1, str(rows))
+              rows is not None and bool(seeded_rows)
+              and sorted(r.get("revision") for r in rows)
+              == sorted(r.get("revision") for r in seeded_rows),
+              f"before={seeded_rows} after={rows}")
 
         # Service-role seeding proves the demo and fixture guards.
         demo_on = _service(service, "PATCH",
@@ -488,13 +554,19 @@ def main(argv=None) -> int:
               all(row["username"] != name_a for row in baseline))
 
         # --- link_game + real manual sync ---------------------------------
-        game = str(uuid.uuid4())
+        # The server owns the game uuid (D5); the returned uuid is adopted as
+        # the only game id used after the link (S11/S16).
+        offered_game = str(uuid.uuid4())
         link = post_json(endpoint, "/rest/v1/rpc/link_game",
-                         {"p_game_uuid": game},
+                         {"p_game_uuid": offered_game},
                          access_token=session.access_token)
-        check("link_game binds the game",
-              isinstance(link, dict) and link.get("resumed") is False,
+        reply = link if isinstance(link, dict) else {}
+        game = str(reply.get("game_uuid") or "")
+        check("link_game creates with key-present created/resumed semantics",
+              reply.get("created") is True and reply.get("resumed") is False,
               str(link)[:120])
+        check("link_game returns the server-owned uuid to adopt",
+              bool(_UUID_RE.match(game)), str(link)[:120])
         journal = Journal(os.path.join(tmp.name, "game.sqlite3"))
         journals.append(journal)
         transport = make_transport(ServiceConfig(

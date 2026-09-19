@@ -66,10 +66,13 @@ select is(
 select set_config('request.jwt.claims',
   '{"sub":"40000000-0000-4000-8000-000000000002","role":"authenticated"}', true);
 set local role authenticated;
+-- authenticated has zero UPDATE privilege on players (0001 revokes all), so
+-- the write is refused before the demo guard trigger can fire; the errcode is
+-- the assertion (message pinned only where the trigger is reachable).
 select throws_ok(
   $$ update public.players set is_demo = true
       where username_norm = 'realplayer' $$,
-  '42501', 'demo_flag_privileged',
+  '42501', null,
   'authenticated callers cannot set the demo flag');
 reset role;
 
@@ -176,7 +179,7 @@ select is(
 select is(
   (public.public_profile('demowillow') -> 'state' -> 'xp' ->> 'mining')
     ::bigint,
-  5000000, 'profile xp matches the authoritative game state');
+  5000000::bigint, 'profile xp matches the authoritative game state');
 select throws_ok(
   $$ select public.public_profile('testtom') $$,
   '02000', 'no_profile', 'retired test profiles are not publicly findable');

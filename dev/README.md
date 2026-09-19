@@ -49,17 +49,25 @@ python3 dev.py test --suite python
 python3 dev.py test --suite backend
 python3 dev.py test --suite e2e --anki 26.8.1 --qt 6
 python3 dev.py verify --release
-python3 dev.py verify-evidence --matrix dev/matrix.json
+python3 dev.py verify-evidence --stage pr
 ```
 
 Journeys: `--journey fresh|upgrade|undo|catchup` (real-Anki Qt),
 `--journey sync` (live local-stack service sync, no mocks),
 `--journey dialogs` (live Qt menu + account screens),
 `--journey ui-onboarding|ui-training|ui-settings|ui-review|ui-lifecycle`
-(3.0 shell journeys), and `--journey ui-art` (offline art/UI verification:
-installs the package, denies and records image network access, asserts every
-manifest asset decodes with visible alpha at real slot sizes, visits every
-tab, and re-checks after a restart with an unchanged installed tree).
+(3.0 shell journeys), and `--journey ui-art` (art/UI verification with an
+outbound-network guard: installs the package, then refuses and records **any**
+`socket.connect`/`connect_ex` to port 80 or 443 attempted from an `ankiscape*`
+frame — not only image hosts, and not traffic from Anki or the driver; asserts
+every manifest asset decodes with visible alpha at real slot sizes, visits
+every tab, and re-checks after a restart with an unchanged installed tree).
+The guard is deliberately over-broad and currently also refuses the Hiscores
+public-board fetch, so `ui-art`/`ui-visual-polish` and the journeys that
+*require* that fetch (`ui-account-lifecycle::public_board_logged_out`,
+`ui-test-leaderboard::test_leaderboard_public_browse`) cannot both pass as
+specified. Scoping the assertion — or moving the journey off the
+production-baked build — is an **open owner-level decision, not fixed here**.
 `--journey ui-account-lifecycle` drives the real account window (register,
 verify, link, review, drain, recovery, logged-out browsing) against a
 deterministic loopback fixture by default, or against the real local Auth

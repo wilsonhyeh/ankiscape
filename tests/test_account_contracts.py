@@ -14,6 +14,7 @@ import time
 import unittest
 
 from evolved.net import Endpoint, NetError, post_json
+from evolved.link import ensure_link
 from evolved.service import (ServiceConfig, make_transport, query_hiscores,
                              query_public_profile)
 from evolved.session_store import ProfileSession
@@ -22,6 +23,7 @@ CAPS_PATH = "/rest/v1/rpc/evolved_capabilities"
 SUBMIT_PATH = "/rest/v1/rpc/submit_operations"
 HISCORES_PATH = "/rest/v1/rpc/hiscores"
 PROFILE_PATH = "/rest/v1/rpc/public_profile"
+LINK_PATH = "/rest/v1/rpc/link_game"
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -166,6 +168,33 @@ class TestProfileSessionToken(unittest.TestCase):
                      if entry["path"] == SUBMIT_PATH]
             self.assertEqual(auths, ["Bearer tok-old", "Bearer tok-new"])
             self.assertEqual(sess.access_token, "tok-new")
+
+
+class TestLinkGameContractRealHttp(unittest.TestCase):
+    """S11: the server-owned uuid arrives over the real transport; `created`
+    is a key-presence rule, so a repeat call is adoptable without created."""
+
+    def test_repeat_link_is_adoptable_without_created_true(self):
+        with _Fixture() as fx:
+            fx.route(LINK_PATH, (200, {"game_uuid": "b-1", "created": False,
+                                       "resumed": True}))
+            result = ensure_link(post_json, fx.endpoint, _profile_session(),
+                                 game_uuid="offered-local")
+            self.assertTrue(result.linked)
+            self.assertTrue(result.created_present)
+            self.assertFalse(result.created)
+            self.assertTrue(result.resumed)
+            self.assertEqual(result.game_uuid, "b-1")
+            self.assertEqual(fx.seen[0]["path"], LINK_PATH)
+            self.assertEqual(fx.seen[0]["body"], {"p_game_uuid": "offered-local"})
+
+    def test_old_server_reply_without_created_is_not_adoptable(self):
+        with _Fixture() as fx:
+            fx.route(LINK_PATH, (200, {"game_uuid": "b-1", "resumed": True}))
+            result = ensure_link(post_json, fx.endpoint, _profile_session(),
+                                 game_uuid="offered-local")
+            self.assertTrue(result.linked)
+            self.assertFalse(result.created_present)
 
 
 class TestPostJsonShapes(unittest.TestCase):

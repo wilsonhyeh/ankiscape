@@ -35,6 +35,7 @@ import hmac
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,6 +45,9 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from evolved.journal import canonical_json  # noqa: E402
+
+_UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 
 def _load_module(name: str, rel_path: str):
@@ -324,16 +328,31 @@ def _sign_in(transport: Transport, email: str, password: str) -> str:
 
 
 def _submit_trace(transport: Transport, user_token: str, game_uuid: str,
-                  trace: Dict[str, Any], batch_size: int) -> Tuple[int, int]:
-    transport.request("POST", "/rest/v1/rpc/link_game",
-                      body={"p_game_uuid": game_uuid}, token=user_token,
-                      expect=(200,))
+                  trace: Dict[str, Any], batch_size: int) -> Tuple[int, int, str]:
+    """Link, then replay the trace under the SERVER-owned game uuid.
+
+    D5: p_game_uuid is offered only; the reply's `game_uuid` is adopted and is
+    the only game id used for the submits (S11/S16). `created` is a
+    key-presence rule, never `created is True`, and resumed/created are pinned
+    complementary so a resuming rerun is accepted too. Returns
+    (accepted, total_ops, adopted_game_uuid)."""
+    reply = transport.request("POST", "/rest/v1/rpc/link_game",
+                              body={"p_game_uuid": game_uuid}, token=user_token,
+                              expect=(200,))
+    reply = reply if isinstance(reply, dict) else {}
+    created = reply.get("created")
+    adopted = str(reply.get("game_uuid") or "")
+    if (created is not True and created is not False) \
+            or reply.get("resumed") != (not created) \
+            or not _UUID_RE.match(adopted):
+        raise DemoError(f"link_game reply violates the created/resumed pin "
+                        f"for {trace['display']}: {reply!r}")
     accepted_total = 0
     for index in range(0, len(trace["ops"]), batch_size):
         batch = trace["ops"][index:index + batch_size]
         data = transport.request(
             "POST", "/rest/v1/rpc/submit_operations",
-            body={"p_game_uuid": game_uuid, "p_ops": batch},
+            body={"p_game_uuid": adopted, "p_ops": batch},
             token=user_token, expect=(200,))
         accepted = data.get("accepted") if isinstance(data, dict) else None
         conflicts = data.get("conflicts") if isinstance(data, dict) else None
@@ -341,7 +360,7 @@ def _submit_trace(transport: Transport, user_token: str, game_uuid: str,
             raise DemoError(f"conflicts while seeding {trace['display']}: "
                             f"{conflicts[:2]}")
         accepted_total += len(accepted or [])
-    return accepted_total, len(trace["ops"])
+    return accepted_total, len(trace["ops"]), adopted
 
 
 def _server_xp(transport: Transport, user_token: str,
@@ -376,7 +395,7 @@ def _publish_demo(transport: Transport, norm: str, user_id: str) -> None:
 
 
 def _upsert_registry(transport: Transport, trace: Dict[str, Any],
-                     user_id: str) -> None:
+                     user_id: str, *, game_uuid: str) -> None:
     transport.request(
         "POST", "/rest/v1/fixture_registry",
         params={"on_conflict": "suite_id,suite_version,username_norm"},
@@ -384,7 +403,7 @@ def _upsert_registry(transport: Transport, trace: Dict[str, Any],
               "suite_version": demo_traces.SUITE_VERSION,
               "username_norm": trace["username_norm"],
               "user_id": user_id or None,
-              "game_uuid": trace["game_uuid"],
+              "game_uuid": game_uuid,
               "expected_trace_hash": trace["trace_hash"],
               "reserved_email": trace["email"],
               "seed_state": "verified"},
@@ -479,7 +498,8 @@ def cmd_apply(args) -> int:
                 raise DemoError(
                     f"{norm} already exists but is not registry-owned; "
                     "refusing to adopt or modify it")
-            _upsert_registry(transport, trace, candidate_id)
+            _upsert_registry(transport, trace, candidate_id,
+                             game_uuid=str(player.get("game_uuid") or ""))
             adopted_user_id = candidate_id
             print(f"demo apply: {norm:<12} adopted a partial identity from "
                   "an earlier run")
@@ -508,15 +528,15 @@ def cmd_apply(args) -> int:
                          password_for(secret, trace["display"]))
         batch_size = int((demo_traces.load_suite().get("trace") or {})
                          .get("batch_size", 200))
-        accepted, total = _submit_trace(transport, token, trace["game_uuid"],
-                                        trace, batch_size)
-        xp = _server_xp(transport, token, trace["game_uuid"])
+        accepted, total, game_uuid = _submit_trace(
+            transport, token, trace["game_uuid"], trace, batch_size)
+        xp = _server_xp(transport, token, game_uuid)
         problems = _score_problems(trace["expected"], xp)
         if problems:
             raise DemoError(f"score mismatch for {norm}: "
                             + "; ".join(problems[:4]))
         _publish_demo(transport, norm, user_id)
-        _upsert_registry(transport, trace, user_id)
+        _upsert_registry(transport, trace, user_id, game_uuid=game_uuid)
         completed[f"demo:{norm}"] = {"user_id": user_id,
                                      "accepted": accepted,
                                      "ops": total,
@@ -602,11 +622,22 @@ def cmd_verify(args) -> int:
         state = profile.get("state")
         if not isinstance(state, dict) or set(state.keys()) != {"xp"}:
             failures.append(f"{display} profile state is not the xp wrapper")
-    # Sign-in + authoritative state per demo.
+    # Sign-in + authoritative state per demo. D5: link first and read state
+    # for the SERVER-owned uuid only (S16); the trace uuid is just the offered
+    # argument, never the identity.
     for display, trace in traces.items():
         token = _sign_in(transport, trace["email"],
                          password_for(secret, display))
-        xp = _server_xp(transport, token, trace["game_uuid"])
+        reply = transport.request("POST", "/rest/v1/rpc/link_game",
+                                  body={"p_game_uuid": trace["game_uuid"]},
+                                  token=token, expect=(200,))
+        reply = reply if isinstance(reply, dict) else {}
+        game_uuid = str(reply.get("game_uuid") or "")
+        if "created" not in reply or not _UUID_RE.match(game_uuid):
+            failures.append(f"{display}: link_game reply violates the "
+                            "created/game_uuid contract")
+            continue
+        xp = _server_xp(transport, token, game_uuid)
         counts["players"] += 1
         problems = _score_problems(trace["expected"], xp)
         if problems:

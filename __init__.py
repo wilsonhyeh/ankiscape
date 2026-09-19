@@ -33,7 +33,14 @@ from .logic_pure import (
     can_mine_ore_pure,
     can_cut_tree_pure,
 )
-from .logic import level_up_check, check_achievements, calculate_woodcutting_probability, calculate_mining_probability
+from .logic import (
+    level_up_check,
+    check_achievements,
+    show_level_up_popups,
+    show_achievement_popups,
+    calculate_woodcutting_probability,
+    calculate_mining_probability,
+)
 from .ui import (
     ExpPopup,
     show_error_message,
@@ -225,9 +232,15 @@ def on_crafting_answer():
     # Update player data and UI
     player_data["inventory"] = new_inv
     player_data["crafting_exp"] += exp_gained
-    level_up_check("Crafting", player_data)
-    check_achievements(player_data)
+    # Durability (D-3): finish every state mutation and persist BEFORE any modal
+    # dialog runs — a UI failure must never discard a credited reward or abort
+    # the answer. Presentation is best-effort and happens after the save.
+    levels_gained = level_up_check("Crafting", player_data)
+    achievements = check_achievements(player_data)
     save_player_data()
+
+    show_level_up_popups("Crafting", levels_gained)
+    show_achievement_popups(achievements)
 
     # Refresh availability for Crafting/Smithing in the open menu (enables, never auto-selects)
     try:
@@ -366,9 +379,14 @@ def on_smithing_answer():
 
     player_data["inventory"] = new_inv
     player_data["smithing_exp"] += exp_gained
-    level_up_check("Smithing", player_data)
-    check_achievements(player_data)
+    # Durability (D-3): persist before any modal dialog — a UI failure must
+    # never discard a credited reward or abort the answer.
+    levels_gained = level_up_check("Smithing", player_data)
+    achievements = check_achievements(player_data)
     save_player_data()
+
+    show_level_up_popups("Smithing", levels_gained)
+    show_achievement_popups(achievements)
 
     # Refresh availability for Crafting/Smithing in the open menu after smelting
     try:
@@ -399,9 +417,14 @@ def on_woodcutting_answer():
         player_data["logs_cut_today"] += 1
         player_data["inventory"] = new_inv
         player_data["woodcutting_exp"] += exp_gained
-        level_up_check("Woodcutting", player_data)
-        check_achievements(player_data)
+        # Durability (D-3): persist before any modal dialog — a UI failure must
+        # never discard a credited reward or abort the answer.
+        levels_gained = level_up_check("Woodcutting", player_data)
+        achievements = check_achievements(player_data)
         save_player_data()
+
+        show_level_up_popups("Woodcutting", levels_gained)
+        show_achievement_popups(achievements)
 
     _show_exp(exp_gained)
 
@@ -440,9 +463,14 @@ def on_good_answer():
             player_data["ores_mined_today"] += 1
             player_data["inventory"] = new_inv
             player_data["mining_exp"] += exp_gained
-            level_up_check("Mining", player_data)
-            check_achievements(player_data)
+            # Durability (D-3): persist before any modal dialog — a UI failure must
+            # never discard a credited reward or abort the answer.
+            levels_gained = level_up_check("Mining", player_data)
+            achievements = check_achievements(player_data)
             save_player_data()
+
+            show_level_up_popups("Mining", levels_gained)
+            show_achievement_popups(achievements)
 
             # If the main menu is open, auto-enable Smithing/Crafting when they become possible.
             _refresh_skill_availability()
@@ -817,7 +845,7 @@ _EVOLVED_CTX: dict = {"engine": None, "journal": None, "game_uuid": None,
                        "generation": 0, "user_id": None, "profile_session": None,
                        "sync_service": None, "endpoint": None,
                        "endpoint_dev": None, "self_context": None,
-                       "account_epoch": 0, "deletion": None,
+                       "capabilities": {}, "account_epoch": 0, "deletion": None,
                        "deletion_blocked_user": None}
 
 # In-flight account/sync worker count. Deletion cleanup waits for zero
@@ -1740,29 +1768,73 @@ def _evolved_hiscores_cache_set(skill: str, payload: dict,
     _EVOLVED_CTX["hiscores_cache"] = cache
 
 
-def _evolved_is_test_cohort() -> bool:
-    """Server-reported cohort for the signed-in account. Never a client
-    flag: a cached self_context from /rpc/self_context, defaulting to the
-    public cohort when unavailable."""
+def _evolved_self_context() -> dict:
+    """Server-reported caller context for the signed-in account, cached per
+    user in `_EVOLVED_CTX["self_context"]` (S1). Empty dict when unavailable:
+    logged out, older server, offline or malformed."""
     try:
         sess = _evolved_profile_session()
         if sess is None or not sess.logged_in:
-            return False
+            return {}
         cache = _EVOLVED_CTX.get("self_context")
         if isinstance(cache, dict) and cache.get("user_id") == sess.user_id:
-            return bool(cache.get("is_test"))
+            return cache
         from .evolved.service import fetch_self_context
         from .evolved.net import post_json as _post
         endpoint = _evolved_endpoint()
         if endpoint is None:
-            return False
+            return {}
         context = fetch_self_context(_post, endpoint, sess)
         if not isinstance(context, dict):
-            return False
-        _EVOLVED_CTX["self_context"] = {"user_id": sess.user_id, **context}
-        return bool(context.get("is_test"))
+            return {}
+        cached = {"user_id": sess.user_id, **context}
+        _EVOLVED_CTX["self_context"] = cached
+        return cached
     except Exception:
-        return False
+        return {}
+
+
+def _evolved_is_test_cohort() -> bool:
+    """Server-reported cohort for the signed-in account. Never a client
+    flag: the cached self_context from /rpc/self_context, defaulting to the
+    public cohort when unavailable."""
+    return bool((_evolved_self_context() or {}).get("is_test"))
+
+
+def _evolved_get_evolved_capabilities() -> dict:
+    """S1: the cached raw capabilities as per-key tri-state.
+
+    {"<key>": {"state": "known", "value": <raw>}} after a successful reply,
+    {"<key>": {"state": "unknown"}} otherwise. Never raises; an absent cache
+    (before the first successful fetch) is empty, which hides the control.
+    """
+    cache = _EVOLVED_CTX.get("capabilities")
+    return cache if isinstance(cache, dict) else {}
+
+
+def _evolved_get_self_context() -> dict:
+    """S1: the cached self_context dict, or {} when unknown."""
+    cache = _EVOLVED_CTX.get("self_context")
+    return cache if isinstance(cache, dict) else {}
+
+
+def _evolved_set_board_visibility(visible: bool) -> dict:
+    """D7/S1: the only write route for the public-board flag."""
+    try:
+        from .evolved.net import post_json as _post
+        from .evolved.service import set_board_visibility
+        sess = _EVOLVED_CTX.get("profile_session")
+        endpoint = _evolved_endpoint()
+        if sess is None or not getattr(sess, "logged_in", False) \
+                or endpoint is None:
+            return {"ok": False, "error": "logged_out"}
+        value = set_board_visibility(_post, endpoint, sess, bool(visible))
+        cache = _EVOLVED_CTX.get("self_context")
+        if isinstance(cache, dict):
+            cache["visible_on_board"] = bool(value)
+        return {"ok": True, "visible_on_board": bool(value)}
+    except Exception as exc:
+        return {"ok": False, "error": repr(exc)[:200]}
 
 
 def _evolved_query_hiscores_async(skill: str, limit: int, on_done,
@@ -2215,6 +2287,7 @@ def _evolved_account_context():
             on_delete=_evolved_begin_account_deletion,
             on_delete_check=_evolved_check_account_deletion,
             on_delete_retry_local=_evolved_retry_local_deletion_cleanup,
+            register_notice_variant=_evolved_register_notice_variant,
         )
     except Exception:
         return None
@@ -2277,56 +2350,338 @@ def _evolved_show_email_verified() -> None:
         pass
 
 
-def _evolved_post_auth_coordinator(reason: str = "login") -> bool:
-    """The one post-auth path for signup verification, login, reset and
-    remembered-session restoration: verify the session, link the game with
-    the authoritative idempotent RPC, persist the local binding, then request
-    sync. Login success stays success even when linkage fails. Returns True
-    when link/sync work was scheduled."""
+def _evolved_pointer() -> dict:
+    """The profile's game pointer, read fresh (never cached)."""
     try:
-        engine = _ensure_evolved_engine()
-        if engine is None:
+        col = getattr(mw, "col", None)
+        if col is None:
+            return {}
+        pointer = col.get_config("ankiscape_evolved_player_data", None)
+        return dict(pointer) if isinstance(pointer, dict) else {}
+    except Exception:
+        return {}
+
+
+def _evolved_set_pointer_slots(slots: dict) -> bool:
+    """S7/R14 step 5: merge the two-game slots into the pointer without
+    touching the active game. Creates the pointer skeleton when the profile
+    has none yet (account-first install)."""
+    try:
+        col = getattr(mw, "col", None)
+        if col is None or not slots:
             return False
-        game_uuid = engine.cfg.game_uuid
-        journal = engine.journal
+        pointer = _evolved_pointer()
+        if not pointer:
+            pointer = {"version": 1, "game_uuid": "", "activated_at": 0,
+                       "snapshot_revision": 0}
+        pointer.update({str(k): str(v) for k, v in slots.items()})
+        col.set_config("ankiscape_evolved_player_data", pointer,
+                       undoable=False)
+        return True
     except Exception:
         return False
+
+
+def _evolved_journal_for_game(game_uuid: str, *, create: bool = True):
+    """Open the journal at this game's canonical path.
+
+    `create=False` never materializes a journal for a game that has none —
+    the drain path must not create files (materialization is its own,
+    deliberate step)."""
+    from .evolved.journal import Journal, journal_path_for_profile
+    game_uuid = str(game_uuid or "")
+    if not game_uuid:
+        return None
+    profile_dir = None
+    try:
+        pm = getattr(mw, "pm", None)
+        if pm is not None and hasattr(pm, "profileFolder"):
+            profile_dir = pm.profileFolder()
+    except Exception:
+        profile_dir = None
+    if not profile_dir:
+        return None
+    try:
+        path = journal_path_for_profile(profile_dir, game_uuid)
+        if not create and not os.path.exists(path):
+            return None
+        return Journal(path)
+    except Exception:
+        return None
+
+
+def _evolved_bootstrap_download(*, endpoint, session, game_uuid: str) -> int:
+    """R14 step 4: durable download-first materialization.
+
+    Pull the account game's whole history into its (fresh) journal BEFORE it
+    is activated. Nothing is imported into the local game and nothing is
+    deleted. Returns the number of operations stored.
+    """
+    journal = _evolved_journal_for_game(game_uuid)
+    if journal is None:
+        return 0
+    stored = 0
+    try:
+        from .evolved.net import post_json as _post
+        from .evolved.service import ServiceConfig, make_transport
+        transport = make_transport(ServiceConfig(endpoint=endpoint,
+                                                 game_uuid=game_uuid,
+                                                 post=_post), session)
+        download = transport["download"]
+        cursor = "0"
+        for _page in range(1000):  # bounded paging
+            page = download(cursor)
+            if not isinstance(page, dict) or page.get("status") != "ok":
+                break
+            ops = page.get("operations") or []
+            if ops:
+                journal.ingest_remote_page(game_uuid, page)
+                stored += len(ops)
+            next_cursor = str(page.get("next_cursor") or "")
+            if not page.get("has_more") or next_cursor in ("", cursor):
+                break
+            cursor = next_cursor
+    except Exception:
+        pass
+    finally:
+        try:
+            journal.close()
+        except Exception:
+            pass
+    return stored
+
+
+def _evolved_swap_active_game(game_uuid: str) -> bool:
+    """D3/R14 step 7: point the profile at this game and rebuild the engine.
+
+    Modeled on the restore-backup pointer swap: close the old journal, write
+    the pointer, clear the context, rebuild."""
+    game_uuid = str(game_uuid or "")
+    if not game_uuid:
+        return False
+    try:
+        col = getattr(mw, "col", None)
+        if col is None:
+            return False
+        pointer = _evolved_pointer()
+        if not pointer:
+            # S12 account-first install: the pointer itself is created here,
+            # after the account game was materialized and downloaded.
+            now = int(time.time())
+            pointer = {"version": 1, "game_uuid": game_uuid,
+                       "activated_at": now, "snapshot_revision": 0,
+                       "preset": {"skill": "mining", "effective_ts": now}}
+            col.set_config("ankiscape_evolved_player_data", pointer,
+                           undoable=False)
+            _ensure_evolved_engine()
+            _evolved_refresh_views()
+            return True
+        if str(pointer.get("game_uuid") or "") == game_uuid:
+            return True
+        now = int(time.time())
+        pointer.update({
+            "version": int(pointer.get("version", 1) or 1),
+            "game_uuid": game_uuid,
+            "activated_at": int(pointer.get("activated_at", 0) or now),
+            "snapshot_revision": int(pointer.get("snapshot_revision", 0) or 0),
+        })
+        pointer.setdefault("preset", {"skill": "mining",
+                                      "effective_ts": now})
+        col.set_config("ankiscape_evolved_player_data", pointer,
+                       undoable=False)
+        engine = _EVOLVED_CTX.get("engine")
+        if engine is not None:
+            try:
+                engine.journal.close()
+            except Exception:
+                pass
+        _EVOLVED_CTX.update({"engine": None, "journal": None,
+                             "game_uuid": None, "sync_service": None})
+        _ensure_evolved_engine()
+        _evolved_refresh_views()
+        return True
+    except Exception:
+        return False
+
+
+def _evolved_adopt_account_game(*, account_uuid: str, prior_active: str,
+                                user_id: str) -> bool:
+    """S7/S12 placement, run on the main thread after a successful link.
+
+    1. retire the demoted local game's outbox (the S4 guard scopes it; a
+       bound journal — the account game's — is untouched),
+    2. record the two-game slots,
+    3. swap the active pointer to the account game (D3),
+    4. persist the binding in the ACCOUNT game's journal carrying the
+       ACCOUNT game's uuid, then request sync.
+    """
+    from .evolved import onboarding as _onb
+    from .evolved.link import LinkResult, persist_binding
+
+    account_uuid = str(account_uuid or "")
+    if not account_uuid:
+        return False
+    prior_active = str(prior_active or "")
+    if prior_active and prior_active != account_uuid:
+        local_journal = _evolved_journal_for_game(prior_active, create=False)
+        if local_journal is not None:
+            try:
+                local_journal.retire_outbox()
+            except Exception:
+                pass
+            finally:
+                try:
+                    local_journal.close()
+                except Exception:
+                    pass
+    _evolved_set_pointer_slots(_onb.link_slots(prior_active=prior_active,
+                                               account_game_uuid=account_uuid))
+    if not _evolved_swap_active_game(account_uuid):
+        return False
+    journal = _EVOLVED_CTX.get("journal")
+    endpoint = _evolved_endpoint()
+    result = LinkResult(True, "linked", created=True, created_present=True,
+                        game_uuid=account_uuid)
+    persist_binding(journal, result, game_uuid=account_uuid,
+                    user_id=str(user_id or ""),
+                    endpoint_project=str(getattr(endpoint, "base_url", "") or ""))
+    _evolved_request_sync(reason="login", immediate=True)
+    return True
+
+
+def _evolved_register_notice_variant() -> str:
+    """S13: the operational register-notice variant, gathered from the
+    pointer/binding/slots and the journal's existence only."""
+    from .evolved import onboarding as _onb
+    from .evolved.journal import journal_path_for_profile
+    from .evolved.link import read_binding
+
+    pointer = _evolved_pointer()
+    game_uuid = str(pointer.get("game_uuid") or "")
+    account_slot = str(pointer.get("account_game_uuid") or "")
+    journal_exists = False
+    journal_has_binding = False
+    if game_uuid:
+        try:
+            import os as _os
+            pm = getattr(mw, "pm", None)
+            profile_dir = None
+            if pm is not None and hasattr(pm, "profileFolder"):
+                profile_dir = pm.profileFolder()
+            if profile_dir:
+                path = journal_path_for_profile(profile_dir, game_uuid)
+                journal_exists = bool(_os.path.exists(path))
+                if journal_exists:
+                    journal = _evolved_journal_for_game(game_uuid, create=False)
+                    if journal is not None:
+                        try:
+                            journal_has_binding = read_binding(journal) is not None
+                        finally:
+                            journal.close()
+        except Exception:
+            journal_exists = False
+            journal_has_binding = False
+    return _onb.register_notice_variant(
+        pointer=pointer, journal_exists=journal_exists,
+        journal_has_binding=journal_has_binding,
+        account_game_uuid=account_slot)
+
+
+def _evolved_post_auth_coordinator(reason: str = "login") -> bool:
+    """The one post-auth path for signup verification, login, reset and
+    remembered-session restoration.
+
+    Two-game model (D1-D5): the server owns the account game's uuid; login
+    links, MATERIALIZES (download history into a fresh journal), adopts and
+    ACTIVATES the account game, and demotes the local game to its own slot
+    without importing or deleting anything. The demoted unbound local game's
+    outbox is retired (S4); the account game's journal is never drained.
+    Login success stays success even when linkage fails. Returns True when
+    link/sync work was scheduled.
+    """
+    from .evolved import onboarding as _onb
+
+    engine = _ensure_evolved_engine()
+    pointer = _evolved_pointer()
+    pointer_uuid = str(pointer.get("game_uuid") or "")
+    engine_uuid = ""
+    try:
+        if engine is not None:
+            engine_uuid = str(engine.cfg.game_uuid or "")
+    except Exception:
+        engine_uuid = ""
+    offered_uuid = _onb.coordinator_offer_uuid(
+        engine_uuid=engine_uuid, pointer_uuid=pointer_uuid,
+        engine_available=engine is not None)
+    if not offered_uuid:
+        # S12: a game exists but its engine did not build — the genuine
+        # failure early return, not the account-first case.
+        return False
+    prior_active = engine_uuid or pointer_uuid
     epoch = _evolved_account_epoch()
     _EVOLVED_CTX["link_state"] = "linking"
-    _EVOLVED_CTX["link_message"] = "Linking this game to your account\u2026"
+    _EVOLVED_CTX["link_message"] = "Setting up your account game\u2026"
     _evolved_refresh_views()
 
     def work():
         from .evolved.net import post_json as _post
-        from .evolved.link import ensure_link, persist_binding
+        from .evolved.link import ensure_link, link_reply_adoptable
+        from .evolved.service import fetch_capabilities, fetch_self_context
         sess = _EVOLVED_CTX.get("profile_session")
         endpoint = _evolved_endpoint()
         if sess is None or endpoint is None or not sess.logged_in:
             return {"state": "logged_out",
                     "message": "Not signed in; progress is saved here."}
-        result = ensure_link(_post, endpoint, sess, game_uuid=game_uuid,
+        result = ensure_link(_post, endpoint, sess, game_uuid=offered_uuid,
                              refresh=lambda: sess.refresh_once())
         if _evolved_account_epoch() != epoch:
             # A deletion fenced this identity while the request was in
             # flight: never recreate a binding for it.
             return {"state": "logged_out",
                     "message": "This account's local link was cleared."}
-        if result.linked:
-            persist_binding(journal, result, game_uuid=game_uuid,
-                            user_id=sess.user_id or "",
-                            endpoint_project=endpoint.base_url)
-        return {"state": result.state, "message": result.message,
-                "linked": result.linked, "reason": reason}
+        if not result.linked:
+            return {"state": result.state, "message": result.message}
+        if not link_reply_adoptable(result):
+            # S11: without the `created` key or a uuid-shaped return the
+            # reply is an old server's; never adopt an unconfirmed uuid.
+            return {"state": "service_error",
+                    "message": "Update AnkiScape to set up sync for this "
+                               "account."}
+        account_uuid = result.game_uuid
+        # S1: login re-fetches the context eagerly.
+        capabilities = fetch_capabilities(_post, endpoint, sess)
+        context = fetch_self_context(_post, endpoint, sess)
+        # R14 step 4: download the account game's history into its fresh
+        # journal BEFORE the swap activates it.
+        materialized = _evolved_bootstrap_download(
+            endpoint=endpoint, session=sess, game_uuid=account_uuid)
+        return {"state": "linked", "message": "Progress sync is on.",
+                "linked": True, "reason": reason,
+                "account_uuid": account_uuid, "prior_active": prior_active,
+                "capabilities": capabilities, "self_context": context,
+                "materialized": materialized}
 
     def deliver(out):
         out = out if isinstance(out, dict) else {"state": "service_error"}
         if _evolved_account_epoch() != epoch:
             _evolved_refresh_views()
             return
+        if isinstance(out.get("capabilities"), dict):
+            _EVOLVED_CTX["capabilities"] = dict(out["capabilities"])
+        context = out.get("self_context")
+        if isinstance(context, dict):
+            sess = _EVOLVED_CTX.get("profile_session")
+            if sess is not None:
+                _EVOLVED_CTX["self_context"] = {
+                    "user_id": sess.user_id, **context}
         _EVOLVED_CTX["link_state"] = str(out.get("state", "service_error"))
         _EVOLVED_CTX["link_message"] = str(out.get("message", ""))
-        if out.get("linked"):
-            _evolved_request_sync(reason="link", immediate=True)
+        if out.get("linked") and out.get("account_uuid"):
+            _evolved_adopt_account_game(
+                account_uuid=str(out["account_uuid"]),
+                prior_active=str(out.get("prior_active") or ""),
+                user_id=str(getattr(_EVOLVED_CTX.get("profile_session"),
+                                    "user_id", "") or ""))
         _evolved_refresh_views()
 
     _evolved_account_runner(work, deliver)
@@ -2354,6 +2709,14 @@ def _evolved_logout() -> dict:
         _EVOLVED_CTX["link_state"] = "logged_out"
         _EVOLVED_CTX["link_message"] = ""
         _EVOLVED_CTX["remote_ops_dirty"] = False
+        # S1: account-scoped context reads no longer describe this profile.
+        _EVOLVED_CTX["capabilities"] = {}
+        _EVOLVED_CTX["self_context"] = None
+        # D3: logout swaps the active pointer back to the local game.
+        pointer = _evolved_pointer()
+        local_uuid = str(pointer.get("local_game_uuid") or "")
+        if local_uuid:
+            _evolved_swap_active_game(local_uuid)
         _evolved_refresh_views()
         return {"ok": True}
     except Exception as exc:
@@ -2389,6 +2752,11 @@ def _evolved_shell_deps() -> dict:
         "get_diagnostics": _evolved_diagnostics,
         "get_settings": _evolved_get_settings,
         "apply_setting": _evolved_apply_setting,
+        "get_evolved_capabilities": _evolved_get_evolved_capabilities,
+        "get_self_context": _evolved_get_self_context,
+        "on_board_visibility": _evolved_set_board_visibility,
+        "on_delete_account": lambda: _evolved_account_window("delete"),
+        "register_notice_variant": _evolved_register_notice_variant,
         "onboarding_active": _evolved_onboarding_active,
         "get_onboarding": _evolved_onboarding_dict,
         "save_onboarding": _evolved_onboarding_save,
@@ -2529,6 +2897,12 @@ def _evolved_sync_service():
         from .evolved.service import ServiceConfig, SyncService, make_transport
         from .evolved.net import post_json as _post
         game_uuid = engine.cfg.game_uuid
+        pointer = _evolved_pointer()
+        account_slot = str(pointer.get("account_game_uuid") or "")
+        if not account_slot or account_slot != game_uuid:
+            # D2: attribution follows the ACTIVE GAME. The local (offline)
+            # game never uploads, even while signed in.
+            return None
         cached = _EVOLVED_CTX.get("sync_service")
         if (cached is not None
                 and _EVOLVED_CTX.get("sync_service_game") == game_uuid
@@ -2538,6 +2912,22 @@ def _evolved_sync_service():
         journal = engine.journal
         cfg = ServiceConfig(endpoint=endpoint, game_uuid=game_uuid, post=_post)
         transport = make_transport(cfg, sess)
+        # S1: the transport fetched capabilities eagerly; fetch the caller
+        # context alongside it so BOTH payloads are cached at service
+        # construction (never waiting for the first upload).
+        try:
+            _EVOLVED_CTX["capabilities"] = dict(
+                transport.get("capabilities") or {})
+        except Exception:
+            pass
+        try:
+            from .evolved.service import fetch_self_context
+            context = fetch_self_context(_post, endpoint, sess)
+            if isinstance(context, dict):
+                _EVOLVED_CTX["self_context"] = {"user_id": sess.user_id,
+                                                **context}
+        except Exception:
+            pass
         rt = _runtime_mod.get_runtime()
         gen = int(rt.generation or 0)
         try:
@@ -3669,20 +4059,11 @@ def _ensure_evolved_engine():
             # This game is pending deletion: do not bind or recreate it.
             return None
     if not game_uuid:
-        game_uuid = str(_uuid.uuid4())
-        # New identities activate NOW: reviews taken before this moment are
-        # never eligible retroactively (setup completion stamps this too).
-        activated_at = activated_at or int(time.time())
-        try:
-            if col is not None:
-                col.set_config("ankiscape_evolved_player_data",
-                               {"version": 1, "game_uuid": game_uuid,
-                                "activated_at": activated_at,
-                                "snapshot_revision": 0,
-                                "preset": {"skill": "mining", "effective_ts": activated_at}},
-                               undoable=False)
-        except Exception:
-            pass
+        # R13: a null active pointer never mints. The remaining mint sites are
+        # the offline setup commit, the login coordinator's account-game
+        # materialization, and the deliberate logout swap. An account-first
+        # install renders the first-run screen instead of an empty shell.
+        return None
     if _EVOLVED_CTX.get("engine") is not None and _EVOLVED_CTX.get("game_uuid") == game_uuid:
         return _EVOLVED_CTX["engine"]
     device_id = "desktop"
