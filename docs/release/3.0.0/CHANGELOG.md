@@ -41,6 +41,10 @@ nothing.
 - Remembered sign-in uses the OS credential vault when one is available,
   otherwise session-only. Passwords are never stored.
 - Anki compatibility remains 23.10+ on Qt5/Qt6 (macOS/Linux/Windows).
+- A level-up that crosses several levels at once shows **one** dialog naming the
+  level reached, instead of one dialog per level. Profiles upgraded from 2.x
+  store levels and XP that can be out of step with each other, so a single
+  review could otherwise open nineteen dialogs back to back.
 
 ## Account & identity (3.0.0 rework)
 
@@ -77,3 +81,7 @@ nothing.
 - Mined gems are written to the Bank (jewelry crafting reachable); cooking
   obeys its level gate in every replay path.
 - Recovery warning clears after a successful pending write.
+- A reward is saved before any celebration dialog opens. Previously a level-up
+  or achievement popup that failed could discard XP the review had already
+  earned and abort the answer; the reward is durable first now, and the popups
+  are best-effort.
