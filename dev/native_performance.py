@@ -303,6 +303,7 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
                 "settled_increase_mib": endurance_report.get("settled_increase_mib"),
                 "duration_min": endurance_report.get("duration_min"),
                 "baseline_rss_mib": endurance_report.get("baseline_rss_mib"),
+                "answers": endurance_report.get("answers"),
                 "samples": endurance_report.get("sample_count"),
                 "window_samples": endurance_report.get("window_samples"),
                 "sample_cadence_s": endurance_report.get("sample_cadence_s"),

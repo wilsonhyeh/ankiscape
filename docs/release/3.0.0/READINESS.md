@@ -22,18 +22,35 @@ Nightly `35464480415` (dispatched 2026-09-19 on `7471f71`) is the most recent
 nightly and the first with an admissible record: `source.dirty: false`, schema
 v2, `exit_status: 0`. Its `build`, `shared` and `backend` roles passed —
 including `account-contracts`, which had never passed in this repository. Its
-`hosted` role **failed**, and the failure is the un-applied `0011`:
+`hosted` role **failed**, and that failure was the un-applied `0011` — now
+resolved (see below):
 
 ```
 demo_players: BLOCKED: link_game reply violates the created/resumed pin for
 DemoWillow: {'resumed': True, 'game_uuid': '4b3fd130-…'}
 ```
 
-The hosted database still runs the pre-`0011` `link_game`, which returns no
-`created` field. Until `0011` and `0012` are applied hosted, the nightly's
-`hosted` role and therefore its `aggregate` cannot pass — and `release-verify`
-has the same dependency, since it runs a `hosted` job too. Applying those two
-migrations is the critical path to a frozen candidate.
+**Resolved 2026-09-19.** `0011_account_identity_rework.sql` and
+`0012_service_role_table_grants.sql` are applied hosted to
+`vjqzamuogcughdvzskmf` (`ankiscape`), and the hosted role now passes: nightly
+`35468225639` on `44e933c` reports
+`Trusted hosted fixture role (real backend): success` — the first time that
+role has ever gone green in this repository. Capability advertisement was
+verified independently (`evolved_capabilities` returns
+`board_visibility: true`, `protocol_version: 2`), and the public demo board
+still serves through `hiscores()` with all five demos ranked. The critical
+path is therefore no longer the migration; it is `release-verify` on a frozen
+candidate.
+
+**The two-hour endurance shape was also defective and is fixed.** The
+endurance journey seeded a flat 8 cards while the scenario meant to answer
+~14,400 (2/s for 120 minutes), so the queue emptied, Anki showed "finished
+this deck", and the driver idled outside the reviewer for the rest of the run
+— while the memory trend, which asserted nothing about reviews, still
+reported `pass: true`. `dev/e2e/driver_addon/__init__.py` now seeds the full
+demand up front and lifts the per-day cap to cover it, and
+`dev/endurance_metrics.py` fails such a run as `no_answers_measured`. No
+release-verify lane has yet run the corrected shape.
 
 Deploy note: the Edge Functions were not modified by this release
 (`git diff c29e2f0..7471f71 -- server/supabase/functions/` is empty), so the
@@ -44,15 +61,15 @@ hosted step is `supabase db push` only — no function deploy is required.
 | Requirement | Status | Evidence |
 |---|---|---|
 | Seven native targets (macOS/Windows/Linux × oldest/current, Qt5+Qt6) | pending | release-verify `lanes` |
-| Native performance + two-hour endurance per target | pending | `native-performance` / `endurance-2h` metrics |
+| Native performance + two-hour endurance per target | pending — shape corrected 2026-09-19 (see above); no lane has run it yet | `native-performance` / `endurance-2h` metrics |
 | Shared checks + engine benchmarks | pending | `shared` record |
 | Linux backend: suite, parity, account contracts, sync, full mutation | pending | `backend` record |
 | Public demo board: five labeled demos, retried 24-account suite retired | pending | `hosted` record + `dev/demo_players.py --verify` |
 | Account identity: two-game model (local vs account), server-owned game uuid, login adoption, retired local outbox never uploaded, durable download-first sync, ten-second scheduling | pending | ui-account-lifecycle lane records + dev/account_journey_e2e.py + tests/test_bricked_recovery.py |
 | Hosted migrations 0008/0009 and `account-status`/`username-login` deploy | deployed 2026-09-13 | `RELEASE-SMOKE.md:242` |
 | Hosted migration 0010 and `account-delete` deploy (JWT verification ON) | deployed 2026-09-14 | `server/OPERATIONS.md:111` |
-| Hosted migration 0011 `account_identity_rework` | **pending — not yet applied hosted, and it is the critical path** | `server/supabase/migrations/0011_account_identity_rework.sql` |
-| Hosted migration 0012 `service_role_table_grants` | **pending — not yet applied hosted**; grants `service_role` the table/sequence DML the postgres-owned default ACL withholds, so the required `account-contracts` scenario can write fixtures. `anon`/`authenticated` unchanged | `server/supabase/migrations/0012_service_role_table_grants.sql` |
+| Hosted migration 0011 `account_identity_rework` | **deployed 2026-09-19** | `server/supabase/migrations/0011_account_identity_rework.sql`; nightly `35468225639` hosted role `success` |
+| Hosted migration 0012 `service_role_table_grants` | **deployed 2026-09-19**; grants `service_role` the table/sequence DML the postgres-owned default ACL withholds, so the required `account-contracts` scenario can write fixtures. `anon`/`authenticated` unchanged | `server/supabase/migrations/0012_service_role_table_grants.sql` |
 | Hosted native public browsing/labels per current OS | pending | `native-journeys` target requirements |
 | Real-inbox delivery (human) | blocked | Wilson |
 | AnkiMobile/AnkiDroid checklist (human) | blocked | Wilson |
