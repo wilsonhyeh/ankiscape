@@ -5316,10 +5316,47 @@ def _rss_mib():
             if not ok:
                 return None
             return round(counters.WorkingSetSize / (1024 * 1024), 1)
-        import resource
-        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return round(value / (1024 * 1024), 1) if sys.platform == "darwin" \
-            else round(value / 1024, 1)
+        # darwin/linux: CURRENT resident size, never getrusage().ru_maxrss.
+        # ru_maxrss is a high-water mark, so it never decreases: its "slope"
+        # is monotonic by construction and any transient peak anywhere in the
+        # run is locked into the evaluated window forever. Under that metric a
+        # perfectly healthy app reports an ever-rising trend, which is exactly
+        # what the two-hour shape was doing (528.0 MiB held flat for 15 min of
+        # reviews, then "growing" once the lifecycle churn moved the peak).
+        if sys.platform == "darwin":
+            import ctypes
+            import ctypes.util
+            libc = ctypes.CDLL(ctypes.util.find_library("System")
+                               or "/usr/lib/libSystem.B.dylib")
+
+            class _TimeValue(ctypes.Structure):
+                _fields_ = [("seconds", ctypes.c_int),
+                            ("microseconds", ctypes.c_int)]
+
+            class _MachTaskBasicInfo(ctypes.Structure):
+                _fields_ = [("virtual_size", ctypes.c_ulonglong),
+                            ("resident_size", ctypes.c_ulonglong),
+                            ("resident_size_max", ctypes.c_ulonglong),
+                            ("user_time", _TimeValue),
+                            ("system_time", _TimeValue),
+                            ("policy", ctypes.c_int),
+                            ("suspend_count", ctypes.c_int)]
+
+            libc.task_info.argtypes = [ctypes.c_uint, ctypes.c_int,
+                                       ctypes.c_void_p,
+                                       ctypes.POINTER(ctypes.c_uint)]
+            libc.task_info.restype = ctypes.c_int
+            task = ctypes.c_uint.in_dll(libc, "mach_task_self_").value
+            info = _MachTaskBasicInfo()
+            count = ctypes.c_uint(
+                ctypes.sizeof(info) // ctypes.sizeof(ctypes.c_int))
+            if libc.task_info(task, 20, ctypes.byref(info),
+                              ctypes.byref(count)) != 0:
+                return None
+            return round(info.resident_size / (1024 * 1024), 1)
+        with open("/proc/self/statm", encoding="ascii") as fh:
+            pages = int(fh.read().split()[1])
+        return round(pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024), 1)
     except Exception:
         return None
 

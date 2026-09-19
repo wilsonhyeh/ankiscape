@@ -52,6 +52,22 @@ demand up front and lifts the per-day cap to cover it, and
 `dev/endurance_metrics.py` fails such a run as `no_answers_measured`. No
 release-verify lane has yet run the corrected shape.
 
+**The memory metric itself was also wrong, and it was the cause of the reported
+endurance failure.** `_rss_mib()` sampled `getrusage().ru_maxrss`, which is the
+**maximum** resident set size -- a high-water mark that can only ever increase.
+Its "slope" was therefore monotonic by construction, any transient peak anywhere
+in the run was locked into the evaluated window permanently, and a negative
+slope was impossible to observe. That is exactly what the samples showed: RSS
+held at *precisely* 528.0 MiB across 15 minutes of reviews (1,263 answers), then
+"grew" only once the lifecycle churn pushed the peak higher. Measured against
+real current RSS the same shape reports `slope -8.811 MiB/min` and
+`growing_rss_change_mib -282.4` -- memory going **down**. The sampler now reads
+current resident size: `task_info(MACH_TASK_BASIC_INFO)` on macOS and
+`/proc/self/statm` on Linux (`ru_maxrss` is a peak on Linux too, so three of the
+seven targets shared the defect; Windows already used `WorkingSetSize`, which is
+current). The 1.0 MiB/min and 50 MiB limits are unchanged and still bite -- they
+now judge a signal that can move in both directions.
+
 Deploy note: the Edge Functions were not modified by this release
 (`git diff c29e2f0..7471f71 -- server/supabase/functions/` is empty), so the
 hosted step is `supabase db push` only — no function deploy is required.
