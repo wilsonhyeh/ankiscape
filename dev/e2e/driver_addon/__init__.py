@@ -4943,9 +4943,18 @@ def _poll_ui_account_lifecycle(state):
         _step("public_board_logged_out",
               cta is not None and cta.isVisible() and listing is not None,
               f"rows={len(rows)} status={text[:80]}")
+        # Require the REAL board, not merely the substring "Demo": the status
+        # line itself reads "Demo players are labeled ...", so the old check
+        # could be satisfied by placeholder text and passed with rows=2 against
+        # an unreachable endpoint. Name the expected demos explicitly, the same
+        # way the leaderboard journey does, and record what was actually seen.
+        demo_hits = sorted(n for n in DEMO_NAMES
+                           if any(n in r for r in rows))
         _step("demo_labels_visible",
-              any("Demo" in r for r in rows) or mode != "faults",
-              f"rows={len(rows)} status={text[:80]}")
+              (bool(demo_hits) and any("[Demo]" in r for r in rows))
+              or mode != "faults",
+              f"rows={len(rows)} demos={demo_hits} "
+              f"sample={rows[:3]} status={text[:60]}")
         _shot("ui-account-lifecycle-done")
         import ankiscape  # noqa: F401 (identity for the closure above)
         state["stage"] = "done"
