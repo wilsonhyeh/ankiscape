@@ -80,6 +80,17 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
 
     release = profile == "release"
     trend = profile in ("nightly", "release")
+    # A trend run must have actually reviewed something. The driver samples
+    # memory every 30 s whether or not the answer loop is running, so a run
+    # whose deck emptied produced a flat, entirely plausible-looking trend --
+    # and a pass -- while measuring an idle application. Never report that as
+    # evidence: an unanswered run fails loudly instead of going green.
+    answers = 0
+    for s in samples:
+        if isinstance(s, dict) and _finite(s.get("answers")):
+            answers = max(answers, int(float(s["answers"])))
+    if trend and answers <= 0:
+        failures.append("no_answers_measured")
     if release and duration_min < warmup_min + window_min:
         failures.append(
             f"release_window_required:{duration_min}<{warmup_min + window_min}")
@@ -91,7 +102,8 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
             "profile": profile, "duration_min": duration_min,
             "sample_count": len(samples), "window_min": None,
             "slope_mib_per_min": None, "settled_increase_mib": None,
-            "baseline_rss_mib": None, "eligible_for_release": False,
+            "baseline_rss_mib": None, "answers": answers,
+            "eligible_for_release": False,
             "pass": False, "failures": failures,
         }
 
@@ -104,7 +116,8 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
             "profile": profile, "duration_min": duration_min,
             "sample_count": 0, "window_min": None,
             "slope_mib_per_min": None, "settled_increase_mib": None,
-            "baseline_rss_mib": None, "eligible_for_release": False,
+            "baseline_rss_mib": None, "answers": answers,
+            "eligible_for_release": False,
             "pass": False, "failures": failures,
         }
     valid.sort(key=lambda s: float(s["at_s"]))
@@ -149,7 +162,8 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
             "profile": profile, "duration_min": duration_min,
             "sample_count": len(valid), "window_min": window_min,
             "slope_mib_per_min": None, "settled_increase_mib": None,
-            "baseline_rss_mib": baseline, "eligible_for_release": False,
+            "baseline_rss_mib": baseline, "answers": answers,
+            "eligible_for_release": False,
             "pass": False, "failures": failures,
         }
 
@@ -187,6 +201,7 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
         "settled_increase_mib": round(settled, 1),
         "baseline_rss_mib": round(baseline, 1),
         "sample_cadence_s": round(cadence, 1),
+        "answers": answers,
         "eligible_for_release": eligible,
         "pass": not failures, "failures": failures,
     }

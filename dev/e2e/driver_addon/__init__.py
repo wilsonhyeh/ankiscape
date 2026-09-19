@@ -863,7 +863,13 @@ def _seed_deck(state, deck="E2E Deck", count=5, prefix="E2E"):
     try:
         deck_id = col.decks.id(deck)
         col.decks.select(deck_id)
-        limits = _lift_deck_daily_limits(col, deck_id)
+        # The per-day cap must cover the cards this journey will actually
+        # answer. Raising it alone is not enough: a run whose deck holds
+        # fewer cards than it means to answer empties the queue, Anki shows
+        # "finished this deck", and the driver then idles outside the
+        # reviewer for the rest of the measurement.
+        limits = _lift_deck_daily_limits(col, deck_id,
+                                         per_day=max(10000, int(count) + 1000))
         _step("deck_limits", not str(limits).startswith("failed"),
               str(limits)[:200])
         model = col.models.by_name("Basic")
@@ -5484,7 +5490,18 @@ def _poll_native_endurance(state, cfg):
     if stage == "setup":
         if _drive_onboarding(state, "mining") is not True:
             return
-        _seed_deck(state, count=8, prefix="ENDURE")
+        # Endurance answers at answers_per_second for the whole run, so the
+        # deck must already hold that many cards. This used to seed a flat 8,
+        # which meant a 120-minute run exhausted the queue after ~16 answers:
+        # Anki dropped to "Congratulations! You have finished this deck",
+        # `_reviewer_ready()` went False for the rest of the run, and the
+        # memory trend measured an idle app while still reporting green.
+        # Seed the full demand up front -- the collection is part of the
+        # baseline, so refilling mid-run would corrupt the trend.
+        demand = int(round(float(cfg.get("answers_per_second", 2.0))
+                           * minutes * 60.0))
+        _seed_deck(state, count=max(8, demand + max(32, demand // 8)),
+                   prefix="ENDURE")
         if int(cfg.get("bulk_ops", 0) or 0):
             if not _seed_bulk_ops(state, int(cfg["bulk_ops"])):
                 return

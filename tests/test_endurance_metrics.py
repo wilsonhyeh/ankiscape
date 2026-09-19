@@ -137,10 +137,12 @@ class EnduranceMetricsTests(unittest.TestCase):
         samples = []
         for t in range(0, 900, 30):
             samples.append({"at_s": float(t), "rss_mib": 100.0 + t / 900.0 * 200,
-                            "phase": "growing"})
+                            "phase": "growing",
+                            "answers": int(t * 2.0)})
         for t in range(900, 1800 + 1, 30):
             samples.append({"at_s": float(t), "rss_mib": 320.0,
-                            "phase": "fixed"})
+                            "phase": "fixed",
+                            "answers": int(t * 2.0)})
         report = END.evaluate_endurance(samples, profile="nightly",
                                         duration_min=30.0)
         self.assertEqual(report["evaluated_phase"], "fixed")
@@ -153,11 +155,13 @@ class EnduranceMetricsTests(unittest.TestCase):
         samples = []
         for t in range(0, 900, 30):
             samples.append({"at_s": float(t), "rss_mib": 100.0,
-                            "phase": "growing"})
+                            "phase": "growing",
+                            "answers": int(t * 2.0)})
         for t in range(900, 1800 + 1, 30):
             samples.append({"at_s": float(t),
                             "rss_mib": 200.0 + (t - 900) / 60.0 * 2.0,
-                            "phase": "fixed"})
+                            "phase": "fixed",
+                            "answers": int(t * 2.0)})
         report = END.evaluate_endurance(samples, profile="nightly",
                                         duration_min=30.0)
         self.assertFalse(report["pass"])
@@ -171,11 +175,13 @@ class EnduranceMetricsTests(unittest.TestCase):
         samples = []
         for t in range(0, 900, 30):
             samples.append({"at_s": float(t), "rss_mib": 600.0,
-                            "phase": "growing"})
+                            "phase": "growing",
+                            "answers": int(t * 2.0)})
         for t in range(900, 1800 + 1, 30):
             ramp = min(1.0, max(0.0, (t - 900) / 240.0))
             samples.append({"at_s": float(t), "rss_mib": 643.0 + ramp * 57.5,
-                            "phase": "fixed"})
+                            "phase": "fixed",
+                            "answers": int(t * 2.0)})
         report = END.evaluate_endurance(samples, profile="nightly",
                                         duration_min=30.0)
         self.assertEqual(report["evaluated_phase"], "fixed")
@@ -186,14 +192,42 @@ class EnduranceMetricsTests(unittest.TestCase):
         samples = []
         for t in range(0, 840, 30):
             samples.append({"at_s": float(t), "rss_mib": 100.0,
-                            "phase": "growing"})
+                            "phase": "growing",
+                            "answers": int(t * 2.0)})
         for t in range(840, 1200 + 1, 30):
             samples.append({"at_s": float(t), "rss_mib": 100.0,
-                            "phase": "fixed"})
+                            "phase": "fixed",
+                            "answers": int(t * 2.0)})
         report = END.evaluate_endurance(samples, profile="nightly",
                                         duration_min=30.0)
         self.assertTrue(any("trend_fixed_span" in f
                             for f in report["failures"]), report["failures"])
+
+    def test_zero_answer_run_fails_instead_of_reporting_green(self):
+        # The endurance deck held 8 cards while the scenario meant to answer
+        # ~14,400 (2/s for 120 min). The queue emptied, Anki showed
+        # "finished this deck", the driver idled outside the reviewer -- and
+        # the memory trend still looked perfectly flat and PASSED, because
+        # nothing asserted that any review had happened. A trend run that
+        # answered nothing must fail loudly: it measured an idle app.
+        samples = []
+        for t in range(0, 7200 + 1, 30):
+            samples.append({"at_s": float(t), "rss_mib": 400.0,
+                            "phase": "fixed", "answers": 0})
+        report = END.evaluate_endurance(samples, profile="release",
+                                        duration_min=120.0)
+        self.assertFalse(report["pass"])
+        self.assertIn("no_answers_measured", report["failures"])
+        self.assertEqual(report["answers"], 0)
+
+    def test_answering_run_reports_its_answer_count(self):
+        # Companion to the guard above: the count must be surfaced, so a
+        # reviewer can tell a loaded run from an idle one without reading
+        # the raw samples. `_series` answers 1/s, so 30 min ends at 1800.
+        report = END.evaluate_endurance(_series(30), profile="nightly",
+                                        duration_min=30.0)
+        self.assertEqual(report["answers"], 1800)
+        self.assertNotIn("no_answers_measured", report["failures"])
 
     def test_engine_smoke_labels_ineligible(self):
         report = END.evaluate_endurance(_series(1), profile="engine-smoke",
