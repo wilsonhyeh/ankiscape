@@ -1,9 +1,16 @@
 # AnkiScape 3.0.0 — account/identity rework (two-game model)
 
-Implementation record for the 3.0.0 account/identity rework. This file is the
-client-side companion to the revision-2/revision-3 design deltas under
-`.opencode/workflow-reports/`; it records what shipped, where, and the
-residual risk that was accepted rather than silently dropped.
+Implementation record for the 3.0.0 account/identity rework. It records what
+shipped, where, and the residual risk that was accepted rather than silently
+dropped.
+
+The revision-2/revision-3 **design deltas are local-only scratch** under
+`.opencode/workflow-reports/`, which is gitignored (`.gitignore:41`) and so
+absent from a fresh clone; they are not a citable source. The committed record
+is this file, with
+`server/supabase/migrations/0011_account_identity_rework.sql` and
+`server/supabase/tests/0007_account_identity.test.sql` as its authoritative
+companions (both committed at `d6819f8`).
 
 ## Decisions (settled)
 

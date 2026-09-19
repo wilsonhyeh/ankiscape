@@ -10,12 +10,17 @@ gates. See `docs/TEST-MATRIX.md` for the requirement-to-test mapping.
 | pr | `python3 dev/reliability.py verify --stage pr` | Pure suite, generated PR traces, asset/package audit; Linux backend + one native smoke in CI | ~1 min local / ~15 min CI (excluding first runtime download) |
 | nightly | `python3 dev/reliability.py verify --stage nightly` | Adds seven-target native matrix, expanded generated traces, 30-min endurance, performance metrics, trusted hosted public-demo verify | ~4-6 h CI |
 | release | `python3 dev/reliability.py verify --stage release --evidence artifacts/reliability` | Consumes validated lane evidence + mutation gate; all seven targets required | ~6-8 h CI |
-| evidence only | `python3 dev/reliability.py verify-evidence --matrix dev/reliability-matrix.json --evidence artifacts/reliability` | Validates provenance/hashes/scenarios/budgets without executing | seconds |
+| evidence only | `python3 dev/reliability.py verify-evidence --stage pr --matrix dev/reliability-matrix.json --evidence artifacts/reliability` | Validates provenance/hashes/scenarios/budgets without executing. `--stage pr` is required: the default is `release`, and both `nightly` and `release` additionally demand `--expected-commit <sha> --expected-artifact-sha256 <sha256> --expected-run-id <run>` (candidate binding) | seconds |
 | one lane | `python3 dev/reliability.py run-lane --stage nightly --os linux --anki 26.8.1 --qt 6 --anki-bin <path> --out artifacts/reliability/<run>/<lane>` | Executes this lane's scenarios and writes `record.json` | 10-90 min |
 | local | `python3 dev/reliability.py verify --stage pr` on macOS | Runs what this machine can and fails naming `.github/workflows/pr.yml` for the rest — it never pretends to run Windows on a Mac | ~1 min |
 
 Baseline capture (already recorded at `artifacts/reliability/baseline/`, do not
 overwrite its date): `python3 dev/reliability.py baseline`.
+
+The `evidence only` command above parses and runs as written, but currently
+exits **1**: no admissible release record exists on this tree, so it reports
+`record_version` plus `missing_role:shared|backend|native`. That is the state
+of the evidence tree, not a CLI error — do not "fix" it by relaxing the flags.
 
 ## Prerequisites
 

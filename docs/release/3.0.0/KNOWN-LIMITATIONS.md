@@ -18,6 +18,19 @@ decides otherwise.
   a caller that deliberately presents another game's uuid as its own is
   outside the threat model for 3.0.0, and the guard is pinned by a negative
   pgTAP case (`server/supabase/tests/0007_account_identity.test.sql`).
+- Opening the Hiscores tab reads the public board from the baked production
+  endpoint anonymously — no bearer token and no account identity — for **any**
+  profile, including one that chose "Play offline" at onboarding
+  (`__init__.py` `_evolved_query_hiscores` — the non-cohort `public=True`
+  call; `evolved/service.py` `_fetch_hiscores_rows(public=True)`;
+  `evolved/ui/hiscores.py` refreshes on build and again on show). This is
+  intended product behaviour ("Anyone can browse the Hiscores",
+  `evolved/ui/hiscores.py:106`), not a leak of local progress, but it does mean
+  the tab is not usable offline. It is also why `ui-art` / `ui-visual-polish`
+  cannot pass as specified: that journey's network guard refuses any port 80/443
+  connect from `ankiscape*` code. Resolving the conflict (scope the guard, or
+  run the journey off the production-baked build) is an **open owner-level
+  decision**, not a fix recorded here — see `dev/README.md`.
 - Concurrent offline play on two desktops merges via the journal; conflicting
   ingredient use resolves to zero reward for the losing action (policy 2).
 - Real-inbox email delivery (registration/recovery codes via
