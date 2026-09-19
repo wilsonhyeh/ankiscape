@@ -84,7 +84,8 @@ class AwardDurabilityTest(unittest.TestCase):
         sys.modules.update(self._orig_modules)
 
     def _drive(self, *, level_up_raises=False, achievement_raises=False,
-               force_achievement=False, skip_achievement_patch=False):
+               force_achievement=False, skip_achievement_patch=False,
+               level=None, exp=None):
         """Answer one card through the real hook order and return the fixture."""
         addon = _load_addon_as_package(mod_name="ankiscape_award_durability")
 
@@ -105,6 +106,10 @@ class AwardDurabilityTest(unittest.TestCase):
             pass
 
         addon.player_data = classic_player_data()
+        if level is not None:
+            addon.player_data["mining_level"] = level
+        if exp is not None:
+            addon.player_data["mining_exp"] = exp
         addon.current_skill = "Mining"
 
         # storage.py and ui.py each did `from aqt import mw` at import time, so
@@ -122,8 +127,8 @@ class AwardDurabilityTest(unittest.TestCase):
         # look the names up.
         logic = addon.logic
 
-        def level_up_dialog(skill):
-            events.append(("popup", f"level_up:{skill}"))
+        def level_up_dialog(skill, new_level=0):
+            events.append(("popup", f"level_up:{skill}@{new_level}"))
             if level_up_raises:
                 raise RuntimeError("injected level-up dialog failure")
 
@@ -198,6 +203,24 @@ class AwardDurabilityTest(unittest.TestCase):
         persisted = col.persisted()
         self.assertEqual(persisted["mining_exp"], addon.player_data["mining_exp"])
         self.assertEqual(persisted["mining_level"], 2)
+
+    def test_a_large_level_jump_shows_one_dialog_not_one_per_level(self):
+        """A profile whose stored level lags its stored exp crosses many
+        thresholds on one award. Measured against this repo's own fixture
+        (level 23 with 50000 exp, which is level 42), that opened 19 level-up
+        dialogs plus 7 achievement dialogs in a single answer. However many
+        levels are gained, the player must see one dialog."""
+        addon, col, events, answered, _ = self._drive(level=1, exp=400.0)
+
+        level_ups = [e for e in events if str(e[1]).startswith("level_up")]
+        self.assertEqual(len(level_ups), 1,
+                         f"expected one summarised dialog, got {events}")
+        self.assertGreater(addon.player_data["mining_level"], 1,
+                           "the seeded exp must cross at least one threshold")
+        self.assertEqual(col.persisted()["mining_level"],
+                         addon.player_data["mining_level"],
+                         "the reached level must be persisted")
+        self.assertEqual(answered, [3])
 
     def test_dialog_helpers_are_safe_without_qt(self):
         """ui.HAS_QT is False here; none of these may raise."""

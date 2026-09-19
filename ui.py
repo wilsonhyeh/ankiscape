@@ -613,8 +613,12 @@ def show_error_message(title: str, message: str):
     error_dialog.exec()
 
 
-def show_level_up_dialog(skill: str):
-    """Level-up dialog with a skill icon."""
+def show_level_up_dialog(skill: str, new_level: int = 0):
+    """Level-up dialog with a skill icon.
+
+    `new_level` names the level reached when a single award crossed more than
+    one threshold; 0 (the default) keeps the original single-level wording.
+    """
     if not HAS_QT:
         return
     dialog = QDialog(mw)
@@ -638,7 +642,10 @@ def show_level_up_dialog(skill: str):
             icon_label.setPixmap(pixmap.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             layout.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-    msg = QLabel(f"Congratulations! You've advanced a {skill} level!")
+    msg = QLabel(
+        f"Congratulations! You've reached {skill} level {new_level}!"
+        if new_level else
+        f"Congratulations! You've advanced a {skill} level!")
     msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
     layout.addWidget(msg)
 

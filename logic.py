@@ -62,18 +62,24 @@ def level_up_check(skill, player_data):
 
 
 def show_level_up_popups(skill, levels):
-    """Present one level-up dialog per level gained. Best-effort; never raises.
+    """Present the level-up in ONE dialog, however many levels were gained.
 
-    Runs after the reward is durably saved, so a UI failure here is cosmetic
-    and must not propagate into Anki's answer path.
+    Best-effort; never raises. Runs after the reward is durably saved, so a UI
+    failure here is cosmetic and must not propagate into Anki's answer path.
+
+    One dialog per level was wrong: a profile whose stored level lags its
+    stored exp crosses many thresholds on a single award. Measured against this
+    repo's own fixture (level 23 with 50000 exp, which is level 42), one
+    successful answer opened 19 level-up dialogs plus 7 achievement dialogs.
+    Nineteen modals is not a celebration, so the gain is summarised once, in a
+    dialog that names the level actually reached.
     """
     if not levels:
         return
     try:
         if not _popups_enabled():
             return
-        for _level in levels:
-            show_level_up_dialog(skill)
+        show_level_up_dialog(skill, levels[-1])
     except Exception as exc:
         debug_log(f"level-up popup failed for {skill}: {exc!r}")
 
