@@ -4906,6 +4906,7 @@ def _poll_ui_account_lifecycle(state):
         _open_shell_via_menu()
         state["stage"] = "browse_hiscores"
         state["browse_ticks"] = 0
+        state["board_ticks"] = 0
         return
 
     if stage == "browse_hiscores":
@@ -4920,17 +4921,31 @@ def _poll_ui_account_lifecycle(state):
         if not _click_rail("hiscores"):
             return
         from aqt.qt import QApplication, QLabel, QListWidget, QWidget
+        # The board is fetched ASYNCHRONOUSLY over the network. A single
+        # processEvents() cannot wait for that round-trip, so on a loaded CI
+        # runner the read below saw rows=0 and failed a correct product
+        # (nightly 35469251967, and identically on the pre-change nightly).
+        # Poll like the leaderboard journey's wait_rows stage does, and record
+        # the status label so an empty read states WHY it was empty instead of
+        # reporting a bare rows=0 that reads like a product defect.
         QApplication.processEvents()
-        cta = shell.findChild(QWidget, "ankiscape-hiscores-cta")
+        status = shell.findChild(QLabel, "ankiscape-hiscores-status")
+        text = str(status.text()) if status is not None else ""
         listing = shell.findChild(QListWidget, "ankiscape-hiscores-list")
         rows = [listing.item(i).text() for i in range(listing.count())] \
             if listing is not None else []
+        loading = (not text) or text.startswith("Loading")
+        if (loading or not rows) and state.get("board_ticks", 0) <= 400:
+            state["board_ticks"] = state.get("board_ticks", 0) + 1
+            QApplication.processEvents()
+            return
+        cta = shell.findChild(QWidget, "ankiscape-hiscores-cta")
         _step("public_board_logged_out",
               cta is not None and cta.isVisible() and listing is not None,
-              f"rows={len(rows)}")
+              f"rows={len(rows)} status={text[:80]}")
         _step("demo_labels_visible",
               any("Demo" in r for r in rows) or mode != "faults",
-              f"rows={len(rows)}")
+              f"rows={len(rows)} status={text[:80]}")
         _shot("ui-account-lifecycle-done")
         import ankiscape  # noqa: F401 (identity for the closure above)
         state["stage"] = "done"
