@@ -367,6 +367,36 @@ class TestCoordinatorCleanupFailures(unittest.TestCase):
             self.assertTrue(coord.retry_local_cleanup())
             self.assertIsNone(read_marker(tmp))
 
+    def test_local_retry_re_clears_credentials_before_reporting_deleted(self):
+        # delete_local=False used to short-circuit the retry to success: it
+        # cleared the marker and emitted "deleted" before ever re-attempting
+        # clear_identity(), so a user whose credential clear had failed could
+        # retry, be told the deletion succeeded, and leave credentials in the
+        # OS vault. The retry must re-run the identity steps and only report
+        # "deleted" once they actually succeed. The sibling test above uses
+        # delete_local=True and so never exercised this branch.
+        with tempfile.TemporaryDirectory() as tmp:
+            accounts = _FakeAccounts(AccountResult(True, status="deleted"))
+            deps, calls = _deps(tmp, accounts, delete_local=False)
+            deps.clear_identity = lambda: False
+            coord = DeletionCoordinator(deps)
+            coord.begin("pw")
+            self.assertEqual(coord.phase, "cleanup_pending")
+            self.assertIn("credentials",
+                          _events(calls, "cleanup_incomplete")[-1]
+                          ["problems"])
+            # Still failing: the retry must NOT claim the account is deleted.
+            self.assertFalse(coord.retry_local_cleanup())
+            self.assertEqual(coord.phase, "cleanup_pending")
+            self.assertIsNotNone(read_marker(tmp))
+            # Once the credential clear succeeds, the retry completes.
+            deps.clear_identity = lambda: True
+            self.assertTrue(coord.retry_local_cleanup())
+            self.assertEqual(coord.phase, "done")
+            self.assertIsNone(read_marker(tmp))
+            # Local-only retry must never re-issue the server delete.
+            self.assertEqual(len(accounts.calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,6 +42,20 @@ class UserRegressions(unittest.TestCase):
             Path(path,'ankiscape-session-owner').unlink()
             self.assertNotEqual(one.account,CredentialVault(path,'https://example.invalid').account)
 
+    def test_unavailable_vault_has_nothing_to_clear(self):
+        # delete() used to return False whenever the vault was unavailable, so
+        # every account deletion on a platform without a system vault reported
+        # "local cleanup is incomplete" and left the window open for a retry
+        # that was never needed. write() refuses in that same state, so nothing
+        # was ever stored and success is the honest answer. The two assertions
+        # together are the point: nothing is stored, therefore nothing to clear.
+        with tempfile.TemporaryDirectory() as path:
+            vault=CredentialVault(path,'https://example.invalid')
+            vault.available=False
+            self.assertFalse(vault.write({'access_token':'a','refresh_token':'b','user_id':'c','username':'d'}))
+            self.assertIsNone(vault.read())
+            self.assertTrue(vault.delete())
+
     def test_password_reset_uses_put(self):
         calls=[]
         def transport(*args,**kwargs): calls.append((args,kwargs)); return {}
