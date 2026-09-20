@@ -8,6 +8,8 @@ from evolved.accounts import (
 )
 from evolved.auth import MemorySession
 from evolved.backup import export_backup, validate_backup
+from evolved.data import load_rules
+from evolved.engine import EngineConfig, EvolvedEngine
 from evolved.journal import Journal
 from evolved.net import Endpoint, NetError
 
@@ -125,6 +127,56 @@ class TestBackup(unittest.TestCase):
         self.assertEqual(counts["operations"], 1)
         counts2 = journal2.import_game("game-bk", validate_backup(blob))
         self.assertEqual(counts2["operations"], 0)
+
+    def test_rollback_rehearsal_restored_projection_equals_reference(self):
+        """ROLLBACK.md "Reproduce backup restore" acceptance criterion.
+
+        The rehearsal's stated verification is that "the restored state must
+        equal the reference reducer over the same operations
+        (``engine.projection()`` boundary: xp_micro, inventory, levels,
+        revision)". The sibling test above asserts only operation COUNTS, so
+        that criterion was previously unpinned -- a restore could have restored
+        the right number of operations while producing a different world.
+
+        Performed on disposable journals in a temp dir, per ROLLBACK.md step 3
+        ("validate on a disposable profile only").
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        rules = load_rules()
+        game = "game-rehearsal"
+
+        source = Journal(os.path.join(tmp.name, "source.sqlite3"))
+        self.addCleanup(source.close)
+        engine = EvolvedEngine(
+            EngineConfig(game_uuid=game, device_id="dev-a",
+                         activated_at=1000, rules=rules), source)
+        for i in range(1, 6):
+            source.append_operation({
+                "op_id": "op-%d" % i, "game_uuid": game, "device_id": "dev-a",
+                "device_seq": i, "lamport": i, "kind": "review_award",
+                "payload": {"review_key": "rk%d" % i,
+                            "review_ts": 1850000000 + i, "rating": 3,
+                            "review_kind": "review", "provenance": "direct",
+                            "reward_policy": 2, "skill": "mining",
+                            "resource": "Rune essence"}})
+        reference = engine.projection()
+        self.assertGreater(reference["revision"], 0)
+        self.assertGreater(reference["xp_micro"]["mining"], 0)
+
+        blob = export_backup(game, source.export_game(game))
+
+        restored = Journal(os.path.join(tmp.name, "restored.sqlite3"))
+        self.addCleanup(restored.close)
+        restored.import_game(game, validate_backup(blob))
+        rebuilt = EvolvedEngine(
+            EngineConfig(game_uuid=game, device_id="dev-a",
+                         activated_at=1000, rules=rules), restored)
+
+        after = rebuilt.projection()
+        for dimension in ("xp_micro", "inventory", "levels", "revision"):
+            self.assertEqual(after[dimension], reference[dimension], dimension)
+        self.assertEqual(after, reference)
 
 
 if __name__ == "__main__":

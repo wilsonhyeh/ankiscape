@@ -91,7 +91,7 @@ hosted step is `supabase db push` only — no function deploy is required.
 | AnkiMobile/AnkiDroid checklist (human) | blocked | Wilson |
 | Artwork publication decision (owner) | blocked | Wilson / ASSET-RIGHTS |
 | Rollback note: settled rule recorded | prepared | `ROLLBACK.md` |
-| Backup restore rehearsal (isolated profile, `ROLLBACK.md` steps) | pending — not performed; no rehearsal evidence exists | `ROLLBACK.md` |
+| Backup restore rehearsal (isolated profile, `ROLLBACK.md` steps) | **engine round-trip performed 2026-09-19; UI menu path still unexercised** — the documented criterion ("the restored state must equal the reference reducer over the same operations", `engine.projection()` boundary: xp_micro, inventory, levels, revision) is now asserted by `tests/test_accounts_backup.py::test_rollback_rehearsal_restored_projection_equals_reference`. That gap was real: the sibling test asserted only operation COUNT, so a restore could have restored the right number of operations while producing a different world. Still not covered: driving Export/Restore through `Settings -> Advanced` in a real profile, which no journey touches | `ROLLBACK.md`; `tests/test_accounts_backup.py` |
 
 Evidence pointers above are `file:line` references in this repository, or a
 recorded run id / artifact sha256. No `release-verify` run has ever been
