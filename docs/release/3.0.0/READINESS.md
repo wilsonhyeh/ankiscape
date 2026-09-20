@@ -68,6 +68,36 @@ seven targets shared the defect; Windows already used `WorkingSetSize`, which is
 current). The 1.0 MiB/min and 50 MiB limits are unchanged and still bite -- they
 now judge a signal that can move in both directions.
 
+**Nightly `35531744272` (dispatched 2026-09-20 on `ca2764f`) verified the
+credential fix and exposed the next blocker in line.** `build`, `shared`,
+`backend` and `hosted` all passed. On every one of the seven native lanes the
+journey that had reddened the whole matrix now passes:
+
+```
+dev: (e2e) journey=ui-credential-fallback steps=5 failed=0 screenshots=2
+dev: (e2e) ui-credential-fallback journey PASS on Anki 23.10
+```
+
+All seven lanes still fail, and the reason is now `native-performance: exit 1`
+— **on every lane, including the four at Qt ≤ 6.5.3.** That is a pre-existing
+hang, not a regression from today's work, and it was previously masked: these
+lanes used to die at `ui-credential-fallback` and never reached the performance
+stage at all. Run `35488210125`, taken before any of today's changes, carries
+the same evidence — a 45-second faulthandler timeout with the main thread inside
+`aqt._run`, and a heartbeat stopped at `stage: "finish"` with
+`native_performance_completed: answers=120 lag=419`. The work finishes and then
+the app does not exit.
+
+`linux-26.8.1-qt6` additionally fails `endurance-30m` on the retention above,
+re-measured at `endurance:slope:4.042>1.0` against the 1.0 MiB/min limit — the
+same defect at the same magnitude, unaffected by anything in this note. The
+26.08.1 lanes now reach that stage on their own merits.
+
+So the release now stands on **two** blockers, in this order: the
+`native-performance` hang, which reds all seven lanes and is the nearer one, and
+the 26.08.1 endurance retention, which reds three and is a scoping decision
+rather than a patch.
+
 **Four further defects were found and fixed on 2026-09-20**, three of them
 latent rather than blocking, and one of them the nearest thing to a blocker this
 tree had. Nothing below changes the paragraph above: `release-verify` on a frozen
@@ -124,10 +154,11 @@ hosted step is `supabase db push` only — no function deploy is required.
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| Seven native targets (macOS/Windows/Linux × oldest/current, Qt5+Qt6) | pending | release-verify `lanes` |
-| Native performance + two-hour endurance per target | pending — shape corrected 2026-09-19 (see above); no lane has run it yet. **Still blocked by the 26.08.1 retention** (below) | `native-performance` / `endurance-2h` metrics |
+| Seven native targets (macOS/Windows/Linux × oldest/current, Qt5+Qt6) | pending — journeys now pass on all seven; the lanes still fail on `native-performance` (below) | release-verify `lanes` |
+| Native performance per target | **OPEN — the nearer release blocker.** `native-performance: exit 1` on all seven lanes: the journey completes (`answers=120`, `native_performance_completed` ok) and the app then does not exit — a 45 s faulthandler timeout with the main thread inside `aqt._run`. Pre-existing and previously masked by the credential red; the same evidence is in `35488210125`, which predates today's changes | nightly `35531744272`; `native-performance-runs/*/faulthandler.log` and `heartbeat.json` |
+| Two-hour endurance per target | pending — shape corrected 2026-09-19 (see above); no lane has run it yet. **Still blocked by the 26.08.1 retention** (below) | `endurance-2h` metrics |
 | Endurance gate: current-RSS sampling everywhere, and no green on an unmeasured lifecycle | **fixed 2026-09-20** (#30) — `dev/rss.py` is the single sampler; `no_fixed_phase` fails a run with no fixed-phase samples | `dev/rss.py`, `dev/endurance_metrics.py`, `tests/test_endurance_metrics.py`, `tests/test_dev_rss.py` |
-| Endurance retention on the Anki 26.08.1 / Qt 6.11 / CPython 3.13 lanes | **OPEN — the remaining release blocker.** Real memory, not an add-on leak: identical add-on code is neutral under both Qt versions with Anki absent, and the three pinned components are one indistinguishable variable in this matrix (`dev/runtime_manifest.json`). Requires a decision, not a patch — prove the runtime mechanism, ship on the 23.10 lanes, or both. No `evolved/ui` change can turn it green | nightly `35503351999`; per-lane `slope` / `settled` records |
+| Endurance retention on the Anki 26.08.1 / Qt 6.11 / CPython 3.13 lanes | **OPEN — the second blocker, behind `native-performance` above.** Real memory, not an add-on leak: identical add-on code is neutral under both Qt versions with Anki absent, and the three pinned components are one indistinguishable variable in this matrix (`dev/runtime_manifest.json`). Requires a decision, not a patch — prove the runtime mechanism, ship on the 23.10 lanes, or both. No `evolved/ui` change can turn it green | nightly `35531744272` re-measured `slope:4.042>1.0` on `linux-26.8.1-qt6`; earlier `slope:4.001` in `35503351999` |
 | Shared checks + engine benchmarks | pending | `shared` record |
 | Linux backend: suite, parity, account contracts, sync, full mutation | pending | `backend` record |
 | Public demo board: five labeled demos, retried 24-account suite retired | pending | `hosted` record + `dev/demo_players.py --verify` |
