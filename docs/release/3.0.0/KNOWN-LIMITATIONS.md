@@ -26,11 +26,14 @@ decides otherwise.
   `evolved/ui/hiscores.py` refreshes on build and again on show). This is
   intended product behaviour ("Anyone can browse the Hiscores",
   `evolved/ui/hiscores.py:106`), not a leak of local progress, but it does mean
-  the tab is not usable offline. It is also why `ui-art` / `ui-visual-polish`
-  cannot pass as specified: that journey's network guard refuses any port 80/443
-  connect from `ankiscape*` code. Resolving the conflict (scope the guard, or
-  run the journey off the production-baked build) is an **open owner-level
-  decision**, not a fix recorded here — see `dev/README.md`.
+  the tab is not usable offline. The journey network guard was narrowed on
+  2026-09-19 (`d906b73`) so the add-on's own backend host passes through and is
+  recorded separately as `net_backend_attempts`; it still refuses every other
+  port 80/443 connect from `ankiscape*` code, which is what the image/asset
+  promise is about. `ui-art` / `ui-visual-polish` therefore pass — they were
+  failing 3/3 before that change, and no product change could have satisfied
+  both that assertion and the two pinned assertions requiring the public-board
+  fetch. See `dev/README.md`.
 - Concurrent offline play on two desktops merges via the journal; conflicting
   ingredient use resolves to zero reward for the losing action (policy 2).
 - Real-inbox email delivery (registration/recovery codes via
@@ -61,8 +64,11 @@ decides otherwise.
 
 - Artwork is bundled Old School RuneScape Wiki art used in a noncommercial fan
   project. `docs/ASSET-RIGHTS.md` records that redistribution permission is
-  unresolved; publication requires Wilson's explicit decision and is blocked
-  until then.
+  unresolved, and the bundled `assets/manifest.json` says so to anyone who
+  inspects the package. Wilson took the publication decision on 2026-09-19 and
+  released it as a blocker; `READINESS.md` records the row closed. The
+  provenance statement is kept deliberately — the rights position has not
+  changed, only the decision that it does not gate this release.
 - No trading, equipment upgrades, quests, or social features in 3.0.
 
 ## Mobile
