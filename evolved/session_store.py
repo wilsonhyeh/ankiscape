@@ -124,7 +124,15 @@ class ProfileSession:
         if self.vault is None:
             return
         if not session.logged_in or not self.remember:
-            self.persistence_ok = self.vault.delete()
+            # An unavailable vault refuses delete() -- correctly, since it
+            # cannot act on the OS store -- but that refusal is NOT a failed
+            # cleanup: write() refuses in the same state, so nothing was ever
+            # stored and there is nothing to clear. Reading it as failure here
+            # made account deletion report "local cleanup is incomplete" and
+            # leave the window open for a retry that was never needed, on every
+            # platform without a system vault.
+            self.persistence_ok = (True if not self.vault.available
+                                   else self.vault.delete())
         else:
             self.persistence_ok = self.vault.write({
                 "access_token": session.access_token,

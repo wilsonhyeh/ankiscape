@@ -42,19 +42,27 @@ class UserRegressions(unittest.TestCase):
             Path(path,'ankiscape-session-owner').unlink()
             self.assertNotEqual(one.account,CredentialVault(path,'https://example.invalid').account)
 
-    def test_unavailable_vault_has_nothing_to_clear(self):
-        # delete() used to return False whenever the vault was unavailable, so
-        # every account deletion on a platform without a system vault reported
-        # "local cleanup is incomplete" and left the window open for a retry
-        # that was never needed. write() refuses in that same state, so nothing
-        # was ever stored and success is the honest answer. The two assertions
-        # together are the point: nothing is stored, therefore nothing to clear.
+    def test_unavailable_vault_is_not_a_failed_cleanup(self):
+        # Account deletion reported "local cleanup is incomplete" on every
+        # platform without a system vault, and the fix had to land in the right
+        # layer. CredentialVault.delete() refusing when unavailable is CORRECT
+        # -- it cannot act on the OS store, and `credential_vault_unavailable_`
+        # `refuses` pins that contract. The defect was ProfileSession reading
+        # that refusal as a failed cleanup, when write() refuses in the same
+        # state so nothing was ever stored and there was nothing to clear.
+        #
+        # So this asserts both halves: the primitive still refuses, and the
+        # session does not turn the refusal into a failure.
         with tempfile.TemporaryDirectory() as path:
             vault=CredentialVault(path,'https://example.invalid')
             vault.available=False
             self.assertFalse(vault.write({'access_token':'a','refresh_token':'b','user_id':'c','username':'d'}))
             self.assertIsNone(vault.read())
-            self.assertTrue(vault.delete())
+            self.assertFalse(vault.delete())
+            sess=ProfileSession(generation=1,vault=vault)
+            self.assertFalse(sess.remember)          # session-only, as documented
+            sess._persist(sess.session)              # nothing logged in: clear path
+            self.assertTrue(sess.persistence_ok)
 
     def test_password_reset_uses_put(self):
         calls=[]
