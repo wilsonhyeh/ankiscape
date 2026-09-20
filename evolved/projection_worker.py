@@ -18,6 +18,7 @@ Contract:
 """
 from __future__ import annotations
 
+import gc
 import os
 import threading
 import time
@@ -27,6 +28,16 @@ from .journal import Journal
 from .reducer import (
     build_checkpoint, extend_checkpoint, watermark_tuple,
 )
+
+# GC thresholds used only while a full rebuild runs. CPython's default gen0
+# threshold is 700; a rebuild allocates ~200k objects, so the default triggers
+# hundreds of collections, and each promoted generation scans the whole heap
+# while holding the GIL. Measured on a 100k-operation rebuild: worst
+# other-thread stall 158.8 ms at the default thresholds versus 33.9 ms here --
+# and the rebuild itself is FASTER (4.68 s -> 4.08 s) because there are far
+# fewer collections to run. 20000/25/25 and 50000/50/50 measured the same
+# (34.2 ms / 34.8 ms), so the smaller, less memory-hungry value is used.
+_BUILD_GC_THRESHOLDS = (20000, 25, 25)
 
 PUBLISH_INTERVAL_S = 0.1  # at most 10 UI publishes/second while busy
 CHECKPOINT_EVERY = 100
@@ -128,7 +139,16 @@ class ProjectionWorker:
         with self._lock:
             self._status["busy"] = True
         try:
-            checkpoint = self._build(journal)
+            # Scoped to the build and restored afterwards, rather than set
+            # process-wide at import: the trade-off (more memory retained
+            # between collections) is only worth taking during this burst, and
+            # Anki's own GC behaviour is not ours to change.
+            previous_thresholds = gc.get_threshold()
+            gc.set_threshold(*_BUILD_GC_THRESHOLDS)
+            try:
+                checkpoint = self._build(journal)
+            finally:
+                gc.set_threshold(*previous_thresholds)
             now = time.monotonic()
             wait = self._last_publish + self._publish_interval - now
             if wait > 0:
