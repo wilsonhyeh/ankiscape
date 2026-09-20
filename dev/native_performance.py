@@ -314,6 +314,16 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
                 "growing_samples": endurance_report.get("growing_samples", 0),
                 "growing_rss_change_mib":
                     endurance_report.get("growing_rss_change_mib"),
+                # How much churn the trend is actually built on, and how many
+                # cycles hit the readiness ceiling instead of settling. These
+                # decided the 2026-09-20 analysis and were readable only from
+                # the raw samples, because this metric is assembled from a
+                # whitelist -- so they are named here rather than left to be
+                # rediscovered. `forced` counts cycles that reached
+                # LIFECYCLE_SETTLE_MAX_S without `_rail_ready` ever being true.
+                "fixed_cycles": endurance_report.get("fixed_cycles"),
+                "fixed_cycles_min": endurance_report.get("fixed_cycles_min"),
+                "forced_cycles": endurance_report.get("forced_cycles"),
                 "eligible_for_release":
                     endurance_report.get("eligible_for_release"),
                 "pass": endurance_report.get("pass"),

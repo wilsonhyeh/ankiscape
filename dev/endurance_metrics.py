@@ -139,6 +139,7 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
     fixed_span_min = None
     trend_warmup_dropped = 0
     fixed_cycles = 0
+    forced_cycles = 0
     if len(fixed) >= 2:
         fixed_span_min = (float(fixed[-1]["at_s"])
                           - float(fixed[0]["at_s"])) / 60.0
@@ -161,6 +162,8 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
             # than passing a run whose churn is unmeasured.
             fixed_cycles = max(
                 (int(s.get("cycles", 0) or 0) for s in fixed), default=0)
+            forced_cycles = max(
+                (int(s.get("forced", 0) or 0) for s in fixed), default=0)
             if fixed_cycles < MIN_LIFECYCLE_CYCLES:
                 failures.append(f"no_lifecycle_cycles:{fixed_cycles}")
     if trend:
@@ -214,6 +217,7 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
         "trend_warmup_dropped": trend_warmup_dropped,
         "fixed_cycles": fixed_cycles,
         "fixed_cycles_min": MIN_LIFECYCLE_CYCLES,
+        "forced_cycles": forced_cycles,
         "growing_samples": len(growing),
         "growing_rss_change_mib": growing_change,
         "slope_mib_per_min": round(slope, 3),
