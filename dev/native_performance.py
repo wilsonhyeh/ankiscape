@@ -463,6 +463,10 @@ def main(argv=None) -> int:
                              "(heartbeat, watchdog trace, fatal detail, "
                              "stuck screenshots, Anki stderr tail)")
     args = parser.parse_args(argv)
+    # These are the long runs (a 30- or 120-minute endurance). Keep the GUI from
+    # taking the user's foreground for the whole duration; the driver honours
+    # this via _suppress_macos_activation().
+    os.environ.setdefault("ANKISCAPE_E2E_NO_ACTIVATE", "1")
     for _base in _fresh_bases():
         print(f"native_performance: cleared stale base {_base}")
 
