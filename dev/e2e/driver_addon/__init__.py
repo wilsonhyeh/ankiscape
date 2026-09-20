@@ -5548,6 +5548,22 @@ def _process_cpu_seconds():
         return None
 
 
+def _lag_probe_label(state):
+    """What the driver was doing when a lag probe fired.
+
+    The lag arrays carried bare numbers, so a spike could not be attributed to a
+    stage without inference. The 1.2 s probe on windows-26.8.1-qt6 sat between
+    0-3 ms neighbours in `lag_ms`, and working out what produced it meant
+    reasoning about probe indices against the scenario's `rebuilds_at` -- which
+    got it wrong once. Recorded alongside the value, the next spike is a read.
+    """
+    try:
+        return "%s:%d" % (state.get("stage", ""),
+                          int(state.get("answers_done", 0) or 0))
+    except Exception:
+        return ""
+
+
 def _lag_probe_start(state):
     from aqt.qt import QTimer
     import time as _time
@@ -5555,6 +5571,12 @@ def _lag_probe_start(state):
     state.setdefault("lag_samples", [])
     state.setdefault("rebuild_lag_samples", [])
     state.setdefault("lag_probes", 0)
+    # Parallel label arrays, index-aligned with the two value arrays.
+    # Deliberately parallel rather than replacing them: `lag_ms` must stay a
+    # list of floats for the metric, and `lag_probes` is asserted to equal
+    # len(lag_ms) + len(rebuild_lag_ms).
+    state.setdefault("lag_phase", [])
+    state.setdefault("rebuild_lag_phase", [])
 
     def tick():
         if state.get("lag_probe_off"):
@@ -5563,11 +5585,14 @@ def _lag_probe_start(state):
         expected = state.get("lag_expected")
         if expected is not None:
             sample = round(max(0.0, now - expected) * 1000.0, 3)
+            label = _lag_probe_label(state)
             state["lag_probes"] += 1
             if state.get("rebuild_watch"):
                 state["rebuild_lag_samples"].append(sample)
+                state["rebuild_lag_phase"].append(label)
             else:
                 state["lag_samples"].append(sample)
+                state["lag_phase"].append(label)
         state["lag_expected"] = now + 0.1
         QTimer.singleShot(100, tick)
 
@@ -5936,6 +5961,8 @@ def _poll_native_performance(state):
         state["rebuilds"] = []
         state["rebuild_watch"] = []
         state["rebuild_lag_samples"] = []
+        state["lag_phase"] = []
+        state["rebuild_lag_phase"] = []
         state["rebuild_at"] = [int(v) for v in (cfg.get("rebuilds_at") or [])]
         state["answer_started"] = None
         state["reward_watches"] = []
@@ -6087,6 +6114,11 @@ def _poll_native_performance(state):
                    "rebuild_reward_ms": state.get("rebuild_reward_ms", []),
                    "lag_ms": state.get("lag_samples", []),
                    "rebuild_lag_ms": state.get("rebuild_lag_samples", []),
+                   # Index-aligned with the two arrays above: what the driver
+                   # was doing at each probe, so a spike can be attributed to a
+                   # stage without inferring it from the probe index.
+                   "lag_phase": state.get("lag_phase", []),
+                   "rebuild_lag_phase": state.get("rebuild_lag_phase", []),
                    "lag_probes": state.get("lag_probes", 0),
                    "rewards_published": state.get("rewards_published", 0),
                    "shell_ms": state.get("shell_ms", []),
