@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import resource
 import shutil
 import statistics
 import sys
@@ -60,6 +59,17 @@ PROFILES = {
 HISTORY_SIZES = (0, 1000, 10000, 100000)
 BUDGETS = json.load(open(os.path.join(ROOT, "dev", "reliability-budgets.json"),
                          encoding="utf-8"))["budgets"]
+
+
+def _rss_module():
+    """dev/rss.py by absolute path: dev/ is not a package, so this mirrors how
+    dev/endurance.py loads its sibling modules."""
+    import importlib.util
+    path = os.path.join(ROOT, "dev", "rss.py")
+    spec = importlib.util.spec_from_file_location("ankiscape_dev_rss", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def nearest_rank_percentile(values, percentile: float) -> float:
@@ -332,11 +342,12 @@ def measure_endurance(rules, game_uuid: str, minutes: float, workdir: str):
                                  reward_policy=2)
             i += 1
             if i % 20 == 0:
-                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                if sys.platform == "darwin":
-                    rss_mib = rss / (1024 * 1024)
-                else:
-                    rss_mib = rss / 1024
+                rss_mib = _rss_module().current_rss_mib()
+                if rss_mib is None:
+                    # Loud rather than a fake zero: a 0.0 slope from an
+                    # unmeasurable run is indistinguishable from a healthy one.
+                    raise RuntimeError(
+                        "cannot measure current RSS on this platform")
                 samples.append((time.time(), rss_mib))
         if len(samples) >= 4:
             warm = samples[len(samples) // 3:]
