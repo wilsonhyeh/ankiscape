@@ -68,6 +68,54 @@ seven targets shared the defect; Windows already used `WorkingSetSize`, which is
 current). The 1.0 MiB/min and 50 MiB limits are unchanged and still bite -- they
 now judge a signal that can move in both directions.
 
+**Four further defects were found and fixed on 2026-09-20**, three of them
+latent rather than blocking, and one of them the nearest thing to a blocker this
+tree had. Nothing below changes the paragraph above: `release-verify` on a frozen
+candidate is still the critical path, and no lane has run the corrected shape.
+
+*The nightly itself was red on all seven lanes for a reason that was not memory.*
+Nightly `35503351999` failed every target on
+`ui-credential-fallback:1 — credential_vault_unavailable_refuses`. The
+account-delete fix had landed in the wrong layer: `CredentialVault.delete()`
+returned `True` when the vault was unavailable, while the journey pins the
+primitive contract at `False`. Both halves are now correct — the vault refuses
+again, and `ProfileSession._persist` treats an unavailable vault as "nothing to
+persist" rather than "failed to persist" (#27). This mattered more than its size
+suggests: it reddened the four Qt ≤ 6.5.3 lanes that are the fallback if the
+26.08.1 retention cannot be resolved.
+
+*The endurance gate could pass a run whose lifecycle was never measured.*
+`evaluate_endurance` runs its churn guard, its leak evaluation and its warm-up
+trim all inside `if len(fixed) >= 2`, so a run that produced no fixed-phase
+samples skipped all three and reported `evaluated_phase: "all"` with
+`pass: true`. It now fails as `no_fixed_phase` — the same class of false green
+`no_answers_measured` (above) and `no_lifecycle_cycles` exist to kill, one level
+up. A phase-less series is unaffected (#30).
+
+*Two of the three `ru_maxrss` sinks above were never fixed.* The 2026-09-19
+sampler correction reached `dev/e2e/driver_addon/__init__.py` only;
+`dev/endurance.py:59` and `dev/perf_runtime.py:335` still read the high-water
+mark. Neither gates the release — `dev/reliability.py` invokes
+`dev/perf_runtime.py` without `--endurance-minutes`, so `measure_endurance`
+never runs there, and `dev/endurance.py` is not invoked at all — but both were
+reachable by a human running the tools directly, which is how the original false
+verdict was produced. The corrected sampler now lives once in `dev/rss.py`, and
+a missing measurement is `None` rather than a `0.0` that would read as a flat,
+healthy slope (#30).
+
+*A genuine unbounded leak in the Skills screen.* `build_skills_screen` rebuilt
+its whole resource grid on every refresh and relied on `deleteLater()`, so a
+refresh from a context that cannot drain `DeferredDelete` left the previous slot
+set alive as hidden children — 22 → **1672** live `ItemSlot`s over 150 rail
+sweeps, under real Qt 6.11.0. Slots are now reused, which is `bank_view.py`'s
+existing pattern. **This did not cause the endurance red and does not fix it**:
+the leak is identical under Qt 6.11 and Qt 6.5 (44.00 widgets/cycle in both) and
+~8× smaller than the macOS lane's retention, so it cannot produce a split with
+zero exceptions by Qt family (#29).
+
+`docs/` is not part of the shipped artifact, so none of this moves the artifact
+hash.
+
 Deploy note: the Edge Functions were not modified by this release
 (`git diff c29e2f0..7471f71 -- server/supabase/functions/` is empty), so the
 hosted step is `supabase db push` only — no function deploy is required.
@@ -77,7 +125,9 @@ hosted step is `supabase db push` only — no function deploy is required.
 | Requirement | Status | Evidence |
 |---|---|---|
 | Seven native targets (macOS/Windows/Linux × oldest/current, Qt5+Qt6) | pending | release-verify `lanes` |
-| Native performance + two-hour endurance per target | pending — shape corrected 2026-09-19 (see above); no lane has run it yet | `native-performance` / `endurance-2h` metrics |
+| Native performance + two-hour endurance per target | pending — shape corrected 2026-09-19 (see above); no lane has run it yet. **Still blocked by the 26.08.1 retention** (below) | `native-performance` / `endurance-2h` metrics |
+| Endurance gate: current-RSS sampling everywhere, and no green on an unmeasured lifecycle | **fixed 2026-09-20** (#30) — `dev/rss.py` is the single sampler; `no_fixed_phase` fails a run with no fixed-phase samples | `dev/rss.py`, `dev/endurance_metrics.py`, `tests/test_endurance_metrics.py`, `tests/test_dev_rss.py` |
+| Endurance retention on the Anki 26.08.1 / Qt 6.11 / CPython 3.13 lanes | **OPEN — the remaining release blocker.** Real memory, not an add-on leak: identical add-on code is neutral under both Qt versions with Anki absent, and the three pinned components are one indistinguishable variable in this matrix (`dev/runtime_manifest.json`). Requires a decision, not a patch — prove the runtime mechanism, ship on the 23.10 lanes, or both. No `evolved/ui` change can turn it green | nightly `35503351999`; per-lane `slope` / `settled` records |
 | Shared checks + engine benchmarks | pending | `shared` record |
 | Linux backend: suite, parity, account contracts, sync, full mutation | pending | `backend` record |
 | Public demo board: five labeled demos, retried 24-account suite retired | pending | `hosted` record + `dev/demo_players.py --verify` |
