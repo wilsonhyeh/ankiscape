@@ -97,14 +97,17 @@ class CredentialVault:
 
     def delete(self):
         if not self.available:
-            # No vault means nothing was ever stored: write() refuses in this
-            # same state (above) and read() returns None. So there is nothing
-            # to clear and the honest answer is success. Returning False here
-            # reported "local cleanup is incomplete" for a credential that was
-            # never written -- deterministically, on every platform without a
-            # system vault, which is what failed the account-lifecycle journey
-            # on six of seven CI lanes.
-            return True
+            # An unavailable vault refuses, consistently with write() and
+            # read() above. `credential_vault_unavailable_refuses` pins that
+            # contract and it is right for a primitive: this object cannot act
+            # on the OS store, so it does not claim to have.
+            #
+            # What must NOT happen is a caller reading the refusal as "the
+            # cleanup failed". Nothing was ever stored (write() refuses in the
+            # same state), so there is nothing to clear -- and the caller that
+            # knows that is ProfileSession._persist, which is where the false
+            # "local cleanup is incomplete" actually belongs.
+            return False
         try:
             if sys.platform == 'darwin':
                 status, raw, item = self._find()
