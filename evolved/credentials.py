@@ -97,7 +97,14 @@ class CredentialVault:
 
     def delete(self):
         if not self.available:
-            return False
+            # No vault means nothing was ever stored: write() refuses in this
+            # same state (above) and read() returns None. So there is nothing
+            # to clear and the honest answer is success. Returning False here
+            # reported "local cleanup is incomplete" for a credential that was
+            # never written -- deterministically, on every platform without a
+            # system vault, which is what failed the account-lifecycle journey
+            # on six of seven CI lanes.
+            return True
         try:
             if sys.platform == 'darwin':
                 status, raw, item = self._find()
