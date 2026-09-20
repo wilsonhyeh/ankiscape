@@ -407,6 +407,36 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
     return metrics, failures
 
 
+def _fresh_bases() -> list:
+    """Remove the scratch profile dirs so this invocation starts clean.
+
+    Both this tool's ordinary mode and its `--endurance-minutes` mode run the
+    SAME journey name ("native-performance") and therefore share one profile at
+    `<DEV_DIR>/e2e/native-performance`. Nothing cleaned it between runs, and
+    reliability.py's lane runs scenarios sequentially in one job, so the
+    endurance scenario used to inherit the ordinary perf scenario's populated
+    collection and its ~77 MB Evolved journal.
+
+    That inheritance is not cosmetic. Measured on the same machine, same shape:
+
+        clean, 30-min run          slope -3.167 MiB/min   settled 17.3 MiB
+        clean + CI env, 30-min     slope -0.080           settled 25.2 MiB
+        INHERITED state, 10-min    slope +9.377           settled 42.4 MiB
+
+    ...and CI, which always inherited, reported slope +70.314 / settled 670.8
+    and failed. The endurance scenario must measure a fresh profile, not
+    whatever the previous scenario left resident.
+    """
+    dev = _dev()
+    removed = []
+    for journey in ("native-performance", "native-performance-control"):
+        base = os.path.join(dev.DEV_DIR, "e2e", journey)
+        if os.path.isdir(base):
+            shutil.rmtree(base, ignore_errors=True)
+            removed.append(base)
+    return removed
+
+
 def _observed_from_runs(runs):
     for run in runs:
         if run["install_addon"] and run["runtime"]:
@@ -433,6 +463,8 @@ def main(argv=None) -> int:
                              "(heartbeat, watchdog trace, fatal detail, "
                              "stuck screenshots, Anki stderr tail)")
     args = parser.parse_args(argv)
+    for _base in _fresh_bases():
+        print(f"native_performance: cleared stale base {_base}")
 
     cfg = dict(PROFILES[args.profile])
     if args.repetitions:
