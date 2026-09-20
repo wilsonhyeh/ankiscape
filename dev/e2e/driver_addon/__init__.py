@@ -960,7 +960,7 @@ def _drive_answer(state, ease=3):
                 mw.moveToState("review")
             return False
         state["nav_ticks"] = 0
-        if not _reviewer_settled():
+        if not _reviewer_answerable(state):
             state["drive_note"] = "unsettled"
             _trace(state, "unsettled")
             return False
@@ -1102,6 +1102,34 @@ def _reviewer_empty():
         return True
     except Exception:
         return False
+
+
+def _reviewer_answerable(state, limit: int = 600) -> bool:
+    """Strict gate for any loop that is ABOUT TO ANSWER.
+
+    `_reviewer_settled()` returns True whenever `mw.state != "review"` -- that
+    is, whenever we are NOT in the reviewer at all -- so gating an answer loop
+    on it lets the driver start answering into a webview that is still loading.
+    That wedges Anki 26.x in a transition loop with a JS-error flood, and it is
+    what produced the flaky journey failures in nightlies 35478028013 and
+    35488210125, where Anki's OWN `showAnswer`, `_showQuestion` and `_drawFlag`
+    were undefined and the runs died with no assertions written.
+
+    This is the strict predicate the endurance scenario already used (see the
+    note in `_poll_native_endurance`), applied to the answer loops that skipped
+    it. The wait is bounded so a genuinely wedged reviewer is reported as a
+    failed step instead of hanging, and so the loop cannot spin forever.
+    """
+    if _reviewer_ready():
+        state["answerable_ticks"] = 0
+        return True
+    ticks = int(state.get("answerable_ticks", 0)) + 1
+    state["answerable_ticks"] = ticks
+    if ticks > limit:
+        state["answerable_ticks"] = 0
+        _step("reviewer_not_answerable", False, _reviewer_debug())
+        return True          # proceed: the miss is recorded, never silent
+    return False
 
 
 def _reviewer_settled():
@@ -3474,7 +3502,7 @@ def _poll_ui_deferred_rewards(state):
         state["stage"] = "answer"
         return
     if stage == "answer":
-        if not _reviewer_settled():
+        if not _reviewer_answerable(state):
             return
         before = _answer_with_timing(state)
         if before is None:
@@ -3571,7 +3599,7 @@ def _poll_ui_rebuild_review(state):
         state["answers_done"] = 0
         return
     if stage == "answers":
-        if not _reviewer_settled():
+        if not _reviewer_answerable(state):
             return
         if state.get("awaiting"):
             ops = _journal_ops()
@@ -4408,7 +4436,7 @@ def _poll_ui_account_lifecycle(state):
 
     if stage == "review":
         _open_reviewer(state, "ACCT")
-        if not _reviewer_settled():
+        if not _reviewer_answerable(state):
             return
         if not _answer_until_awards(state, 1, deck="ACCT Deck",
                                     what="account-lifecycle award"):
@@ -5034,7 +5062,7 @@ def _poll_ui_recovery(state):
         state["stage"] = "fail_write"
         return
     if stage == "fail_write":
-        if not _reviewer_settled():
+        if not _reviewer_answerable(state):
             return
         import ankiscape
         engine = ankiscape._EVOLVED_CTX.get("engine")
@@ -5070,7 +5098,7 @@ def _poll_ui_recovery(state):
         state["stage"] = "recover"
         return
     if stage == "recover":
-        if not _reviewer_settled():
+        if not _reviewer_answerable(state):
             return
         if not state.get("recovery_answered"):
             if not _answer_current_card(state):
