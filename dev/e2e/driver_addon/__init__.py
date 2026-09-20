@@ -5577,6 +5577,15 @@ def _lag_probe_start(state):
     # len(lag_ms) + len(rebuild_lag_ms).
     state.setdefault("lag_phase", [])
     state.setdefault("rebuild_lag_phase", [])
+    # The same idea again, for time. A rebuild's watched window and the answers
+    # it blocks are two views of one interval, and the arrays alone cannot say
+    # whether the blocks fall inside the window or after it -- which decides
+    # whether holding the watch until the loop is quiet RE-ATTRIBUTES the stall
+    # or EXTENDS the rebuild toward late_retraction_rebuild's hard limit.
+    # `lag_t0` is the shared origin; `rebuilds_at` puts each watch start on it.
+    state.setdefault("lag_at", [])
+    state.setdefault("rebuild_lag_at", [])
+    state["lag_t0"] = _time.perf_counter()
 
     def tick():
         if state.get("lag_probe_off"):
@@ -5586,13 +5595,16 @@ def _lag_probe_start(state):
         if expected is not None:
             sample = round(max(0.0, now - expected) * 1000.0, 3)
             label = _lag_probe_label(state)
+            at = round(now - state.get("lag_t0", now), 3)
             state["lag_probes"] += 1
             if state.get("rebuild_watch"):
                 state["rebuild_lag_samples"].append(sample)
                 state["rebuild_lag_phase"].append(label)
+                state["rebuild_lag_at"].append(at)
             else:
                 state["lag_samples"].append(sample)
                 state["lag_phase"].append(label)
+                state["lag_at"].append(at)
         state["lag_expected"] = now + 0.1
         QTimer.singleShot(100, tick)
 
@@ -5624,6 +5636,10 @@ def _perf_resolve_rebuild_watches(state):
         if engine is not None and revision >= watch["target"]:
             state["rebuilds"].append(
                 round((time.perf_counter() - watch["start"]) * 1000.0, 2))
+            # Same origin as the lag probes, so the window and the blocks it
+            # causes can be placed on one timeline and compared.
+            state.setdefault("rebuilds_at", []).append(
+                round(watch["start"] - state.get("lag_t0", watch["start"]), 3))
             state["rebuild_watch"].remove(watch)
 
 
@@ -5963,6 +5979,9 @@ def _poll_native_performance(state):
         state["rebuild_lag_samples"] = []
         state["lag_phase"] = []
         state["rebuild_lag_phase"] = []
+        state["lag_at"] = []
+        state["rebuild_lag_at"] = []
+        state["rebuilds_at"] = []
         state["rebuild_at"] = [int(v) for v in (cfg.get("rebuilds_at") or [])]
         state["answer_started"] = None
         state["reward_watches"] = []
@@ -6119,6 +6138,13 @@ def _poll_native_performance(state):
                    # stage without inferring it from the probe index.
                    "lag_phase": state.get("lag_phase", []),
                    "rebuild_lag_phase": state.get("rebuild_lag_phase", []),
+                   # Seconds since the same origin (`lag_t0`) for each probe and
+                   # for each rebuild watch start, so "does this block fall
+                   # inside the rebuild window or after it?" is answerable by
+                   # comparison instead of inference.
+                   "lag_at": state.get("lag_at", []),
+                   "rebuild_lag_at": state.get("rebuild_lag_at", []),
+                   "rebuilds_at": state.get("rebuilds_at", []),
                    "lag_probes": state.get("lag_probes", 0),
                    "rewards_published": state.get("rewards_published", 0),
                    "shell_ms": state.get("shell_ms", []),
