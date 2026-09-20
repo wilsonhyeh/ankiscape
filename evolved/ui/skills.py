@@ -34,6 +34,12 @@ def build_skills_screen(shell, deps: Dict[str, Any]):
         "resource": "",
         "entries": [],
     }
+    # Slots are cached by display and updated in place, so a refresh never
+    # mints a new widget set. Rebuilding instead leaves the previous slots
+    # alive as hidden children of the grid host: `clear_layout` only detaches
+    # them from the layout (`takeAt` leaves the parent alone) and defers their
+    # destruction to the event loop. Bank already works this way.
+    slots_by_display: Dict[str, Any] = {}
     tiles: Dict[str, Any] = {}
     for index, skill in enumerate(("mining", "woodcutting", "smithing",
                                    "crafting", "fishing", "cooking")):
@@ -134,17 +140,27 @@ def build_skills_screen(shell, deps: Dict[str, Any]):
                     break
             if not state["resource"] and entries:
                 state["resource"] = entries[0]["display"]
-        from .widgets import clear_layout
-        clear_layout(grid)
         columns = 5
+        order = [str(entry["display"]) for entry in entries]
         for index, entry in enumerate(entries):
-            slot = ItemSlot(scale=DEFAULT_SCALE)
-            slot.set_item(entry["display"], 0, selected=entry["selected"],
+            display = str(entry["display"])
+            slot = slots_by_display.get(display)
+            if slot is None:
+                slot = ItemSlot(scale=DEFAULT_SCALE)
+                slot.clicked = _select_resource
+                slots_by_display[display] = slot
+            slot.set_item(display, 0, selected=entry["selected"],
                           locked=entry["locked"],
                           paused=(not entry["materials_ready"]),
                           level_req=entry["level"])
-            slot.clicked = _select_resource
+            grid.removeWidget(slot)
             grid.addWidget(slot, index // columns, index % columns)
+        for display in list(slots_by_display):
+            if display not in order:
+                stale = slots_by_display.pop(display)
+                grid.removeWidget(stale)
+                stale.hide()
+                stale.deleteLater()
         grid.setRowStretch(grid.rowCount(), 1)
         _refresh_detail(rules, levels, inventory, entries)
 
