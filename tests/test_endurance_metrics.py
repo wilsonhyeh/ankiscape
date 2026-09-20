@@ -142,7 +142,8 @@ class EnduranceMetricsTests(unittest.TestCase):
         for t in range(900, 1800 + 1, 30):
             samples.append({"at_s": float(t), "rss_mib": 320.0,
                             "phase": "fixed",
-                            "answers": int(t * 2.0)})
+                            "answers": int(t * 2.0),
+                            "cycles": int((t - 900) / 1.5)})
         report = END.evaluate_endurance(samples, profile="nightly",
                                         duration_min=30.0)
         self.assertEqual(report["evaluated_phase"], "fixed")
@@ -161,7 +162,8 @@ class EnduranceMetricsTests(unittest.TestCase):
             samples.append({"at_s": float(t),
                             "rss_mib": 200.0 + (t - 900) / 60.0 * 2.0,
                             "phase": "fixed",
-                            "answers": int(t * 2.0)})
+                            "answers": int(t * 2.0),
+                            "cycles": int((t - 900) / 1.5)})
         report = END.evaluate_endurance(samples, profile="nightly",
                                         duration_min=30.0)
         self.assertFalse(report["pass"])
@@ -181,7 +183,8 @@ class EnduranceMetricsTests(unittest.TestCase):
             ramp = min(1.0, max(0.0, (t - 900) / 240.0))
             samples.append({"at_s": float(t), "rss_mib": 643.0 + ramp * 57.5,
                             "phase": "fixed",
-                            "answers": int(t * 2.0)})
+                            "answers": int(t * 2.0),
+                            "cycles": int((t - 900) / 1.5)})
         report = END.evaluate_endurance(samples, profile="nightly",
                                         duration_min=30.0)
         self.assertEqual(report["evaluated_phase"], "fixed")
@@ -197,7 +200,8 @@ class EnduranceMetricsTests(unittest.TestCase):
         for t in range(840, 1200 + 1, 30):
             samples.append({"at_s": float(t), "rss_mib": 100.0,
                             "phase": "fixed",
-                            "answers": int(t * 2.0)})
+                            "answers": int(t * 2.0),
+                            "cycles": int((t - 840) / 1.5)})
         report = END.evaluate_endurance(samples, profile="nightly",
                                         duration_min=30.0)
         self.assertTrue(any("trend_fixed_span" in f
@@ -220,6 +224,30 @@ class EnduranceMetricsTests(unittest.TestCase):
         self.assertIn("no_answers_measured", report["failures"])
         self.assertEqual(report["answers"], 0)
 
+    def test_collapsed_churn_fails_instead_of_reporting_green(self):
+        # Sibling of the guard above, on the lifecycle side. A flat fixed-phase
+        # trend is only evidence if the UI churn it measures actually ran: a
+        # change that stopped opening the shell -- or held it open past the
+        # ceiling every cycle -- would otherwise read as a leak fix. The sample
+        # here answers normally and its memory is perfectly flat, so nothing
+        # except the cycle count distinguishes it from a real pass.
+        samples = []
+        for t in range(0, 1800 + 1, 30):
+            samples.append({"at_s": float(t), "rss_mib": 400.0,
+                            "phase": "fixed", "answers": int(t * 2.0),
+                            "cycles": 3})
+        report = END.evaluate_endurance(samples, profile="nightly",
+                                        duration_min=30.0)
+        self.assertFalse(report["pass"], report["failures"])
+        self.assertIn("no_lifecycle_cycles:3", report["failures"])
+        self.assertEqual(report["fixed_cycles"], 3)
+        # And a healthy churn count must NOT trip it.
+        for sample in samples:
+            sample["cycles"] = int(sample["at_s"] / 1.5)
+        report = END.evaluate_endurance(samples, profile="nightly",
+                                        duration_min=30.0)
+        self.assertTrue(report["pass"], report["failures"])
+
     def test_answering_run_reports_its_answer_count(self):
         # Companion to the guard above: the count must be surfaced, so a
         # reviewer can tell a loaded run from an idle one without reading
@@ -238,7 +266,8 @@ class EnduranceMetricsTests(unittest.TestCase):
         for t in range(0, 1800 + 1, 30):
             samples.append({"at_s": float(t),
                             "rss_mib": 900.0 - (t / 1800.0) * 300.0,
-                            "phase": "fixed", "answers": int(t * 2.0)})
+                            "phase": "fixed", "answers": int(t * 2.0),
+                            "cycles": int(t / 1.5)})
         report = END.evaluate_endurance(samples, profile="nightly",
                                         duration_min=30.0)
         self.assertLess(report["slope_mib_per_min"], 0)

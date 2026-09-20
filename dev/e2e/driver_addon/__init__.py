@@ -761,6 +761,33 @@ def _click_rail(section):
     return False
 
 
+def _rail_ready(shell):
+    """True once every ART_SECTIONS rail button exists and is visible.
+
+    The endurance lifecycle stage waits on this instead of a fixed wall-clock
+    settle before tearing the shell down: it is the state the teardown actually
+    depends on. A fixed 0.4 s was measured working but insufficient -- it cut a
+    Qt 6.11 lane's fixed-phase retention ~2.4x (slope 7.894 -> 3.248, settled
+    75.2 -> 34.5) and still failed on slope, because some cycles still closed
+    the webview before it finished building. The rail buttons appearing is the
+    observable proxy for "the page built", and it does not depend on how fast
+    the machine is, which is exactly what the wall-clock wait got wrong.
+    """
+    try:
+        from aqt.qt import QWidget
+        found = set()
+        for child in shell.findChildren(QWidget):
+            try:
+                if (child.objectName() == "ankiscape-rail-button"
+                        and child.isVisible()):
+                    found.add(child.property("section"))
+            except Exception:
+                continue
+        return all(section in found for section in ART_SECTIONS)
+    except Exception:
+        return False
+
+
 def _open_shell_via_menu():
     """Real entry point: AnkiScape menu routing (runtime_menu_opener)."""
     try:
@@ -2796,8 +2823,17 @@ ART_SECTIONS = ("training", "skills", "bank", "achievements", "hiscores",
 # Seconds the Evolved shell must stay open before the endurance lifecycle stage
 # clicks through its sections and closes it. See the note in the `lifecycle`
 # stage: closing a webview that is still loading tears it down mid-load, which
-# leaks on a loaded runner and not on a fast local machine.
+# leaks on a loaded runner and not on a fast local machine. This is a FLOOR --
+# the stage additionally waits for the shell's UI to build (_rail_ready), which
+# is the state the teardown actually depends on.
 LIFECYCLE_SETTLE_S = 0.4
+
+# Ceiling on that readiness wait (seconds, measured from the cycle's start).
+# Bounds the wait so the churn cannot stall out if the predicate never holds;
+# cycles that reach it are counted in the sample `forced` field rather than
+# passing silently. Generous on purpose: the point is to avoid tearing down a
+# loading page, and a forced cycle is reported rather than hidden.
+LIFECYCLE_SETTLE_MAX_S = 5.0
 
 if os.environ.get("ANKISCAPE_E2E_NO_ACTIVATE"):
     _suppress_macos_activation()
@@ -5681,6 +5717,8 @@ def _poll_native_endurance(state, cfg):
             state["started_monotonic"] = _time.monotonic()
             state["answers"] = 0
             state["samples"] = []
+            state["lifecycle_cycles"] = 0
+            state["lifecycle_forced"] = 0
             state["next_sample"] = state["started_monotonic"]
             state["grow_until"] = state["started_monotonic"] + \
                 max(1.0, minutes * 60.0) * 0.5
@@ -5697,6 +5735,8 @@ def _poll_native_endurance(state, cfg):
             state["started_monotonic"] = _time.monotonic()
             state["answers"] = 0
             state["samples"] = []
+            state["lifecycle_cycles"] = 0
+            state["lifecycle_forced"] = 0
             state["next_sample"] = state["started_monotonic"]
             state["grow_until"] = state["started_monotonic"] + \
                 max(1.0, minutes * 60.0) * 0.5
@@ -5739,23 +5779,40 @@ def _poll_native_endurance(state, cfg):
                 "phase": "fixed", "rss_mib": _rss_mib(),
                 "objects": len(gc.get_objects()),
                 "threads": threading.active_count(),
-                "answers": state["answers"]})
+                "answers": state["answers"],
+                # How much churn this trend is actually built on. Without it a
+                # run that stopped cycling reads exactly like a run that
+                # stopped leaking -- the same failure mode `no_answers_measured`
+                # already guards on the reviewer side.
+                "cycles": state.get("lifecycle_cycles", 0),
+                "forced": state.get("lifecycle_forced", 0)})
         if now >= state.get("lifecycle_end", 0):
             state["stage"] = "finish"
             return
         # One UI lifecycle cycle: open the shell, visit every section, close it.
         #
-        # Rate-limited by LIFECYCLE_SETTLE_S. This loop used to open, click six
-        # sections on a single processEvents() and close again as fast as the
-        # driver ticks -- which tears the webview down while it is still
-        # loading. That leaks on a loaded CI runner (+1.15 GB across 15 minutes
-        # of churn, baseline 916 MiB vs 238-282 MiB locally) and does not leak
-        # on a fast local machine, and it is measurable as CI's endurance
+        # Rate-limited by LIFECYCLE_SETTLE_S, and additionally held open until
+        # the shell's UI has actually built (_rail_ready). This loop used to
+        # open, click six sections on a single processEvents() and close again
+        # as fast as the driver ticks -- which tears the webview down while it
+        # is still loading. That leaks on a loaded CI runner (+1.15 GB across 15
+        # minutes of churn, baseline 916 MiB vs 238-282 MiB locally) and does not
+        # leak on a fast local machine, and it is measurable as CI's endurance
         # slope of +58 to +70 MiB/min against a machine that reports memory
         # FALLING. A real user cannot open the shell, visit six sections and
-        # close it ten times a second, so waiting for the shell to settle
-        # before tearing it down is both more faithful and avoids the mid-load
-        # teardown. Cycles that never settle are reported rather than silent.
+        # close it ten times a second, so waiting for the shell to settle before
+        # tearing it down is both more faithful and avoids the mid-load
+        # teardown.
+        #
+        # The wall-clock 0.4 s alone was measured working but insufficient:
+        # against a Qt 6.11 lane it cut the fixed-phase retention ~2.4x
+        # (slope 7.894 -> 3.248, settled 75.2 -> 34.5) and still failed on
+        # slope, because some cycles still tore down before the page finished.
+        # _rail_ready is the state the teardown actually depends on. The
+        # existing floor is kept, so this can only ever hold the shell open
+        # LONGER than before -- never shorter -- and LIFECYCLE_SETTLE_MAX_S
+        # bounds the wait so the churn cannot stall out. Cycles that hit the
+        # ceiling are counted in `forced` rather than passing silently.
         shell = _find_shell()
         if shell is None:
             state.pop("cycle_started", None)
@@ -5767,6 +5824,11 @@ def _poll_native_endurance(state, cfg):
             return
         if now - started < LIFECYCLE_SETTLE_S:
             return
+        settled = _rail_ready(shell)
+        if not settled and (now - started) < LIFECYCLE_SETTLE_MAX_S:
+            return
+        if not settled:
+            state["lifecycle_forced"] = state.get("lifecycle_forced", 0) + 1
         from aqt.qt import QApplication
         for section in ART_SECTIONS:
             _click_rail(section)
@@ -5776,6 +5838,7 @@ def _poll_native_endurance(state, cfg):
         except Exception:
             pass
         state["cycle_started"] = None
+        state["lifecycle_cycles"] = state.get("lifecycle_cycles", 0) + 1
         return
     if stage == "finish":
         import ankiscape

@@ -25,6 +25,14 @@ SAMPLE_INTERVAL_S = 30.0
 # measuring (release uses its full 30-minute warm-up instead).
 TREND_MIN_FIXED_MIN = 10.0
 TREND_WARMUP_MIN = 5.0
+# A flat fixed-phase trend is only evidence if the UI churn it measures actually
+# ran. The reviewer side already fails an unanswered run (`no_answers_measured`)
+# after a deck ran dry and produced "a flat, entirely plausible-looking trend --
+# and a pass" while measuring an idle application; the lifecycle stage had no
+# equivalent. Without a floor, any change that stopped opening the shell (or
+# held it open indefinitely) would read as a leak fix. A real fixed phase is
+# ~15 minutes, so even a 8-second cycle yields >100; this only catches collapse.
+MIN_LIFECYCLE_CYCLES = 100
 
 
 def _finite(value: Any) -> bool:
@@ -130,6 +138,7 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
     series = fixed if len(fixed) >= 2 else valid
     fixed_span_min = None
     trend_warmup_dropped = 0
+    fixed_cycles = 0
     if len(fixed) >= 2:
         fixed_span_min = (float(fixed[-1]["at_s"])
                           - float(fixed[0]["at_s"])) / 60.0
@@ -146,6 +155,14 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
             if len(trimmed) >= 2:
                 trend_warmup_dropped = len(series) - len(trimmed)
                 series = trimmed
+        if trend:
+            # Fail a flat trend the churn never actually produced. Samples
+            # predating the `cycles` field read as 0, which fails loudly rather
+            # than passing a run whose churn is unmeasured.
+            fixed_cycles = max(
+                (int(s.get("cycles", 0) or 0) for s in fixed), default=0)
+            if fixed_cycles < MIN_LIFECYCLE_CYCLES:
+                failures.append(f"no_lifecycle_cycles:{fixed_cycles}")
     if trend:
         duration_s = max(float(series[-1]["at_s"]), duration_min * 60.0)
         window_start_s = max(0.0, duration_s - window_min * 60.0)
@@ -195,6 +212,8 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
         "fixed_samples": len(fixed), "fixed_span_min":
             round(fixed_span_min, 1) if fixed_span_min is not None else None,
         "trend_warmup_dropped": trend_warmup_dropped,
+        "fixed_cycles": fixed_cycles,
+        "fixed_cycles_min": MIN_LIFECYCLE_CYCLES,
         "growing_samples": len(growing),
         "growing_rss_change_mib": growing_change,
         "slope_mib_per_min": round(slope, 3),
