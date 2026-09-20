@@ -58,6 +58,57 @@ def _load_journey():
         pass
 
 
+def _suppress_macos_activation() -> None:
+    """Stop an e2e Anki from stealing the foreground on macOS.
+
+    The harness launches the REAL GUI -- it has to, these are GUI journeys --
+    and on macOS that activates the app, so a 30- or 120-minute endurance run
+    makes the machine unusable for its whole duration. Setting the process's
+    activation policy to Accessory (1) removes it from the Dock and stops it
+    claiming focus, without changing anything the journeys exercise: the driver
+    manipulates widgets programmatically (findChild / _click_rail / setText)
+    rather than through real input events.
+
+    Opt-in via ANKISCAPE_E2E_NO_ACTIVATE so normal journeys are unaffected, and
+    `native_performance.py` sets it for the long perf/endurance runs. Anki's
+    bundle ships no PyObjC, so the ObjC runtime is driven through ctypes; every
+    call is guarded and a failure is simply ignored.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+        # AppKit must be linked before objc_getClass can resolve NSApplication:
+        # in a plain interpreter the class is absent, and only a GUI host (Anki
+        # here) would otherwise have loaded it. Verified: without this the
+        # lookup returns None and the whole call is a silent no-op.
+        try:
+            ctypes.CDLL("/System/Library/Frameworks/AppKit.framework/AppKit")
+        except OSError:
+            pass
+        lib = ctypes.CDLL(ctypes.util.find_library("objc")
+                          or "/usr/lib/libobjc.A.dylib")
+        lib.objc_getClass.restype = ctypes.c_void_p
+        lib.objc_getClass.argtypes = [ctypes.c_char_p]
+        lib.sel_registerName.restype = ctypes.c_void_p
+        lib.sel_registerName.argtypes = [ctypes.c_char_p]
+        addr = ctypes.cast(lib.objc_msgSend, ctypes.c_void_p).value
+        send0 = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p,
+                                 ctypes.c_void_p)(addr)
+        send1 = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p,
+                                 ctypes.c_void_p, ctypes.c_long)(addr)
+        cls = lib.objc_getClass(b"NSApplication")
+        if not cls:
+            return
+        app = send0(cls, lib.sel_registerName(b"sharedApplication"))
+        if not app:
+            return
+        send1(app, lib.sel_registerName(b"setActivationPolicy:"), 1)
+    except Exception:
+        pass
+
+
 def _base_dir():
     # baseFolder() was removed after Anki 23.10; profileFolder() remains.
     # Base dir = parent of the profile folder; fall back to legacy API.
@@ -2741,6 +2792,16 @@ def _poll_ui_lifecycle(state):
 
 ART_SECTIONS = ("training", "skills", "bank", "achievements", "hiscores",
                 "guide", "settings")
+
+# Seconds the Evolved shell must stay open before the endurance lifecycle stage
+# clicks through its sections and closes it. See the note in the `lifecycle`
+# stage: closing a webview that is still loading tears it down mid-load, which
+# leaks on a loaded runner and not on a fast local machine.
+LIFECYCLE_SETTLE_S = 0.4
+
+if os.environ.get("ANKISCAPE_E2E_NO_ACTIVATE"):
+    _suppress_macos_activation()
+
 ART_SCREEN_NAMES = {
     "training": "ankiscape-screen-training",
     "skills": "ankiscape-screen-skills",
@@ -5682,10 +5743,29 @@ def _poll_native_endurance(state, cfg):
         if now >= state.get("lifecycle_end", 0):
             state["stage"] = "finish"
             return
-        # One UI lifecycle cycle per tick: open/close shell + section changes.
+        # One UI lifecycle cycle: open the shell, visit every section, close it.
+        #
+        # Rate-limited by LIFECYCLE_SETTLE_S. This loop used to open, click six
+        # sections on a single processEvents() and close again as fast as the
+        # driver ticks -- which tears the webview down while it is still
+        # loading. That leaks on a loaded CI runner (+1.15 GB across 15 minutes
+        # of churn, baseline 916 MiB vs 238-282 MiB locally) and does not leak
+        # on a fast local machine, and it is measurable as CI's endurance
+        # slope of +58 to +70 MiB/min against a machine that reports memory
+        # FALLING. A real user cannot open the shell, visit six sections and
+        # close it ten times a second, so waiting for the shell to settle
+        # before tearing it down is both more faithful and avoids the mid-load
+        # teardown. Cycles that never settle are reported rather than silent.
         shell = _find_shell()
         if shell is None:
+            state.pop("cycle_started", None)
             _open_shell_via_menu()
+            return
+        started = state.get("cycle_started")
+        if started is None:
+            state["cycle_started"] = now
+            return
+        if now - started < LIFECYCLE_SETTLE_S:
             return
         from aqt.qt import QApplication
         for section in ART_SECTIONS:
@@ -5695,6 +5775,7 @@ def _poll_native_endurance(state, cfg):
             shell.close()
         except Exception:
             pass
+        state["cycle_started"] = None
         return
     if stage == "finish":
         import ankiscape
