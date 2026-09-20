@@ -282,5 +282,36 @@ class EnduranceMetricsTests(unittest.TestCase):
         self.assertFalse(report["eligible_for_release"])
 
 
+    def test_no_fixed_phase_fails_instead_of_reporting_green(self):
+        # The churn guard, the leak evaluation and the warm-up trim all live
+        # inside `if len(fixed) >= 2`, so a run that produced growing samples
+        # only skips every one of them and reports pass=True with
+        # evaluated_phase="all". "We did not measure the lifecycle" is not "the
+        # lifecycle is clean": this is the same false green that
+        # no_answers_measured and no_lifecycle_cycles exist to kill, one level
+        # up. The series here is flat -- a run that never opened a shell and
+        # therefore has nothing to say about retention.
+        samples = []
+        for t in range(0, 1800 + 1, 30):
+            samples.append({"at_s": float(t), "rss_mib": 100.0,
+                            "phase": "growing", "answers": int(t * 2.0)})
+        report = END.evaluate_endurance(samples, profile="nightly",
+                                        duration_min=30.0)
+        self.assertEqual(report["evaluated_phase"], "all")
+        self.assertFalse(report["pass"], report["failures"])
+        self.assertTrue(any("no_fixed_phase" in f for f in report["failures"]),
+                        report["failures"])
+
+    def test_phase_less_trend_series_is_unchanged(self):
+        # Phase-blind trend series predate the two-phase driver and are still
+        # evaluated whole (`series = valid`). The no_fixed_phase guard must not
+        # turn them red: it keys on a run that MEASURED phases and produced no
+        # fixed one, not on a run that has no phase information at all.
+        report = END.evaluate_endurance(_series(30), profile="nightly",
+                                        duration_min=30.0)
+        self.assertEqual(report["evaluated_phase"], "all")
+        self.assertFalse(any("no_fixed_phase" in f for f in report["failures"]),
+                         report["failures"])
+
 if __name__ == "__main__":
     unittest.main()

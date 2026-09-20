@@ -21,7 +21,6 @@ import argparse
 import gc
 import json
 import os
-import resource
 import sys
 import tempfile
 import threading
@@ -55,11 +54,15 @@ def _metrics_module():
     return module
 
 
-def _rss_mib() -> float:
-    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if sys.platform == "darwin":
-        return value / (1024 * 1024)
-    return value / 1024
+def _rss_module():
+    """dev/rss.py by absolute path: dev/ is not a package, so this is the same
+    loader `_metrics_module` above uses."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rss.py")
+    spec = importlib.util.spec_from_file_location("ankiscape_dev_rss", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _seed(game: str, journal: Journal, count: int) -> List[Dict[str, Any]]:
@@ -122,13 +125,19 @@ def run(minutes: float, answers_per_second: float,
             now = time.monotonic()
             if now >= next_sample:
                 next_sample = now + 30.0
-                samples.append({
-                    "at_s": round(now - start, 1), "rss_mib": round(_rss_mib(), 1),
-                    "objects": len(gc.get_objects()),
-                    "threads": threading.active_count(),
-                    "answers": answers,
-                    "worker_revision": int(
-                        (worker.latest() or {}).get("revision", 0))})
+                rss_mib = _rss_module().current_rss_mib()
+                if rss_mib is not None:
+                    # Never a 0.0 for "could not measure": a fake zero reads as
+                    # a flat, healthy slope, which is the failure mode the
+                    # endurance gate's own guards exist to prevent.
+                    samples.append({
+                        "at_s": round(now - start, 1),
+                        "rss_mib": round(rss_mib, 1),
+                        "objects": len(gc.get_objects()),
+                        "threads": threading.active_count(),
+                        "answers": answers,
+                        "worker_revision": int(
+                            (worker.latest() or {}).get("revision", 0))})
             sleep = interval - (time.monotonic() - t0)
             if sleep > 0:
                 time.sleep(sleep)

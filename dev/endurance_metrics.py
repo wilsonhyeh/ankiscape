@@ -135,6 +135,18 @@ def evaluate_endurance(samples: List[Any], *, profile: str,
              and str(s.get("phase", "")) == "fixed"]
     growing = [s for s in valid if isinstance(s, dict)
                and str(s.get("phase", "")) == "growing"]
+    # The churn guard, the leak evaluation and the warm-up trim all live inside
+    # `if len(fixed) >= 2` below, so a trend run that measured phases and
+    # produced no fixed one -- the shell was never opened -- skipped every one
+    # of them and reported `evaluated_phase: "all"` with pass=true. That is the
+    # same false green `no_answers_measured` and `no_lifecycle_cycles` exist to
+    # kill, one level up: "we did not measure the lifecycle" is not "the
+    # lifecycle is clean". A phase-less series is a different case and is still
+    # evaluated whole (`series = valid`); this keys on a run that HAS phase
+    # information and no fixed-phase sample to judge.
+    phase_aware = fixed or growing
+    if trend and phase_aware and not fixed:
+        failures.append(f"no_fixed_phase:{len(growing)}growing")
     series = fixed if len(fixed) >= 2 else valid
     fixed_span_min = None
     trend_warmup_dropped = 0
