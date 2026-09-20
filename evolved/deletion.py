@@ -366,6 +366,28 @@ class DeletionCoordinator:
         """Local-only retry after a partial cleanup; never reissues DELETE."""
         if self.phase != "cleanup_pending":
             return False
+        # Retry the identity steps FIRST, before the delete_local short-circuit.
+        # They are the ones that can fail against the OS credential store, and
+        # this method used to declare success without ever re-attempting them:
+        # with delete_local=False it cleared the marker and emitted "deleted"
+        # while the credentials that failed to clear were still in the vault.
+        # Both calls are safe to repeat -- clear_identity() returns True when
+        # the identity is already gone or superseded, detach_binding() rewrites
+        # the same empty binding -- so a retry cannot make a good state worse.
+        problems = []
+        try:
+            if not self.deps.clear_identity():
+                problems.append("credentials")
+        except Exception:
+            problems.append("credentials")
+        try:
+            if not self.deps.detach_binding():
+                problems.append("binding")
+        except Exception:
+            problems.append("binding")
+        if problems:
+            self._emit("cleanup_incomplete", problems=tuple(problems))
+            return False
         if not self.deps.delete_local:
             clear_marker(self.deps.profile_dir)
             self.phase = "done"
