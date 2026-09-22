@@ -1091,5 +1091,99 @@ class CountParsingTests(unittest.TestCase):
         self.assertEqual(counts["tests_skipped"], 2)
 
 
+class EnduranceScopingAmendmentTests(unittest.TestCase):
+    """Scoping amendment 2026-09-21 (Wilson, choice (a)): Qt 6.11 endurance
+    retention is an observation, not a gate — scoped exactly, fail-closed,
+    and never silent."""
+
+    ENDURANCE_FAIL = [
+        "budget:endurance_memory:slope:39.493",
+        "budget:endurance_memory:settled:376.5",
+    ]
+
+    def test_qt611_nightly_endurance_moves_to_warnings(self):
+        # Real payload shapes from nightly 35692375494's endurance runs.
+        failures, warnings = REL.scope_endurance_failures(
+            ["endurance:slope:39.493>1.0", "endurance:settled:376.5>50.0",
+             "endurance:not_pass", "journey_failed:x"],
+            [], observed_qt="6.11.0", profile="nightly")
+        # Only the retention verdicts move; everything else stays fatal.
+        self.assertEqual(failures, ["journey_failed:x"])
+        self.assertIn("endurance:slope:39.493>1.0", warnings)
+        # The scoping itself is recorded — never silent.
+        self.assertTrue(any(w.startswith("scoped:endurance_memory:")
+                            for w in warnings))
+
+    def test_budget_prefixed_retention_also_scoped(self):
+        # The evaluate_budgets producer uses a different prefix; both must
+        # scope or a profile change would silently re-arm the gate.
+        failures, warnings = REL.scope_endurance_failures(
+            list(self.ENDURANCE_FAIL), [], observed_qt="6.11.0",
+            profile="nightly")
+        self.assertEqual(failures, [])
+        self.assertEqual(len(warnings), 3)  # 2 entries + 1 scoping marker
+
+    def test_endurance_guard_failures_never_scoped(self):
+        # Guards mean the instrumentation is broken — they block even on a
+        # scoped Qt 6.11 lane.
+        guards = ["equivalence:false", "endurance:no_fixed_phase",
+                  "endurance:churn_guard",
+                  "budget:endurance_memory:not_measured",
+                  "endurance_raw_missing"]
+        failures, warnings = REL.scope_endurance_failures(
+            list(guards) + ["endurance:not_pass"], [],
+            observed_qt="6.11.0", profile="nightly")
+        self.assertEqual(failures, guards)
+        self.assertIn("endurance:not_pass", warnings)
+
+    def test_qt611_release_also_scoped(self):
+        failures, warnings = REL.scope_endurance_failures(
+            ["endurance:slope:39.493>1.0", "endurance:not_pass"], [],
+            observed_qt="6.11.2", profile="release")
+        self.assertEqual(failures, [])
+        self.assertEqual(len(warnings), 3)  # 2 entries + 1 scoping marker
+
+    def test_qt65_control_lane_keeps_failing(self):
+        # The exempted family is Qt 6.11 exactly: older Qt keeps the gate.
+        failures, warnings = REL.scope_endurance_failures(
+            list(self.ENDURANCE_FAIL), [],
+            observed_qt="6.5.3", profile="nightly")
+        self.assertEqual(failures, self.ENDURANCE_FAIL)
+        self.assertEqual(warnings, [])
+
+    def test_smoke_profile_untouched(self):
+        # Smoke already downgrades budgets upstream; scoping must not run
+        # there (no double handling, no misleading scope marker).
+        failures, warnings = REL.scope_endurance_failures(
+            list(self.ENDURANCE_FAIL), [], observed_qt="6.11.0",
+            profile="smoke")
+        self.assertEqual(failures, self.ENDURANCE_FAIL)
+        self.assertEqual(warnings, [])
+
+    def test_unparseable_runtime_fails_closed(self):
+        for qt in ("", "6", "abc", None):
+            failures, warnings = REL.scope_endurance_failures(
+                list(self.ENDURANCE_FAIL), [], observed_qt=qt,
+                profile="nightly")
+            self.assertEqual(failures, self.ENDURANCE_FAIL, qt)
+            self.assertEqual(warnings, [], qt)
+
+    def test_is_qt611_is_exact_not_floor(self):
+        # A future Qt 6.12 must raise the gate again, not inherit exemption.
+        self.assertTrue(REL.is_qt611("6.11.0"))
+        self.assertTrue(REL.is_qt611("6.11.4"))
+        self.assertFalse(REL.is_qt611("6.12.0"))
+        self.assertFalse(REL.is_qt611("6.5.3"))
+        self.assertFalse(REL.is_qt611("5.15.2"))
+
+    def test_shipped_budget_file_carries_scoping_amendment(self):
+        budgets = json.load(open(os.path.join(ROOT, "dev",
+                                              "reliability-budgets.json")))
+        scope = budgets.get("scoping_amendment") or {}
+        self.assertEqual(scope.get("approved_by"), "Wilson")
+        self.assertEqual(scope.get("date"), "2026-09-21")
+        self.assertIn("Qt 6.11", scope.get("decision", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

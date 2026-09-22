@@ -362,6 +362,60 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
     return failures
 
 
+def is_qt611(observed_qt: str) -> bool:
+    """Scoping amendment 2026-09-21 (Wilson): True ONLY for Qt 6.11.
+
+    Exact by design — a future Qt must raise the gate again rather than
+    inherit the exemption. Unparseable input is NOT scoped (fail closed)."""
+    parts = str(observed_qt or "").split(".")
+    try:
+        return int(parts[0]) == 6 and int(parts[1]) == 11
+    except (IndexError, ValueError):
+        return False
+
+
+def scope_endurance_failures(failures, warnings, *, observed_qt, profile):
+    """Scoping amendment 2026-09-21 (Wilson, choice (a)): endurance_memory
+    retention on Qt 6.11 lanes is a tracked CI observation, not a release
+    gate.
+
+    Evidence: A2-a falsified the QtWebEngine flag pair as the cause (nightly
+    35692375494 — flags OFF made macOS leak 10x WORSE at 39.5 MiB/min, Linux
+    identical, no 0xC0000005 returned), and local runs with the same absent
+    flags show memory falling: the runner environment is the only remaining
+    differentiator. Slope/settled numbers stay in the metrics payload; only
+    the verdict downgrades — and the scoping itself is appended to warnings,
+    so it can never be silent.
+
+    Scoped EXACTLY these retention verdict shapes (both producers):
+    `endurance:slope:`, `endurance:settled:`, `endurance:not_pass` (the
+    summary that exists because of them), `budget:endurance_memory:slope:`,
+    `budget:endurance_memory:settled:`. Everything else is untouched —
+    journeys, samples, hook, lag, idle, missing evidence
+    (`...not_measured`), and the endurance GUARD failures (equivalence,
+    no_fixed_phase, churn): those mean the instrumentation is broken and
+    must keep blocking even on a scoped lane.
+    """
+    if profile not in ("nightly", "release") or not is_qt611(observed_qt):
+        return list(failures), list(warnings)
+    scoping = ("endurance:slope:", "endurance:settled:",
+               "endurance:not_pass",
+               "budget:endurance_memory:slope:",
+               "budget:endurance_memory:settled:")
+
+    def _is_scoped(entry: str) -> bool:
+        return any(entry == p or entry.startswith(p) for p in scoping)
+
+    scoped = [f for f in failures if _is_scoped(f)]
+    if not scoped:
+        return list(failures), list(warnings)
+    kept = [f for f in failures if not _is_scoped(f)]
+    warn = list(warnings) + scoped + [
+        "scoped:endurance_memory:qt6.11_observation"
+        "(budgets scoping amendment 2026-09-21, Wilson)"]
+    return kept, warn
+
+
 # ----------------------------------------------------------------- validate
 
 def _check(condition: bool, errors: List[str], message: str) -> bool:
