@@ -38,12 +38,19 @@ OUTCOMES = frozenset({
     "offline", "service_error", "cancelled",
     "deleted", "invalid_session", "invalid_confirmation",
     "account_unavailable", "demo_immutable", "delete_unknown",
+    "email_not_waiting",
 })
 
 # User-facing copy for each outcome. Never includes server detail.
 _COPY = {
     "success": "",
-    "verification_required": "Check your email for a verification code.",
+    # Plain wording, no markup: this status label did not render <b> tags
+    # on the Qt 6.11 test build (label.text() carried them, the paint did
+    # not — probe recorded 2026-09-21). The bold emphasis for spam lives in
+    # the verify page's helper paragraph, which renders rich text correctly.
+    "verification_required": "Check your email for a verification code. "
+                             "If it is not in your inbox, check your spam "
+                             "or junk folder.",
     "email_exists": "An account already exists for this email. "
                     "Log in or reset your password.",
     "username_taken": "That username is already taken. Try another.",
@@ -65,6 +72,10 @@ _COPY = {
     "account_unavailable": "This account is unavailable right now. Try again "
                            "later or contact support.",
     "demo_immutable": "Demo accounts can't be deleted.",
+    "email_not_waiting": "No account is waiting for verification at that "
+                         "address. If you mistyped it when signing up, use "
+                         "Back to return and register with the correct "
+                         "address.",
     "delete_unknown": "Couldn't confirm whether the account was deleted.",
 }
 
@@ -211,6 +222,14 @@ def _result(status: str, *, ok: bool, needs_code: bool = False,
                          status=status if status in OUTCOMES else "service_error",
                          retry_after_s=int(retry_after_s or 0),
                          detail=str(detail or "")[:200])
+
+
+def outcome_copy(status: str) -> str:
+    """Public read of the user-facing copy table, so the flow renders the
+    SAME strings its result objects carry instead of hardcoding duplicates
+    (the verify-page status drifted from _COPY exactly once — spam-folder
+    copy, Wilson 2026-09-21)."""
+    return _COPY.get(str(status or ""), "")
 
 
 def _error_code(exc: NetError) -> str:
@@ -441,6 +460,42 @@ def resend_signup_code(post: PostFn, endpoint: Endpoint, *,
             return _result("success", ok=True)
         return classify_error(exc, context="resend")
     return _result("success", ok=True)
+
+
+def resend_preflight(post: PostFn, endpoint: Endpoint, *,
+                     email: str) -> AccountResult:
+    """Verify-page preflight (Wilson decision 2026-09-21): will a signup
+    resend to THIS address actually deliver?
+
+    The hosted GoTrue answers /resend with HTTP 200 even for addresses it
+    never sends to (anti-enumeration — probed 2026-09-21: `200 {}` for a
+    nonexistent email), so the resend call itself can never reveal the
+    truth; `resend_signup_code`'s not_found masking above is dead code
+    against this server. `check_account_status` — the Edge Function that
+    already answers new/unconfirmed/confirmed for managed signup — is asked
+    instead, BEFORE any send.
+
+    Verdicts: `confirmed` -> email_exists (log in / reset instead);
+    `new` -> email_not_waiting (the Option A honest copy); `unconfirmed`
+    -> preflight_pending (ok: the pending signup owns this address, so the
+    resend delivers). Anything unanswerable (offline, older server, an
+    unexpected result shape) falls through as `preflight_pass` (ok): never
+    strand a user because a probe could not be answered — the resend
+    decides, as it did before this check existed.
+
+    Deliberate enumeration trade-off, approved for the verify page only:
+    this reveals unconfirmed-signup existence for an address — the same
+    surface check_account_status already exposes at register time.
+    """
+    status = check_account_status(post, endpoint, email=email, username="")
+    email_status = getattr(status, "email_status", "")
+    if getattr(status, "ok", False) and email_status == "confirmed":
+        return _result("email_exists", ok=False)
+    if getattr(status, "ok", False) and email_status == "new":
+        return _result("email_not_waiting", ok=False)
+    if email_status == "unconfirmed":
+        return _result("preflight_pending", ok=True)
+    return _result("preflight_pass", ok=True)
 
 
 def delete_account(post: PostFn, endpoint: Endpoint, *, access_token: str,

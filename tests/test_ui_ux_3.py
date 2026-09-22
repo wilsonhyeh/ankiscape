@@ -100,6 +100,26 @@ class TestOnboardingModel(unittest.TestCase):
         self.assertFalse(state.complete)
         self.assertTrue(any(state.repairs))
 
+    def test_signin_resumes_welcome_draft(self):
+        # Wilson defect 2026-09-21: register -> verify -> signed in must not
+        # strand the draft on Welcome ("Create account" right after creating
+        # one). Signed-in + parked-at-welcome advances; nothing else does.
+        self.assertTrue(onb.resume_after_signin(
+            onb.OnboardingState(step="welcome"), signed_in=True))
+
+    def test_signin_leaves_midflow_and_complete_untouched(self):
+        mid = onb.OnboardingState(step="resource", gathering_skill="mining",
+                                  starting_resource="Rune essence")
+        done = onb.OnboardingState(step="done", gathering_skill="mining",
+                                   starting_resource="Rune essence",
+                                   complete=True)
+        self.assertFalse(onb.resume_after_signin(mid, signed_in=True))
+        self.assertFalse(onb.resume_after_signin(done, signed_in=True))
+
+    def test_signed_out_never_advances(self):
+        self.assertFalse(onb.resume_after_signin(
+            onb.OnboardingState(step="welcome"), signed_in=False))
+
     def test_advance_requires_valid_resource(self):
         rules = load_rules()
         state = onb.OnboardingState(step="skill", gathering_skill="fishing")

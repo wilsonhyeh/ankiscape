@@ -62,6 +62,21 @@ class _FakeAccounts:
         self.calls.append(("resend_signup", email))
         return self._next("resend_signup")
 
+    def resend_preflight(self, post, endpoint, *, email):
+        self.calls.append(("preflight", email))
+        values = self.script.get("preflight") or []
+        if values:
+            return values.pop(0)
+        # Unscripted = the real preflight's pass-through verdicts: proceed
+        # unless a probe DEFINITELY said otherwise (never strand a user).
+        return AccountResult(True, status="success")
+
+    def outcome_copy(self, status):
+        # Delegate to the real table so the fake can never drift from the
+        # copy the product actually renders.
+        from evolved.accounts import outcome_copy
+        return outcome_copy(status)
+
     def set_new_password(self, post, endpoint, *, access_token, new_password):
         self.calls.append(("set_password", access_token, new_password))
         return self._next("set_password")
@@ -380,6 +395,103 @@ class TestVerifyEmailField(unittest.TestCase):
         accounts.push("recovery", AccountResult(True))
         flow.resend_code()
         self.assertEqual(accounts.calls[-1], ("recovery", "b@x.com"))
+
+
+class TestResendPreflight(unittest.TestCase):
+    """Wilson decision 2026-09-21 (Option A): the verify page never claims
+    a code was requested for an address with no pending signup. Hosted
+    GoTrue answers /resend with 200 even when it sends nothing (probed
+    2026-09-21), so the truth comes from the account-status probe that
+    runs BEFORE any send."""
+
+    def _at_verify(self):
+        now = {"t": 1000.0}
+        flow, accounts, events = _flow()
+        flow.ctx.now = lambda: now["t"]
+        accounts.push("status", AccountStatus(True, email_status="new"))
+        accounts.push("register", AccountResult(
+            True, status="verification_required", needs_code=True))
+        flow.start("register")
+        flow.submit_register("wilson", "w@example.com", "pw123456")
+        self.assertEqual(flow.page, "verify")
+        now["t"] += 61
+        return flow, accounts, events
+
+    def test_resend_refused_when_no_account_is_waiting(self):
+        flow, accounts, events = self._at_verify()
+        accounts.push("preflight", AccountResult(
+            False, "No account is waiting for verification at that "
+                   "address. If you mistyped it when signing up, use "
+                   "Back to return and register with the correct "
+                   "address.", status="email_not_waiting"))
+        flow.resend_code("nobody@example.com")
+        self.assertFalse(
+            any(c[0] == "resend_signup" for c in accounts.calls))
+        self.assertIn("No account is waiting", flow.error)
+
+    def test_resend_proceeds_for_pending_signup(self):
+        flow, accounts, events = self._at_verify()
+        accounts.push("preflight", AccountResult(True, status="success"))
+        accounts.push("resend_signup", AccountResult(True))
+        flow.resend_code("pending@example.com")
+        self.assertEqual(accounts.calls[-1],
+                         ("resend_signup", "pending@example.com"))
+
+    def test_resend_confirmed_address_points_at_login(self):
+        flow, accounts, events = self._at_verify()
+        accounts.push("preflight", AccountResult(
+            False, "An account already exists for this email. "
+                   "Log in or reset your password.",
+            status="email_exists"))
+        flow.resend_code("already@example.com")
+        self.assertFalse(
+            any(c[0] == "resend_signup" for c in accounts.calls))
+        self.assertIn("already exists", flow.error)
+
+
+class TestResendPreflightMapping(unittest.TestCase):
+    """The REAL resend_preflight verdicts against a fake account-status
+    post — the seam where Option A's truth actually comes from, since
+    hosted GoTrue answers /resend with 200 no matter what."""
+
+    @staticmethod
+    def _post(email_status):
+        def post(endpoint, path, body):
+            return {"email_status": email_status, "username_available": True}
+        return post
+
+    def test_new_address_refuses_with_honest_copy(self):
+        from evolved.accounts import resend_preflight
+        result = resend_preflight(self._post("new"), None,
+                                  email="nobody@example.com")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "email_not_waiting")
+        self.assertIn("No account is waiting", result.error)
+
+    def test_unconfirmed_passes_for_the_send(self):
+        from evolved.accounts import resend_preflight
+        result = resend_preflight(self._post("unconfirmed"), None,
+                                  email="pending@example.com")
+        self.assertTrue(result.ok)
+
+    def test_confirmed_points_at_login(self):
+        from evolved.accounts import resend_preflight
+        result = resend_preflight(self._post("confirmed"), None,
+                                  email="already@example.com")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "email_exists")
+
+    def test_unanswerable_answer_passes_through(self):
+        # Never strand a user because the probe could not be answered:
+        # offline/older server/malformed body falls through to the resend
+        # itself, which behaved this way before Option A existed.
+        from evolved.accounts import resend_preflight
+
+        def post(endpoint, path, body):
+            return "garbage"
+
+        result = resend_preflight(post, None, email="keepgoing@example.com")
+        self.assertTrue(result.ok)
 
 
 class TestAutoRecheck(unittest.TestCase):

@@ -980,6 +980,10 @@ def _open_evolved_shell() -> bool:
         if getattr(mw, "col", None) is None:
             _evolved_note_shell_error("no collection")
             return False
+        # Self-heal a draft stranded on Welcome by a completed sign-in
+        # (Wilson defect 2026-09-21): the account window now advances it
+        # at close; this covers state created before that fix.
+        _evolved_resume_onboarding_after_signin()
         deps = _evolved_shell_deps()
         ok = bool(show_shell(mw, deps))
         if not ok:
@@ -1379,6 +1383,27 @@ def _evolved_onboarding_advance() -> dict:
     if col is not None:
         _onb.save(lambda k, v: col.set_config(k, v), state)
     return state.to_dict()
+
+
+def _evolved_resume_onboarding_after_signin() -> bool:
+    """A sign-in from the first-run Welcome step continues into setup instead
+    of stranding the draft on Welcome (Wilson defect 2026-09-21: register ->
+    verify -> signed in -> back to "Create account"). Reads signed-in state
+    from the ProfileSession (the account window's _install writes user_id
+    there), and advances only when the pure predicate agrees — mid-flow or
+    completed drafts are never touched. Idempotent; safe on every refresh."""
+    try:
+        from .evolved import onboarding as _onb
+        sess = _evolved_profile_session()
+        signed_in = bool(getattr(sess, "user_id", None)
+                         or _EVOLVED_CTX.get("user_id"))
+        state = _evolved_onboarding_state()
+        if not _onb.resume_after_signin(state, signed_in=signed_in):
+            return False
+        _evolved_onboarding_advance()
+        return True
+    except Exception:
+        return False
 
 
 def _evolved_onboarding_back() -> dict:
@@ -2309,6 +2334,10 @@ def _evolved_account_window(page: str = "login") -> dict:
     finally:
         if _EVOLVED_CTX.get("account_flow") is flow:
             _EVOLVED_CTX["account_flow"] = None
+    # Wilson defect 2026-09-21: a sign-in from first-run Welcome continues
+    # into setup instead of stranding the draft on "Create account". No-op
+    # unless the pure predicate agrees (signed in, welcome, not complete).
+    _evolved_resume_onboarding_after_signin()
     _evolved_refresh_views()
     return result if isinstance(result, dict) else {"ok": False}
 

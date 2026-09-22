@@ -31,20 +31,34 @@ address is required for step 1.
    rejected, the new one signs in.
 8. **Restart remembers session** — Restart Anki (Resume profile). Expected:
    still signed in without re-entering the password; pending drains.
-9. **Duplicate resend guard** — On any verification page, Resend should be
-   disabled for 60 seconds after a request and never claims a code was sent
-   when it wasn’t requested.
-10. **Resend route** — On the verification page, edit the email field to
-    another address you control, click Resend, and check that the message
-    arrives at the EDITED address (not the original). The status line should
-    say a new code was requested without promising delivery. If the server
-    refuses because of an email limit, the message must say when to retry.
-11. **Fresh-start acknowledgement** — With a fresh profile (or before any
-    Evolved game is activated), click Try Evolved from the Classic menu or
-    Settings → Advanced. Expected: prominent "Evolved starts fresh." text with
+9. **Duplicate resend guard** — The first code is sent automatically when
+   you reach the verification page: that is expected, signup sends it.
+   Resend must then be disabled for 60 seconds (counting down), and
+   nothing on the page may claim a code was sent when it wasn’t actually
+   requested.
+10. **Resend: same address, then edited address** — (a) On the
+    verification page, click Resend WITHOUT editing: the status must say
+    a new code was requested without promising delivery, and a code
+    arrives at the address the signup was created with (subject to the
+    email rate limit — if refused, the message must say when to retry).
+    (b) Then edit the email field to another address you control and
+    click Resend. If that address has NO pending signup (the
+    typo-recovery case), the page must say so honestly — “No account is
+    waiting for verification at that address” — never a phantom
+    “requested” — and Back must return to registration keeping the
+    fields. (The server answers 200 to any resend address, so this
+    honesty comes from the add-on’s preflight check, not the server.)
+11. **Fresh-start acknowledgement** — On a fresh profile the add-on opens
+    straight into Evolved setup, so there is no Classic menu yet: first
+    click **Continue Classic** (bottom-left of the Welcome screen), then
+    from the Classic menu or Settings → Advanced click **Try Evolved**
+    (this applies whenever no Evolved game has been activated yet).
+    Expected: prominent "Evolved starts fresh." text with
     the acknowledgement checkbox; Try Evolved stays disabled until it is
     checked; canceling changes nothing. After Evolved is activated, later
     switches show no notice and never restart either game.
+    (Navigation clarified 2026-09-21: "fresh profile → Classic menu" alone
+    was unreachable — the fresh profile lands in Evolved setup.)
 12. **Account deletion (deliberate throwaway)** — Use ONLY the throwaway
     account from step 1 (never a real-progress account). Settings → Account →
     Delete account… Expected: the window explains what is removed, requires
@@ -54,9 +68,14 @@ address is required for step 1.
     game is gone from the leaderboard, and local progress remains. If the
     reply is lost, the app says it could not confirm deletion and offers a
     read-only check — do not repeat the deletion manually.
-13. **Deletion cleanup scope** — After deletion, confirm the account cannot
-    log in or re-register with the same email as a fresh account owner, and
-    that the local game still opens for offline play (keep-local choice).
+13. **Deletion cleanup scope** — After deletion, confirm the old account
+    cannot log in, that the local game still opens for offline play
+    (keep-local choice), and that re-registering with the same email
+    succeeds and yields a GENUINELY FRESH account — no old sessions,
+    links, or rows attached. That freshness is the proof the cleanup was
+    complete; a blocked re-registration is NOT expected (corrected
+    2026-09-21: no spec ever required an email hold, and a hold would
+    retain the very address deletion promises to erase).
 
 If a step fails, note the screen, the exact message, and whether the header
 said pending/offline; that is enough to reproduce without logs.
