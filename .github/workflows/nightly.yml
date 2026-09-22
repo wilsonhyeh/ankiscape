@@ -204,22 +204,17 @@ jobs:
           ANKISCAPE_CANDIDATE_LOCKED: "1"
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
+          # Headless CI has no usable GPU: the QtWebEngine GPU fallback path
+          # crashed during scale changes (0xC0000005 / kTransientFailure).
+          # Confined to CI test runners; never shipped. A2-a (2026-09-21)
+          # removed this pair from the 26.8.1 lanes to test whether it caused
+          # the endurance retention — it does NOT: nightly 35692375494 leaked
+          # 10x WORSE on macOS without it (39.5 vs 4.0 MiB/min) and Linux was
+          # identical. Reverted the same day; the retention question is now
+          # tracked as a scoping amendment, not a flag suspicion.
+          QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu"
+          QTWEBENGINE_DISABLE_SANDBOX: "1"
         run: |
-          # A2-a (Wilson, 2026-09-21): scope the QtWebEngine GPU/sandbox
-          # workaround to the lanes whose crashes justified it — the
-          # Qt5/23.10 scale-change failures (0xC0000005 / kTransientFailure).
-          # The three 26.8.1 / Qt 6.11 lanes run WITHOUT it: they are the
-          # lanes where endurance retention leaks (inside the predicted band)
-          # and the flags were never justified for them. Exported here rather
-          # than set in step env so the variables are truly ABSENT, not empty
-          # — an empty QTWEBENGINE_DISABLE_SANDBOX would still read as SET to
-          # a presence check. CI runners only; never shipped. If the original
-          # crash returns on a 26.8.1 lane, that lane genuinely needs the
-          # flags — the next nightly answers either way.
-          if [ "${{ matrix.anki }}" != "26.8.1" ]; then
-            export QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu"
-            export QTWEBENGINE_DISABLE_SANDBOX="1"
-          fi
           RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
           if [ "${{ matrix.os }}" = "linux" ]; then
             xvfb-run -a python3 dev/reliability.py run-lane --stage nightly \
