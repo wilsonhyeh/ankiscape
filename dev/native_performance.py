@@ -553,6 +553,10 @@ def main(argv=None) -> int:
     # a tracked observation, not a gate. Numbers stay in `metrics`; the
     # verdict moves to warnings, and the scoping itself is recorded there
     # so it can never be silent. Journey/sample/hook/lag failures untouched.
+    # `rel` is module-cached via _rel() — the name itself is function-local
+    # wherever else it is bound (nightly 35713320196 crashed here with
+    # NameError before the payload was written; that exact line is why).
+    rel = _rel()
     failures, warnings = rel.scope_endurance_failures(
         failures, warnings,
         observed_qt=str((observed or {}).get("qt") or ""),
