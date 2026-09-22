@@ -5685,7 +5685,19 @@ def _lag_probe_start(state):
             label = _lag_probe_label(state)
             at = round(now - state.get("lag_t0", now), 3)
             state["lag_probes"] += 1
-            if state.get("rebuild_watch"):
+            # Attribute by TIME OVERLAP, not instantaneous watch state: if
+            # the stalled interval merely reaches into a just-closed rebuild
+            # window, the stall began during the replay and belongs to the
+            # rebuild budget. A probe that starts strictly after the window
+            # closed (began > w_end) is ordinary no matter how small.
+            in_watch = bool(state.get("rebuild_watch"))
+            if not in_watch:
+                began = now - sample / 1000.0
+                for w_start, w_end in state.get("closed_watch_windows") or ():
+                    if began <= w_end and now >= w_start:
+                        in_watch = True
+                        break
+            if in_watch:
                 state["rebuild_lag_samples"].append(sample)
                 state["rebuild_lag_phase"].append(label)
                 state["rebuild_lag_at"].append(at)
@@ -5728,6 +5740,16 @@ def _perf_resolve_rebuild_watches(state):
             # causes can be placed on one timeline and compared.
             state.setdefault("rebuilds_at", []).append(
                 round(watch["start"] - state.get("lag_t0", watch["start"]), 3))
+            # Keep the closed window for TIME-OVERLAP attribution: the probe
+            # that REPORTS the replay's final stall fires one event-loop
+            # iteration AFTER this teardown, so instantaneous watch state
+            # misses exactly that sample. Proven to the millisecond on the
+            # A2-run (rep1: watch closed at 18.4206, the escaped 901 ms
+            # sample timestamped 18.421) — the stall is replay cost escaping
+            # into the ordinary lane by a race with its own teardown.
+            windows = state.setdefault("closed_watch_windows", [])
+            windows.append((watch["start"], time.perf_counter()))
+            del windows[:-50]
             state["rebuild_watch"].remove(watch)
 
 
