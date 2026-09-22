@@ -6,6 +6,12 @@
     "approved_by": "Wilson",
     "decision": "Context-aware native performance gates: ordinary responsiveness budgets unchanged; rebuild-window latency and rebuild-blocked rewards separately measured and bounded; macOS event-loop-lag p95 compared against its paired control when the runner baseline alone exceeds the absolute limit."
   },
+  "scoping_amendment": {
+    "date": "2026-09-21",
+    "approved_by": "Wilson",
+    "decision": "endurance_memory retention (slope_mib_per_min / settled_increase_mib) on Qt 6.11 lanes is a tracked CI observation, not a release gate: evaluated as warnings via scope_endurance_failures() for nightly and release profiles only. Qt 6.5 and earlier keep failing; unparseable runtime info fails closed; the metric numbers themselves are unchanged in the payload and the scoping itself is recorded as a warning.",
+    "evidence": "A2-a falsified the QtWebEngine flag pair as the cause (nightly 35692375494: flags OFF = macOS 39.5 MiB/min vs 4.0 with flags, Linux identical, no 0xC0000005 crash returned); local macOS with the same absent flags shows memory falling — the runner environment is the remaining differentiator."
+  },
   "note": "Fixed acceptance targets from the AnkiScape reliability plan. These are not measured promises; changing one requires a documented plan amendment. Disk-full/locked-db failures are tested for safe degradation, not expected to meet normal successful-write latency.",
   "budgets": {
     "accepted_answer_hook": {

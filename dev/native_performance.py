@@ -549,6 +549,15 @@ def main(argv=None) -> int:
             failures.append(f"native_performance_metrics_{state} "
                             f"rep={index} path={run.get('metrics_path', '')}")
 
+    # Scoping amendment 2026-09-21 (Wilson): Qt 6.11 endurance retention is
+    # a tracked observation, not a gate. Numbers stay in `metrics`; the
+    # verdict moves to warnings, and the scoping itself is recorded there
+    # so it can never be silent. Journey/sample/hook/lag failures untouched.
+    failures, warnings = rel.scope_endurance_failures(
+        failures, warnings,
+        observed_qt=str((observed or {}).get("qt") or ""),
+        profile=args.profile)
+
     payload = {
         "schema": "ankiscape-native-performance", "version": 1,
         "profile": args.profile,
