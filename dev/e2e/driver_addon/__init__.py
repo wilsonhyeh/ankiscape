@@ -4354,10 +4354,15 @@ def _poll_ui_account_lifecycle(state):
         if page != "register":
             state["stage"] = "abort"
             return
+        # Visual evidence for the register surface (public-username hint +
+        # confirm-password row, Wilson 2026-09-21): a green fill only proves
+        # the widgets exist, never that the page reads right.
+        _shot("account-register")
         _account_fill(dlg, {
             "ankiscape-account-username": state["username"],
             "ankiscape-account-email": state["email"],
-            "ankiscape-account-register-password": state["password"]})
+            "ankiscape-account-register-password": state["password"],
+            "ankiscape-account-register-confirm-password": state["password"]})
         _account_click(dlg, "ankiscape-account-primary")
         state["stage"] = "await_verify_page"
         state["stage_ticks"] = 0
@@ -4374,12 +4379,24 @@ def _poll_ui_account_lifecycle(state):
         page = _account_page(dlg)
         if page == "verify":
             _step("registration_reached_verify", True)
+            # Visual evidence for the verify surface (spam-folder copy,
+            # Wilson 2026-09-21): the page users stare at while the code
+            # sits in spam must be looked at, not asserted.
+            _shot("account-verify")
+            # Ground truth for the status line: the flow's own value vs
+            # what the label renders — screenshot vs source disagreed once.
+            _flow_probe = getattr(dlg, "_account_flow", None)
+            _step("verify_status_probe", True,
+                  "label="
+                  f"{_account_label_text(dlg, 'ankiscape-account-status')!r} "
+                  "flow="
+                  f"{getattr(_flow_probe, 'status', None)!r}")
             check = _account_widget(dlg, "ankiscape-account-check-status")
             # A flat GoTrue signup response must reach verification without
             # the manual "Check status" fallback ever appearing.
             _step("no_manual_status_needed",
                   check is None or not check.isVisible(), "check visible")
-            state["stage"] = "verify_edit_email"
+            state["stage"] = "verify_resend_same"
             state["code_ticks"] = 0
             return
         state["stage_ticks"] = state.get("stage_ticks", 0) + 1
@@ -4388,6 +4405,67 @@ def _poll_ui_account_lifecycle(state):
                   _account_diagnostic(dlg))
             _account_fake_stop()
             _finish(1)
+        return
+
+    if stage == "verify_resend_same":
+        # Phase 1 of the resend contract (Option A, 2026-09-21): a resend
+        # to the address the signup OWNS must issue a real signup resend.
+        dlg = _account_window()
+        if dlg is None:
+            _step("resend_route", False, "window closed before resend")
+            _account_fake_stop()
+            _finish(1)
+            return
+        try:
+            flow = getattr(dlg, "_account_flow", None)
+            if flow is not None:
+                flow._resend_available_at = 0.0
+        except Exception:
+            pass
+        _account_click(dlg, "ankiscape-account-resend")
+        state["stage"] = "verify_await_same"
+        state["same_ticks"] = 0
+        return
+
+    if stage == "verify_await_same":
+        dlg = _account_window()
+        if dlg is None:
+            _step("resend_route", False, "window closed during resend")
+            _account_fake_stop()
+            _finish(1)
+            return
+        original = str(state.get("email", "")).lower()
+        if mode == "faults":
+            sent = _ACCOUNT_FAKE.get("last_resend") or {}
+            if (sent.get("type") == "signup"
+                    and sent.get("email") == original):
+                _step("resend_route", True, f"signup -> {sent.get('email')}")
+                state["stage"] = "verify_edit_email"
+                return
+        else:
+            status = _account_label_text(dlg, "ankiscape-account-status")
+            if "requested" in status.lower():
+                _step("resend_route", True, status[:60])
+                state["stage"] = "verify_edit_email"
+                return
+        # A single first-tick click can race the button's enable state; the
+        # pre-Option-A loop retried, so this one re-arms and re-clicks every
+        # tick (a click while the flow is busy is a silent no-op).
+        try:
+            flow = getattr(dlg, "_account_flow", None)
+            if flow is not None:
+                flow._resend_available_at = 0.0
+        except Exception:
+            pass
+        _account_click(dlg, "ankiscape-account-resend")
+        state["same_ticks"] = state.get("same_ticks", 0) + 1
+        if state["same_ticks"] > 300:
+            _step("resend_route", False,
+                  f"last_resend={_ACCOUNT_FAKE.get('last_resend')} "
+                  "status="
+                  f"{_account_label_text(dlg, 'ankiscape-account-status')[:60]!r} "
+                  + _account_diagnostic(dlg))
+            state["stage"] = "abort"
         return
 
     if stage == "verify_edit_email":
@@ -4419,37 +4497,46 @@ def _poll_ui_account_lifecycle(state):
             _account_fake_stop()
             _finish(1)
             return
+        # Option A contract (2026-09-21): an EDITED address with no pending
+        # signup gets the honest refusal — never a phantom "requested".
+        # Phase 1's "requested" status legitimately lingers here, so status
+        # text proves NOTHING in this stage; only the error label and the
+        # fake's last_resend carry the verdict.
+        err = _account_label_text(dlg, "ankiscape-account-error").lower()
+        if "waiting for verification" in err or "already exists" in err:
+            _step("resend_edit_refused", True, err[:80])
+            state["stage"] = "verify_code"
+            return
         if mode == "faults":
             sent = _ACCOUNT_FAKE.get("last_resend") or {}
             if (sent.get("type") == "signup"
                     and sent.get("email") == state.get("edited_email", "").lower()):
-                _step("resend_route", True, f"signup -> {sent.get('email')}")
-                state["stage"] = "verify_code"
+                # The preflight let a no-pending address reach /resend —
+                # the exact defect Option A exists to prevent. Fail loudly.
+                _step("resend_edit_refused", False,
+                      f"preflight bypassed: {sent}")
+                state["stage"] = "abort"
                 return
-            if "requested" not in _account_label_text(
-                    dlg, "ankiscape-account-status").lower():
-                # The cooldown button may still be catching up: keep trying.
-                _account_fill(dlg, {"ankiscape-account-verify-email-input":
-                                    state.get("edited_email", "")})
-                try:
-                    flow = getattr(dlg, "_account_flow", None)
-                    if flow is not None:
-                        flow._resend_available_at = 0.0
-                except Exception:
-                    pass
-                _account_click(dlg, "ankiscape-account-resend")
-        else:
-            status = _account_label_text(dlg, "ankiscape-account-status")
-            if "requested" in status.lower():
-                # Real stack: the resend endpoint accepted the request; the
-                # recipient stays the edited address from the field.
-                _step("resend_route", True, status[:60])
-                state["stage"] = "verify_code"
-                return
+        # Re-fill, re-arm and re-click EVERY tick: the first click can race
+        # the button's enable state (it did, twice), and a click while the
+        # flow is busy is a silent no-op, so retries are safe. The error
+        # label is read at the START of each tick, before clicking, so an
+        # apply that lands between ticks is always seen.
+        _account_fill(dlg, {"ankiscape-account-verify-email-input":
+                            state.get("edited_email", "")})
+        try:
+            flow = getattr(dlg, "_account_flow", None)
+            if flow is not None:
+                flow._resend_available_at = 0.0
+        except Exception:
+            pass
+        _account_click(dlg, "ankiscape-account-resend")
         state["resend_ticks"] = state.get("resend_ticks", 0) + 1
         if state["resend_ticks"] > 300:
-            _step("resend_route", False,
+            _step("resend_edit_refused", False,
                   f"last_resend={_ACCOUNT_FAKE.get('last_resend')} "
+                  "status="
+                  f"{_account_label_text(dlg, 'ankiscape-account-status')[:60]!r} "
                   + _account_diagnostic(dlg))
             state["stage"] = "abort"
         return
@@ -4627,7 +4714,8 @@ def _poll_ui_account_lifecycle(state):
         _account_fill(dlg, {
             "ankiscape-account-username": state["username"],
             "ankiscape-account-email": state["email"],
-            "ankiscape-account-register-password": state["password"]})
+            "ankiscape-account-register-password": state["password"],
+            "ankiscape-account-register-confirm-password": state["password"]})
         _account_click(dlg, "ankiscape-account-primary")
         state["stage"] = "duplicate_await"
         state["dup_ticks"] = 0

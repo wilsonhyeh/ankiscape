@@ -187,6 +187,14 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     username.setMaxLength(20)
     register_form.addRow("Username (3\u201320, a\u2013z 0\u20139 _):", username)
     inputs["username"] = username
+    # Wilson 2026-09-21: the username is public on the Hiscores unless the
+    # owner later hides it (players.visible_on_board defaults true) - say
+    # so before they type their real name.
+    username_hint = muted_label(
+        "Your username is public on the Hiscores - pick a display name, "
+        "not your real name.", wrap=True)
+    username_hint.setObjectName("ankiscape-account-username-hint")
+    register_form.addRow("", username_hint)
     email = QLineEdit()
     email.setObjectName("ankiscape-account-email")
     email.setMaxLength(320)
@@ -194,6 +202,9 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     inputs["email"] = email
     _secret_row(register_form, "register_password", "Password:",
                 "ankiscape-account-register-password")
+    _secret_row(register_form, "register_password_confirm",
+                "Confirm password:",
+                "ankiscape-account-register-confirm-password")
     register_notice = body_label("", wrap=True)
     register_notice.setObjectName("ankiscape-account-register-notice")
 
@@ -226,7 +237,9 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
     verify_email.setObjectName("ankiscape-account-verify-email")
     verify_email.setText(
         "Enter the code we emailed you for this account. Codes can take a "
-        "minute. Resend is available after the cooldown; providers may "
+        "minute. <b>If it is not in your inbox, check your spam or junk "
+        "folder — verification emails from AnkiScape often land there.</b> "
+        "Resend is available after the cooldown; providers may "
         "limit repeated requests.")
     verify_layout.insertWidget(1, verify_email)
     verify_email_input = QLineEdit()
@@ -401,7 +414,8 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
         if page not in page_index:
             return
         stack.setCurrentIndex(page_index[page])
-        for key in ("password", "register_password", "code", "new_password",
+        for key in ("password", "register_password",
+                    "register_password_confirm", "code", "new_password",
                     "recovery_code", "delete_password"):
             edit = inputs.get(key)
             if edit is not None and page_index[page] != _page_index_for_input(key):
@@ -475,7 +489,8 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
 
     def _page_index_for_input(key: str) -> int:
         return {
-            "password": 0, "register_password": 1, "code": 2,
+            "password": 0, "register_password": 1,
+            "register_password_confirm": 1, "code": 2,
             "recovery_code": 4, "new_password": 4, "delete_password": 6,
         }.get(key, -1)
 
@@ -568,9 +583,16 @@ def build_account_window(parent, flow, *, runner: Optional[Callable] = None,
                               inputs["password"].text(),
                               bool(inputs["remember"].isChecked()))
         elif page == "register":
+            password = inputs["register_password"].text()
+            confirm = inputs["register_password_confirm"].text()
+            if password != confirm:
+                # Wilson 2026-09-21: client-side gate - a mismatch never
+                # reaches the flow, let alone the server.
+                error.setText("Passwords don't match.")
+                return
+            error.setText("")
             flow.submit_register(inputs["username"].text(),
-                                 inputs["email"].text(),
-                                 inputs["register_password"].text())
+                                 inputs["email"].text(), password)
         elif page == "verify":
             flow.submit_verify(inputs["code"].text(),
                                inputs["verify_email"].text())

@@ -396,7 +396,11 @@ class AccountFlow:
         def apply(result: AccountResult) -> None:
             if result.status == "verification_required":
                 self._verify_email = fields["email"]
-                self._set_status("Check your email for a verification code.")
+                # Same string the result object carries — this was a
+                # hardcoded duplicate and drifted from _COPY once already
+                # (spam-folder copy, Wilson 2026-09-21).
+                self._set_status(accounts.outcome_copy(
+                    "verification_required"))
                 self._resend_available_at = self.ctx.now() + RESEND_MIN_INTERVAL_S
                 self._present("verify", focus="code")
                 self._emit("resend", available_in=self.resend_available_in())
@@ -790,6 +794,15 @@ class AccountFlow:
 
         def work():
             if page == "verify":
+                # Option A (Wilson 2026-09-21): ask whether the recipient
+                # has a pending signup BEFORE asking for a send. Hosted
+                # GoTrue 200s /resend even when it sends nothing, so an
+                # unanswerable or refused preflight must be the only way
+                # the user learns the truth.
+                pre = accounts.resend_preflight(ctx.post, ctx.endpoint,
+                                                email=recipient)
+                if not pre.ok:
+                    return pre
                 return accounts.resend_signup_code(ctx.post, ctx.endpoint,
                                                    email=recipient)
             return accounts.request_recovery(ctx.post, ctx.endpoint,
@@ -799,9 +812,12 @@ class AccountFlow:
             wait = max(RESEND_MIN_INTERVAL_S, int(result.retry_after_s or 0))
             self._resend_available_at = self.ctx.now() + wait
             if result.ok:
-                self._set_status("A new code was requested\u2014check the "
-                                 "email for this account; it may take a "
-                                 "minute.")
+                # Plain wording (no markup): status-label rich text was not
+                # reliable across builds — see _COPY["verification_required"].
+                self._set_status(
+                    "A new code was requested — check the email for this "
+                    "account; it may take a minute. If you do not see it, "
+                    "look in your spam or junk folder.")
             else:
                 self._set_error(result.error)
             self._emit("resend", available_in=wait)

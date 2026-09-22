@@ -309,6 +309,16 @@ def decide_first_load(*, requested: Optional[str], has_request: bool,
             "reason": "fresh_install"}
 
 
+def resume_after_signin(state: OnboardingState, *, signed_in: bool) -> bool:
+    """D6 continuation (Wilson defect 2026-09-21): after an account-window
+    sign-in, a draft still parked on Welcome must advance into setup —
+    otherwise the user lands back on "Create account" having just created
+    one. True only for a signed-in, incomplete draft AT welcome: mid-flow
+    and completed setup are never touched by this path."""
+    return bool(signed_in) and (not state.complete) \
+        and state.step == "welcome"
+
+
 def advance(state: OnboardingState, rules: Dict[str, Any]) -> OnboardingState:
     """Move one step forward, validating selections as it goes."""
     if state.step == "welcome":
