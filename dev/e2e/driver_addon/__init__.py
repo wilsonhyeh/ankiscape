@@ -489,6 +489,7 @@ def run():
                 extra["beat_error"] = repr(exc)[:200]
             with open(_out_path("heartbeat.json"), "w", encoding="utf-8") as fh:
                 json.dump({"run_id": RUN_ID, "journey": JOURNEY, "phase": PHASE,
+                           "pid": os.getpid(),
                            "ticks": state["ticks"], "answered": state["answered"],
                            "state_id": id(state),
                            "calls": state.get("calls", 0),
@@ -6355,6 +6356,16 @@ try:
             # Fatal-signal stack (SIGSEGV/SIGABRT during Qt teardown) never
             # reaches the watchdog dump; send it to the captured stderr.
             faulthandler.enable()
+            # External stall probe (2026-09-22): when this journey's
+            # heartbeat goes stale, the e2e waiter sends SIGUSR1 and this
+            # dumps the frozen frame — the one channel that still works
+            # after _quit has cancelled the timed dump (the known teardown
+            # wedge), and independent of the 45 s timer's lifetime.
+            try:
+                import signal as _signal
+                faulthandler.register(_signal.SIGUSR1, file=fh)
+            except Exception:
+                pass
         except Exception:
             pass
         from aqt.qt import QTimer

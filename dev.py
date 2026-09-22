@@ -1040,6 +1040,7 @@ def _wait_e2e_phase(child, base: str, run_id: str, log_path: str,
     assertions = os.path.join(base, "e2e-assertions.json")
     relaunch = os.path.join(base, "relaunch.json")
     deadline = time.time() + max(30, int(timeout_s))
+    dump_sent_at = None
     while time.time() < deadline:
         if os.path.exists(assertions):
             try:
@@ -1058,6 +1059,45 @@ def _wait_e2e_phase(child, base: str, run_id: str, log_path: str,
                 pass
         if child.poll() is not None:
             break  # exited without assertions -> diagnose from log
+        # Stall detector (2026-09-22): a frozen or dead journey used to burn
+        # the ENTIRE phase_timeout (~41 min for perf) polling corpse files
+        # with no diagnosis — the exp-run seed-death was discovered 43 min
+        # late with a 0-byte faulthandler. The driver writes a heartbeat
+        # (with pid) every tick: if the CURRENT run's heartbeat goes >90 s
+        # old while the child still exists, SIGUSR1 makes faulthandler dump
+        # the frozen frame; 30 s later, name the stall (alive = frozen,
+        # dead = collected crash report) and fail fast instead of waiting
+        # out the deadline.
+        hb_path = os.path.join(base, "e2e-heartbeat.json")
+        try:
+            hb_age = time.time() - os.stat(hb_path).st_mtime
+            with open(hb_path, encoding="utf-8") as _hb:
+                hb_run = _json.load(_hb).get("run_id")
+        except (OSError, ValueError):
+            hb_age, hb_run = -1.0, None
+        if hb_run == run_id and hb_age > 90:
+            if child.poll() is not None:
+                _collect_crash_reports(base)
+                print(f"dev: (e2e) heartbeat stalled {hb_age:.0f}s and Anki "
+                      f"is DEAD (exit {child.returncode}); crash report(s) "
+                      f"collected into the phase base", file=sys.stderr)
+                break
+            if dump_sent_at is None:
+                dump_sent_at = time.time()
+                try:
+                    import signal as _signal
+                    os.kill(child.pid, _signal.SIGUSR1)
+                    print(f"dev: (e2e) heartbeat stale {hb_age:.0f}s; "
+                          f"SIGUSR1 -> pid {child.pid}; waiting 30 s for the "
+                          f"frame dump", file=sys.stderr)
+                except OSError:
+                    print("dev: (e2e) heartbeat stale; child unsignalable",
+                          file=sys.stderr)
+            elif time.time() - dump_sent_at > 30:
+                print(f"dev: (e2e) heartbeat stalled ALIVE ({hb_age:.0f}s) — "
+                      f"frozen, not dead; dump requested; failing fast "
+                      f"instead of waiting out phase_timeout", file=sys.stderr)
+                break
         time.sleep(2)
     _kill_owned_child(child, base)
     print(f"dev: (e2e) no phase output; Anki log tail:", file=sys.stderr)
@@ -1069,6 +1109,33 @@ def _wait_e2e_phase(child, base: str, run_id: str, log_path: str,
     print("dev: ERROR: e2e produced no phase output (crash, forwarding, or hang)",
           file=sys.stderr)
     return "timeout"
+
+
+def _collect_crash_reports(base: str) -> list:
+    """Copy the newest macOS crash reports into the phase base so lane
+    evidence carries the FAULTING FRAME when Anki dies mid-journey —
+    SIGKILL/segfault leave nothing in faulthandler or stdout (the 2026-09-22
+    seed-death corpse sat unexamined for exactly this reason)."""
+    import glob as _glob
+    import shutil
+    cutoff = time.time() - 3600
+    copied = []
+    for pattern in ("~/Library/Logs/DiagnosticReports/*.ips",
+                    "~/Library/Logs/DiagnosticReports/*.crash"):
+        newest = sorted(_glob.glob(os.path.expanduser(pattern)),
+                        key=os.path.getmtime, reverse=True)[:4]
+        for path in newest:
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    continue
+                shutil.copy2(path,
+                             os.path.join(base, os.path.basename(path)))
+                copied.append(os.path.basename(path))
+            except OSError:
+                continue
+    for name in copied:
+        print(f"dev: (e2e) collected crash report: {name}", file=sys.stderr)
+    return copied
 
 
 def _e2e_sync_suite(anki: str) -> int:
