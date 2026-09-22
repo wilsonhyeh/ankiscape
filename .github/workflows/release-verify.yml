@@ -236,9 +236,18 @@ jobs:
           ANKISCAPE_CANDIDATE_LOCKED: "1"
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
-          QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu"
-          QTWEBENGINE_DISABLE_SANDBOX: "1"
         run: |
+          # A2-a (Wilson, 2026-09-21): same scoping as nightly.yml — the
+          # GPU/sandbox workaround stays on the crash-justified Qt5/23.10
+          # lanes only; the three 26.8.1 / Qt 6.11 lanes run without it so
+          # release evidence is collected under the same condition the next
+          # nightly validates. Exported (not step env) so the variables are
+          # truly ABSENT — an empty QTWEBENGINE_DISABLE_SANDBOX would still
+          # read as SET to a presence check. CI runners only; never shipped.
+          if [ "${{ matrix.anki }}" != "26.8.1" ]; then
+            export QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu"
+            export QTWEBENGINE_DISABLE_SANDBOX="1"
+          fi
           RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
           if [ "${{ matrix.os }}" = "linux" ]; then
             xvfb-run -a python3 dev/reliability.py run-lane --stage release \
