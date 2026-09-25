@@ -357,6 +357,8 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
     metrics["event_loop_lag"] = _summary(lag)
     metrics["event_loop_lag"]["control_p95_ms"] = \
         rel.nearest_rank_percentile(control_lag, 95) if control_lag else None
+    metrics["event_loop_lag"]["control_max_ms"] = \
+        max(control_lag) if control_lag else None
     metrics["event_loop_lag"]["rebuild_window"] = _summary(rebuild_lag)
     metrics["warm_shell_open"] = _summary(warm_shells)
     metrics["cold_shell_appearance"] = {"ms": min(colds) if colds else None,

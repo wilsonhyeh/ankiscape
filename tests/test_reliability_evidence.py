@@ -879,6 +879,41 @@ class BudgetEvaluationTests(unittest.TestCase):
         failures = REL.evaluate_budgets(metrics, self.DELTA_BUDGETS)
         self.assertIn("budget:event_loop_lag:p95:220.0", failures)
 
+    # -------------------------------------------- max paired control delta
+    # Decision A (Wilson 2026-09-21): the same paired-control rule for max_ms.
+
+    MAX_DELTA_BUDGETS = {"budgets": {"event_loop_lag": {
+        "metric": "p95_ms", "limit": 50.0,
+        "p95_control_delta_ms": 50.0, "max_limit_ms": 200.0,
+        "max_control_delta_ms": 50.0}}}
+
+    def test_max_over_absolute_within_control_delta_passes(self):
+        metrics = {"event_loop_lag": {"p95_ms": 20.0, "max_ms": 217.0,
+                                      "control_p95_ms": 10.0,
+                                      "control_max_ms": 170.0}}
+        self.assertEqual(
+            REL.evaluate_budgets(metrics, self.MAX_DELTA_BUDGETS), [])
+
+    def test_max_over_absolute_beyond_control_delta_fails(self):
+        metrics = {"event_loop_lag": {"p95_ms": 20.0, "max_ms": 560.0,
+                                      "control_p95_ms": 10.0,
+                                      "control_max_ms": 26.0}}
+        failures = REL.evaluate_budgets(metrics, self.MAX_DELTA_BUDGETS)
+        self.assertIn("budget:event_loop_lag:max:560.0", failures)
+
+    def test_control_max_missing_fails_absolute(self):
+        metrics = {"event_loop_lag": {"p95_ms": 20.0, "max_ms": 220.0,
+                                      "control_p95_ms": 10.0}}
+        failures = REL.evaluate_budgets(metrics, self.MAX_DELTA_BUDGETS)
+        self.assertIn("budget:event_loop_lag:max:220.0", failures)
+
+    def test_fast_control_baseline_still_holds_absolute_max(self):
+        metrics = {"event_loop_lag": {"p95_ms": 20.0, "max_ms": 459.0,
+                                      "control_p95_ms": 10.0,
+                                      "control_max_ms": 97.0}}
+        failures = REL.evaluate_budgets(metrics, self.MAX_DELTA_BUDGETS)
+        self.assertIn("budget:event_loop_lag:max:459.0", failures)
+
     def test_control_p95_missing_fails_absolute(self):
         metrics = {"event_loop_lag": {"p95_ms": 220.0, "max_ms": 220.0}}
         failures = REL.evaluate_budgets(metrics, self.DELTA_BUDGETS)
@@ -971,6 +1006,7 @@ class BudgetEvaluationTests(unittest.TestCase):
         self.assertEqual(lag["limit"], 50.0)
         self.assertEqual(lag["max_limit_ms"], 200.0)
         self.assertEqual(lag["p95_control_delta_ms"], 50.0)
+        self.assertEqual(lag["max_control_delta_ms"], 50.0)
         self.assertEqual(lag["rebuild_window"]["max_limit_ms"], 5000.0)
         rewards = budgets["budgets"]["reward_completion"]
         self.assertEqual(rewards["limit"], 250.0)
