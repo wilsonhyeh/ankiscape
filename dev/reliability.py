@@ -317,7 +317,16 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
                     and p95 - _num(control_p95) <= _num(delta_limit)):
                 _fail("event_loop_lag", f"p95:{lag.get('p95_ms')}")
         if _num(lag.get("max_ms"), 0.0) > _num(cfg["event_loop_lag"]["max_limit_ms"]):
-            _fail("event_loop_lag", f"max:{lag.get('max_ms')}")
+            # Decision A (Wilson 2026-09-21): same paired-control rule as p95.
+            # A runner baseline that already eats the ceiling must not fail
+            # the product for its own noise; only an addon-attributable delta
+            # beyond the bound fails. Missing control fails closed absolute.
+            control_max = lag.get("control_max_ms")
+            delta_limit = cfg["event_loop_lag"].get("max_control_delta_ms")
+            if not (control_max is not None and delta_limit is not None
+                    and _num(lag.get("max_ms")) - _num(control_max)
+                    <= _num(delta_limit)):
+                _fail("event_loop_lag", f"max:{lag.get('max_ms')}")
         rebuild = lag.get("rebuild_window")
         rebuild_limit = (cfg["event_loop_lag"].get("rebuild_window")
                          or {}).get("max_limit_ms")
