@@ -305,7 +305,15 @@ def build_settings_screen(shell, deps: Dict[str, Any]):
         result = shell.call(name, default={}) or {}
         from aqt.utils import showInfo, showWarning
         if result.get("ok"):
-            showInfo("Backup exported." if name == "on_export" else "Backup restored.", parent=shell)
+            if name == "on_export":
+                showInfo("Backup exported.", parent=shell)
+            else:
+                # Report what the restore actually did: a same-game rollback
+                # removes newer operations, and the user must see that number
+                # rather than a bare success (a bare "restored" once hid a
+                # merge that restored nothing).
+                showInfo(f"Backup restored: {result.get('operations', 0)} operations restored, "
+                         f"{result.get('removed_operations', 0)} newer removed.", parent=shell)
         elif result.get("error") != "cancelled":
             showWarning(str(result.get("error", "Could not complete the backup action.")), parent=shell)
     export.clicked.connect(lambda: backup_action("on_export"))

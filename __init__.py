@@ -3420,16 +3420,27 @@ def _evolved_restore_backup() -> dict:
             return {"ok": False, "error": "Leave the reviewer before restoring a backup."}
         engine = _ensure_evolved_engine()
         different = engine is None or engine.cfg.game_uuid != game_uuid
-        message = (f"Restore {len(bundle.get('operations', []))} saved operations "
-                   f"from game {game_uuid[:8]}?\n\n")
-        message += ("This opens the backup's Evolved game and signs out of the current account. "
-                    "Your current game remains saved separately. Anki cards are unchanged."
-                    if different else "This merges missing history into the current game. "
-                    "Existing operations and Anki cards are preserved.")
+        saved = len(bundle.get("operations", []))
+        if different:
+            message = (f"Restore {saved} saved operations "
+                       f"from game {game_uuid[:8]}?\n\n"
+                       "This opens the backup's Evolved game and signs out of the current account. "
+                       "Your current game remains saved separately. Anki cards are unchanged.")
+        else:
+            try:
+                current = engine.journal.count_game_operations(game_uuid)
+            except Exception:
+                current = None
+            newer = ("" if current is None
+                     else f" ({current} now, {max(0, current - saved)} newer will be removed)")
+            message = (f"Restore {saved} saved operations "
+                       f"from game {game_uuid[:8]}?{newer}\n\n"
+                       "This ROLLS BACK the current game to the backup: operations recorded after "
+                       "the backup was exported are removed. Anki cards are unchanged.")
         if not askUser(message, parent=getattr(mw, "ankiscape_evolved_shell", None) or mw):
             return {"ok": False, "error": "cancelled"}
         if not different:
-            counts = engine.journal.import_game(game_uuid, bundle)
+            counts = engine.journal.replace_game(game_uuid, bundle)
             engine.hydrate()
         else:
             pm = getattr(mw, "pm", None)

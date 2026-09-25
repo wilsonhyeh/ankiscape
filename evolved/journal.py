@@ -803,6 +803,43 @@ class Journal:
                                 "payload": _json.loads(r["payload_json"])} for r in ops],
                 "observations": [dict(r) for r in obs]}
 
+    def _insert_backup_operation(self, op: Dict[str, Any],
+                                   game_uuid: str) -> int:
+        """Insert one backup op row (+ outbox row + known keys). Returns 1 if
+        the operation row was added, 0 if ignored or malformed. Call inside
+        an open write transaction only."""
+        payload = op.get("payload", {}) or {}
+        try:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO operations(op_id, game_uuid, device_id,"
+                " device_seq, lamport, kind, payload_json, payload_hash,"
+                " created_at, acked) VALUES(?,?,?,?,?,?,?,?,?,0)",
+                (op["op_id"], game_uuid, op["device_id"],
+                 int(op["device_seq"]), int(op["lamport"]), op["kind"],
+                 canonical_json(payload).decode("utf-8"),
+                 payload_hash(payload), int(time.time())))
+            added = cur.rowcount
+            self._conn.execute(
+                "INSERT OR IGNORE INTO outbox(op_id, enqueued_at) VALUES(?,?)",
+                (op["op_id"], int(time.time())))
+            self._register_known_keys(op)
+        except (KeyError, ValueError, TypeError):
+            return 0
+        return added
+
+    def _insert_backup_observation(self, ob: Dict[str, Any]) -> int:
+        """Insert one backup observation row. Returns 1 if added, 0 if
+        ignored or malformed. Call inside an open write transaction only."""
+        try:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO review_observations(review_key, revlog_id,"
+                " card_id, fingerprint, first_seen) VALUES(?,?,?,?,?)",
+                (ob["review_key"], int(ob["revlog_id"]), int(ob["card_id"]),
+                 ob["fingerprint"], int(time.time())))
+        except (KeyError, ValueError, TypeError):
+            return 0
+        return cur.rowcount
+
     def import_game(self, game_uuid: str, data: Dict[str, Any]) -> Dict[str, int]:
         """Restore from a validated backup. Existing op_ids are kept (no dupes)."""
         ops = data.get("operations", [])
@@ -815,38 +852,107 @@ class Journal:
                 for op in ops:
                     if op.get("game_uuid") != game_uuid:
                         continue
-                    payload = op.get("payload", {}) or {}
-                    try:
-                        cur = self._conn.execute(
-                            "INSERT OR IGNORE INTO operations(op_id, game_uuid, device_id,"
-                            " device_seq, lamport, kind, payload_json, payload_hash,"
-                            " created_at, acked) VALUES(?,?,?,?,?,?,?,?,?,0)",
-                            (op["op_id"], game_uuid, op["device_id"],
-                             int(op["device_seq"]), int(op["lamport"]), op["kind"],
-                             canonical_json(payload).decode("utf-8"),
-                             payload_hash(payload), int(time.time())))
-                        added_ops += cur.rowcount
-                        self._conn.execute(
-                            "INSERT OR IGNORE INTO outbox(op_id, enqueued_at) VALUES(?,?)",
-                            (op["op_id"], int(time.time())))
-                        self._register_known_keys(op)
-                    except (KeyError, ValueError, TypeError):
-                        continue
+                    added_ops += self._insert_backup_operation(op, game_uuid)
                 for ob in obs:
-                    try:
-                        cur = self._conn.execute(
-                            "INSERT OR IGNORE INTO review_observations(review_key, revlog_id,"
-                            " card_id, fingerprint, first_seen) VALUES(?,?,?,?,?)",
-                            (ob["review_key"], int(ob["revlog_id"]), int(ob["card_id"]),
-                             ob["fingerprint"], int(time.time())))
-                        added_obs += cur.rowcount
-                    except (KeyError, ValueError, TypeError):
-                        continue
+                    added_obs += self._insert_backup_observation(ob)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
         return {"operations": added_ops, "observations": added_obs}
+
+    def replace_game(self, game_uuid: str, data: Dict[str, Any]) -> Dict[str, int]:
+        """Restore a validated backup OVER the live game: rollback, not merge.
+
+        import_game() only ever adds (INSERT OR IGNORE), so restoring a backup
+        of the SAME game after further reviews leaves the newer operations in
+        place and the projection unchanged -- a restore that reports success
+        while restoring nothing (observed 2026-09-25: level stayed 2 after a
+        "successful" restore of a level-1 backup). Replace instead: within one
+        transaction, drop this game's operations that are not in the backup
+        (plus their outbox rows, which SQLite only cascades when foreign_keys
+        is enforced, plus their derived known_review_keys and any
+        quarantine rejections, which reference op_ids that will no longer
+        exist), rebuild the observation set from exactly the backup's rows
+        (otherwise pruned reviews could never be re-earned through the
+        duplicate gate), then insert the backup. Pruning is scoped per game
+        via the doomed op_id list; the observation table itself carries no
+        game column (export_game dumps it whole), so a multi-game journal
+        file would also lose other games' newer observations -- journal files
+        are one-per-game in practice (journal_path_for_profile), and that
+        assumption is stated rather than hidden.
+        Metadata (catchup_frontier et al.) is a monotonic high-water mark and
+        is left alone: post-restore reviews carry newer revlog ids and credit
+        normally. Freshly inserted ops land acked=0 and re-enqueued, so a
+        linked account re-uploads the backup state (duplicates are
+        acknowledged idempotently server-side).
+        Returns added counts plus removed_operations so the caller reports
+        honestly instead of declaring success over zero changes.
+        """
+        ops = data.get("operations", [])
+        obs = data.get("observations", [])
+        if not isinstance(ops, list) or not isinstance(obs, list):
+            raise ValueError("backup operations/observations must be lists")
+        backup_ids = sorted({op["op_id"] for op in ops
+                             if isinstance(op, dict)
+                             and op.get("game_uuid") == game_uuid
+                             and isinstance(op.get("op_id"), str)})
+        ob_keys = sorted({ob["review_key"] for ob in obs
+                          if isinstance(ob, dict)
+                          and isinstance(ob.get("review_key"), str)})
+        added_ops = 0
+        added_obs = 0
+        removed_ops = 0
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._conn.execute(
+                    "SELECT op_id FROM operations WHERE game_uuid=?",
+                    (game_uuid,)).fetchall()
+                doomed = sorted({r["op_id"] for r in rows}
+                                - set(backup_ids))
+                if doomed:
+                    dph = ",".join("?" for _ in doomed)
+                    self._conn.execute(
+                        "DELETE FROM outbox WHERE op_id IN"
+                        f" ({dph})", (*doomed,))
+                    self._conn.execute(
+                        "DELETE FROM known_review_keys WHERE op_id IN"
+                        f" ({dph})", (*doomed,))
+                    self._conn.execute(
+                        "DELETE FROM rejected_operations WHERE op_id IN"
+                        f" ({dph})", (*doomed,))
+                    cur = self._conn.execute(
+                        "DELETE FROM operations WHERE op_id IN"
+                        f" ({dph})", (*doomed,))
+                    removed_ops = cur.rowcount
+                if ob_keys:
+                    oph = ",".join("?" for _ in ob_keys)
+                    self._conn.execute(
+                        "DELETE FROM review_observations WHERE review_key NOT IN"
+                        f" ({oph})", (*ob_keys,))
+                else:
+                    self._conn.execute("DELETE FROM review_observations")
+                for op in ops:
+                    if op.get("game_uuid") != game_uuid:
+                        continue
+                    added_ops += self._insert_backup_operation(op, game_uuid)
+                for ob in obs:
+                    added_obs += self._insert_backup_observation(ob)
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return {"operations": added_ops, "observations": added_obs,
+                "removed_operations": removed_ops}
+
+    def count_game_operations(self, game_uuid: str) -> int:
+        """Number of journaled operations for one game (dialog copy only)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM operations WHERE game_uuid=?",
+                (game_uuid,)).fetchone()
+        return int(row["n"])
 
     def backup_to(self, dest_path: str) -> None:
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
