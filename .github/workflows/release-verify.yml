@@ -59,6 +59,19 @@ jobs:
           expected = os.environ["ANKISCAPE_PROD_URL"].rstrip("/")
           assert url.rstrip("/") == expected, (url, expected)
           print("baked host:", url)
+          # The build used to assert the endpoint but never the credential:
+          # a revoked key produced a green build, a green aggregate, and an
+          # addon that cannot reach its backend. Fail closed here instead.
+          # Key material is never printed; only the HTTP outcome is.
+          import urllib.request
+          key = re.search(r"SUPABASE_ANON_KEY = '([^']+)'", text).group(1)
+          assert key, "baked anon key missing"
+          req = urllib.request.Request(
+              expected + "/auth/v1/settings",
+              headers={"apikey": key, "Authorization": "Bearer " + key})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              assert r.status == 200, r.status
+          print("baked anon key authenticates: HTTP 200")
           PY
       - name: Full suite, package build and archive audit
         run: |
