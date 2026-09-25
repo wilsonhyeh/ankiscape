@@ -3464,6 +3464,47 @@ def _evolved_restore_backup() -> dict:
                                 sync_service=None, session=None)
             _ensure_evolved_engine()
         _evolved_refresh_views()
+        # The worker recomputes asynchronously after hydrate/invalidate, so
+        # the immediate refresh above can render pre-recompute state -- and
+        # after a rollback the worker's publish is the event that makes the
+        # new state visible. Re-read on a bounded timer chain once the worker
+        # has published past this restore (or the tries run out), instead of
+        # blocking: spinning here would starve the worker of the GIL.
+        # Observed 2026-09-25: without this, the shell kept showing the
+        # pre-restore level after a verified rollback until navigation.
+        _restore_wall = time.time()
+
+        def _refresh_after_restore(tries_left=8):
+            try:
+                engine_now = _EVOLVED_CTX.get("engine")
+                worker = (getattr(engine_now, "_worker", None)
+                          if engine_now is not None else None)
+                if worker is None:
+                    _evolved_refresh_views()
+                    return
+                status = worker.status()
+                published = bool(
+                    not status.get("busy", False)
+                    and float(status.get("published_at", 0) or 0)
+                    >= _restore_wall)
+            except Exception:
+                _evolved_refresh_views()
+                return
+            if not published and tries_left > 0:
+                try:
+                    from aqt.qt import QTimer as _QTimer
+                    _QTimer.singleShot(
+                        1000, lambda: _refresh_after_restore(tries_left - 1))
+                except Exception:
+                    pass
+                return
+            _evolved_refresh_views()
+
+        try:
+            from aqt.qt import QTimer as _QTimer
+            _QTimer.singleShot(1500, lambda: _refresh_after_restore())
+        except Exception:
+            pass
         return {"ok": True, **counts}
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:300]}
