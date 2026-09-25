@@ -178,6 +178,85 @@ class TestBackup(unittest.TestCase):
             self.assertEqual(after[dimension], reference[dimension], dimension)
         self.assertEqual(after, reference)
 
+    def test_same_game_restore_replaces_post_backup_operations(self):
+        """Same-game rollback is a replace, not a merge (B2 2026-09-25).
+
+        Export at level N, keep reviewing to level N+1, restore the backup:
+        the projection must return to the backup state. The old path called
+        import_game() (INSERT OR IGNORE), which kept the newer operations and
+        reported success while restoring nothing -- the live B2 failure.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        rules = load_rules()
+        game = "game-rollback"
+
+        journal = Journal(os.path.join(tmp.name, "live.sqlite3"))
+        self.addCleanup(journal.close)
+        engine = EvolvedEngine(
+            EngineConfig(game_uuid=game, device_id="dev-a",
+                         activated_at=1000, rules=rules), journal)
+
+        def _award(i, rk):
+            journal.append_operation({
+                "op_id": "op-%d" % i, "game_uuid": game,
+                "device_id": "dev-a", "device_seq": i, "lamport": i,
+                "kind": "review_award",
+                "payload": {"review_key": rk,
+                            "review_ts": 1850000000 + i, "rating": 3,
+                            "review_kind": "review", "provenance": "direct",
+                            "reward_policy": 2, "skill": "mining",
+                            "resource": "Rune essence"}})
+
+        for i in range(1, 6):
+            _award(i, "rk%d" % i)
+        reference = engine.projection()
+        self.assertGreater(reference["xp_micro"]["mining"], 0)
+        blob = export_backup(game, journal.export_game(game))
+
+        # Dirty the game past the backup point, like B2 step 5.
+        for i in range(6, 9):
+            _award(i, "rk%d" % i)
+        journal.observe_review("rk6", 600, 60, "fp6")
+        dirtied = EvolvedEngine(
+            EngineConfig(game_uuid=game, device_id="dev-b",
+                         activated_at=1000, rules=rules), journal).projection()
+        self.assertGreater(dirtied["xp_micro"]["mining"],
+                           reference["xp_micro"]["mining"])
+
+        counts = journal.replace_game(game, validate_backup(blob))
+        self.assertEqual(counts["removed_operations"], 3)
+        # Backup rows were never deleted, so re-insert is a no-op by design;
+        # the honest signal is the removed count, not the added one.
+        self.assertEqual(counts["operations"], 0)
+
+        rolled_back = EvolvedEngine(
+            EngineConfig(game_uuid=game, device_id="dev-c",
+                         activated_at=1000, rules=rules), journal).projection()
+        for dimension in ("xp_micro", "inventory", "levels", "revision"):
+            self.assertEqual(rolled_back[dimension], reference[dimension],
+                             dimension)
+        self.assertEqual(rolled_back, reference)
+        # The dirty observation went with its operations: re-reviewing that
+        # card later must credit again instead of hitting the duplicate gate.
+        self.assertEqual(
+            journal.review_observations(),
+            blob["observations"])
+
+    def test_same_game_restore_empty_backup_clears_game(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        journal = Journal(os.path.join(tmp.name, "live.sqlite3"))
+        self.addCleanup(journal.close)
+        journal.append_operation({"op_id": "op-x1", "game_uuid": "game-e",
+                                  "device_id": "dev-a", "device_seq": 1,
+                                  "lamport": 1, "kind": "review_award",
+                                  "payload": {"review_key": "rkx"}})
+        counts = journal.replace_game(
+            "game-e", {"operations": [], "observations": []})
+        self.assertEqual(counts["removed_operations"], 1)
+        self.assertEqual(journal.count_game_operations("game-e"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
