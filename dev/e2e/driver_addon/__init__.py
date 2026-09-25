@@ -5731,8 +5731,21 @@ def _perf_resolve_rebuild_watches(state):
 
     Runs in the answers and settle stages: a rebuild triggered by one of the
     last answers can still be running when the answer loop ends, and settle
-    must be able to observe it finish instead of timing out."""
+    must be able to observe it finish instead of timing out.
+
+    Publish-vs-drain split: revision catch-up means the worker has COMMITTED
+    its result, not that the main thread is free — the accepted-answer path
+    stays slow for several more answers while the aftermath drains (measured
+    2026-09-24 on linux-26.8.1-qt6: 3.79 s rebuild, then accepts of
+    1319/697/349/255/226 ms and a 459 ms ordinary-lane probe 1.1 s AFTER the
+    recorded window closed). So catch-up records the publish duration and
+    moves the watch to draining; the attribution window only closes once the
+    accept path is healthy again (see _perf_resolve_drain_watches). Duration
+    semantics are unchanged: ``rebuilds`` still measures trigger-to-publish,
+    and only the window — the thing probes attribute against — extends."""
     for watch in list(state.get("rebuild_watch", [])):
+        if watch.get("draining"):
+            continue
         revision, engine = _perf_journal_revision()
         if engine is not None and revision >= watch["target"]:
             state["rebuilds"].append(
@@ -5741,6 +5754,50 @@ def _perf_resolve_rebuild_watches(state):
             # causes can be placed on one timeline and compared.
             state.setdefault("rebuilds_at", []).append(
                 round(watch["start"] - state.get("lag_t0", watch["start"]), 3))
+            # Do NOT close the attribution window here: the probe that
+            # REPORTS the replay's final stall fires after this teardown, and
+            # the aftermath keeps stalling accepts for seconds more. Mark
+            # draining; the window closes in _perf_resolve_drain_watches.
+            # The watch stays in rebuild_watch meanwhile, so live probes keep
+            # diverting to the rebuild lane, settle keeps waiting, and reward
+            # watches keep flagging blocked — all true during the drain.
+            watch["draining"] = True
+            watch["published_at"] = time.perf_counter()
+            watch["drain_healthy"] = 0
+
+
+# Drain health is judged against the same ceiling the ordinary lane enforces:
+# an accept under 200 ms is a normal answer, not aftermath.
+DRAIN_HEALTHY_MS = 200.0
+DRAIN_HEALTHY_N = 3
+# Bounded so a genuinely slow machine cannot hold a window (and settle) open
+# forever: past the ceiling the tail is ordinary by timeout, honestly.
+DRAIN_CEILING_S = 15.0
+
+
+def _perf_resolve_drain_watches(state, accept_sample=None):
+    """Close attribution windows whose rebuild aftermath has drained.
+
+    Called per accepted answer with that answer's completion time, and per
+    settle tick with None (so the ceiling still fires when the answers end
+    mid-drain). Closes a draining watch once accepts are healthy for
+    DRAIN_HEALTHY_N in a row, or once DRAIN_CEILING_S has passed since
+    publish — whichever comes first. Closing appends (start, now) to
+    closed_watch_windows, which is the ONLY thing the time-overlap rule
+    reads; ``rebuilds`` durations recorded at publish are untouched."""
+    for watch in list(state.get("rebuild_watch", [])):
+        if not watch.get("draining"):
+            continue
+        if accept_sample is not None:
+            if accept_sample < DRAIN_HEALTHY_MS:
+                watch["drain_healthy"] = watch.get("drain_healthy", 0) + 1
+            else:
+                watch["drain_healthy"] = 0
+        drained = watch.get("drain_healthy", 0) >= DRAIN_HEALTHY_N
+        aged = (time.perf_counter() - watch.get("published_at",
+                                                time.perf_counter())
+                > DRAIN_CEILING_S)
+        if drained or aged:
             # Keep the closed window for TIME-OVERLAP attribution: the probe
             # that REPORTS the replay's final stall fires one event-loop
             # iteration AFTER this teardown, so instantaneous watch state
@@ -6145,6 +6202,10 @@ def _poll_native_performance(state):
             return
         state["accept_ms"].append(
             round((_time.perf_counter() - state["answer_started"]) * 1000.0, 2))
+        # Drain check on every accept: a draining rebuild's attribution window
+        # stays open until the accept path is healthy again (or the ceiling
+        # fires), so aftermath tails attribute to the rebuild budget.
+        _perf_resolve_drain_watches(state, state["accept_ms"][-1])
         if state.pop("watch_answer_start", None) is not None:
             # No pending key ever appeared for this answer: the reward was
             # displayed synchronously inside the accepted-answer hook.
@@ -6158,6 +6219,9 @@ def _poll_native_performance(state):
         _perf_register_reward_watches(state)
         _resolve_reward_watches(state)
         _perf_resolve_rebuild_watches(state)
+        # No new accepts arrive in settle: resolve drains on the ceiling so a
+        # watch published just before the answers ended still closes honestly.
+        _perf_resolve_drain_watches(state)
         revision, engine = _perf_journal_revision()
         target = engine.journal.operation_count() if engine is not None else 0
         pending_rewards = len(state.get("reward_watches") or [])
