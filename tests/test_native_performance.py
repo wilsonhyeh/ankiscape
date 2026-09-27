@@ -162,6 +162,29 @@ class NativePerformanceEvaluationTests(unittest.TestCase):
         _metrics, failures = NP._evaluate("smoke", cfg, runs)
         self.assertIn("budget:event_loop_lag:p95:220.0", failures)
 
+    def test_control_max_ms_recorded_from_control_runs(self):
+        cfg = _synthetic_cfg()
+        runs = _paired()
+        metrics, _failures = NP._evaluate("smoke", cfg, runs)
+        self.assertEqual(
+            metrics["event_loop_lag"]["control_max_ms"], 12.5)
+
+    def test_paired_control_max_delta_allows_shell_over_absolute(self):
+        # Decision A (Wilson 2026-09-21): a 210 ms shell probe against a
+        # 170 ms runner baseline is runner noise, not an addon regression.
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"lag_ms": [210.0]},
+                       control={"lag_ms": [170.0]})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertEqual(failures, [])
+
+    def test_paired_control_max_delta_exceeded_fails(self):
+        cfg = _synthetic_cfg()
+        runs = _paired(addon={"lag_ms": [560.0]},
+                       control={"lag_ms": [26.0]})
+        _metrics, failures = NP._evaluate("smoke", cfg, runs)
+        self.assertIn("budget:event_loop_lag:max:560.0", failures)
+
     def test_absolute_p95_limit_still_applies_over_fast_control(self):
         cfg = _synthetic_cfg()
         runs = _paired(addon={"lag_ms": [60.0]},

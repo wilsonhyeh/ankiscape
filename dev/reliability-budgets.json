@@ -4,7 +4,7 @@
   "amendment": {
     "date": "2026-09-14",
     "approved_by": "Wilson",
-    "decision": "Context-aware native performance gates: ordinary responsiveness budgets unchanged; rebuild-window latency and rebuild-blocked rewards separately measured and bounded; macOS event-loop-lag p95 compared against its paired control when the runner baseline alone exceeds the absolute limit."
+    "decision": "Context-aware native performance gates: ordinary responsiveness budgets unchanged; rebuild-window latency and rebuild-blocked rewards separately measured and bounded; macOS event-loop-lag p95 compared against its paired control when the runner baseline alone exceeds the absolute limit. 2026-09-21 (Wilson, Decision A): the same paired-control rule applies to event_loop_lag max_ms (max_control_delta_ms 50.0) — a lane passes when the runner baseline alone approaches the ceiling and addon-minus-control stays within the bound; the 200 ms ceiling itself is unchanged."
   },
   "scoping_amendment": {
     "date": "2026-09-21",
@@ -29,6 +29,7 @@
       "limit": 50.0,
       "p95_control_delta_ms": 50.0,
       "max_limit_ms": 200.0,
+      "max_control_delta_ms": 50.0,
       "min_samples": 300,
       "kind": "native",
       "rebuild_window": {
