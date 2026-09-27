@@ -24,8 +24,11 @@ nothing.
 - **Server-authoritative hiscores** (optional account): one account links one
   Evolved game; desktop progress merges through the journal/outbox; scores
   are recomputed from stored operations.
-- **Mobile review catch-up**: reviews synced from AnkiMobile/AnkiDroid earn
-  catch-up rewards on desktop under the gathering preset.
+- **Review catch-up**: eligible review history the add-on has not yet
+  credited (for example, reviews made while it was inactive, or reviews that
+  arrive through Anki sync) earns catch-up rewards on desktop under the
+  gathering preset. Catch-up from AnkiMobile/AnkiDroid has not been tested for
+  3.0; see KNOWN-LIMITATIONS.
 - **Offline art**: all item/skill/nav imagery ships inside the add-on; no
   image requests while you play.
 - **Backups & recovery**: Export/Restore Game Backup, persistent write-failure

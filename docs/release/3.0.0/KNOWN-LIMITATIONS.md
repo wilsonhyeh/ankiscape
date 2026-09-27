@@ -73,9 +73,15 @@ decides otherwise.
 
 ## Mobile
 
-- AnkiMobile/AnkiDroid catch-up, Undo-before-import, and phone-deletion
-  reconciliation are listed as human checks in `RELEASE-SMOKE.md` and have
-  not been performed yet.
+- **Phone catch-up is untested in 3.0.** Deferred to a later release (Wilson,
+  2026-09-27): no phone/desktop synced Anki setup was available to run the
+  checks. The catch-up code is the same one that credits desktop history,
+  because Anki's review log does not record which device a review came from,
+  so it cannot be switched off for phones alone. What remains unverified is the
+  real AnkiMobile/AnkiDroid → AnkiWeb → desktop round trip: catch-up reward
+  exactly once, Undo-before-import, and phone-deletion reconciliation (the
+  human checks in `RELEASE-SMOKE.md`). The release copy does not claim phone
+  support.
 
 ## Performance
 

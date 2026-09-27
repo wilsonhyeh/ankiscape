@@ -5,7 +5,9 @@ AnkiScape 3.0 "Evolved" is the biggest update since the 2.0 rewrite.
 - Six skills with materials, recipes, level-ups, Bank and achievements
 - Guided setup; Classic 2.x preserved and switchable (Evolved starts fresh)
 - Offline art and a rules-generated Guide
-- Optional account: desktop sync, per-skill hiscores, mobile-review catch-up
+- Optional account: desktop sync and per-skill hiscores
+- Catch-up rewards for review history the add-on has not credited yet (phone
+  catch-up untested in 3.0)
 - Undo-aware rewards, pause-on-missing-materials, backups and recovery
 - RELEASE-STATUS: draft — fill in the verified candidate hash and evidence
   link after release verification passes (see READINESS.md)
