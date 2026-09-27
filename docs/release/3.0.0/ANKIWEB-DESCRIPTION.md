@@ -12,7 +12,9 @@ XP HUD update while you study.
 - Offline first: all art and the full Guide ship inside the add-on.
 - Optional free account to sync one game across desktops and appear in
   per-skill hiscores.
-- Phone reviews: AnkiMobile/AnkiDroid history earns desktop catch-up rewards.
+- Catch-up rewards for review history the add-on has not credited yet, such
+  as reviews made while it was off. Phone (AnkiMobile/AnkiDroid) catch-up is
+  untested in 3.0.
 - Responsive reviews, Undo-aware rewards, backup/restore, and a Report-a-bug
   flow with a privacy-checked diagnostic preview.
 

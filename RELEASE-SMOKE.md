@@ -141,6 +141,11 @@ scenario under `artifacts/ui-ux/<anki>-qt<qt>-<stamp>/`.
 
 ## Wilson-operated mobile sync checklist (before claiming interop)
 
+**Deferred past 3.0 (Wilson, 2026-09-27):** no phone/desktop synced Anki setup
+was available. 3.0 ships without claiming phone interop; see
+`docs/release/3.0.0/KNOWN-LIMITATIONS.md` § Mobile. Run this checklist before
+any release that advertises it.
+
 - [ ] iOS: review on AnkiMobile -> sync -> desktop import -> catch-up reward
         under the desktop gathering preset, exactly once.
 - [ ] Android: same via AnkiDroid.
