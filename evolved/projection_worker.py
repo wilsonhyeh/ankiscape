@@ -163,6 +163,25 @@ class ProjectionWorker:
                         "revision": revision, "loading": False,
                         "published_at": time.time(), "passes":
                             int(self._status.get("passes", 0)) + 1})
+                elif revision < self._published_revision:
+                    # Rollback (e.g. a backup restore deleted newer
+                    # operations): the lower revision is newer information,
+                    # not stale data. Refusing it pins the UI on the
+                    # pre-rollback world forever -- observed 2026-09-25: the
+                    # journal and the saved checkpoint sat at the backup
+                    # state (10 ops) while the shell kept showing the dirty
+                    # level, with no error anywhere, because every layer
+                    # below this one had done its job. A lower revision can
+                    # only arise from deleted operations (normal operation
+                    # only appends), so publishing it cannot regress live
+                    # state.
+                    self._latest = state
+                    self._published_revision = revision
+                    self._status.update({
+                        "revision": revision, "loading": False,
+                        "published_at": time.time(), "passes":
+                            int(self._status.get("passes", 0)) + 1,
+                        "rollback_published": True})
                 self._last_publish = time.monotonic()
             self._maybe_save(journal, checkpoint)
         except Exception as exc:  # noqa: BLE001

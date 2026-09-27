@@ -206,6 +206,38 @@ class ProjectionWorkerTests(unittest.TestCase):
         self.assertEqual(worker2.latest(), good)
         self.assertTrue(worker2.stop(timeout=2.0))
 
+    def test_rollback_replacement_publishes_lower_revision(self):
+        """A backup restore must reach the screen (B2 2026-09-25).
+
+        Rollback deletes newer operations, so the recomputed revision is
+        LOWER than the published one. The old monotonic guard (>= only)
+        dropped it: the journal and the saved checkpoint sat at the backup
+        state while latest() kept the dirty world forever, with no error.
+        """
+        worker = self._worker()
+        worker.notify_dirty()
+        self.assertTrue(_wait_for(lambda: worker.latest() is not None))
+        dirty = worker.latest()
+        dirty_revision = int(worker.status()["revision"])
+        self.assertGreater(dirty_revision, 10)
+        ops, _observations = _seed_ops(self.game, 40)
+        blob = {"operations": ops[:10], "observations": []}
+        counts = self.journal.replace_game(self.game, blob)
+        self.assertGreater(counts["removed_operations"], 0)
+        worker.notify_dirty()
+        self.assertTrue(_wait_for(
+            lambda: worker.latest() is not None
+            and int(worker.status()["revision"]) < dirty_revision),
+            "worker never published the rollback revision")
+        rolled_back = worker.latest()
+        self.assertNotEqual(rolled_back, dirty)
+        self.assertTrue(worker.status().get("rollback_published", False))
+        # Reference: a fresh engine over the same 10 operations agrees.
+        fresh = EvolvedEngine(
+            EngineConfig(game_uuid=self.game, device_id="dev-ref",
+                         activated_at=0, rules=self.rules), self.journal)
+        self.assertEqual(rolled_back, fresh.projection())
+
     def test_stop_is_bounded_and_idempotent(self):
         worker = self._worker()
         worker.notify_dirty()
