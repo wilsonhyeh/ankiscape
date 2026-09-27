@@ -1221,5 +1221,131 @@ class EnduranceScopingAmendmentTests(unittest.TestCase):
         self.assertIn("Qt 6.11", scope.get("decision", ""))
 
 
+class AggregateScopingAndDiscoveryTests(unittest.TestCase):
+    """The aggregate re-evaluates budgets from each lane's raw metrics, so
+    Wilson's scoping amendments must bind there too, and per-lane
+    account-journey records must not be validated as lane records."""
+
+    REWARD_MISS = {"reward_completion": {"samples": 600, "p95_ms": 252.93}}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ankiscape-aggregate-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.fx = EvidenceFixture(self.tmp)
+
+    def _set(self, *, os_name, native_metrics):
+        self.fx.add_record(role="shared")
+        path, _ = self.fx.add_record(role="native", os_name=os_name,
+                                     anki="26.08.1", metrics=native_metrics)
+        self.fx.add_record(role="native", os_name="linux", anki="23.10",
+                           anki_actual="23.10.4", lane="native-linux-23.10")
+        self.fx.add_record(role="hosted", trusted=True, job="hosted")
+        return path
+
+    def test_macos_reward_miss_is_an_aggregate_warning(self):
+        self._set(os_name="macos", native_metrics=dict(self.REWARD_MISS))
+        ok, errors, summary = self.fx.validate(budgets=BUDGETS)
+        self.assertFalse(any("reward_completion" in e for e in errors), errors)
+        self.assertTrue(any(w.startswith("budget:reward_completion:p95:252.93")
+                            for w in summary.get("warnings", [])))
+
+    def test_linux_reward_miss_still_fails_the_aggregate(self):
+        self._set(os_name="linux", native_metrics=dict(self.REWARD_MISS))
+        ok, errors, _ = self.fx.validate(budgets=BUDGETS)
+        self.assertFalse(ok)
+        self.assertTrue(any(e.startswith("budget:reward_completion:p95:252.93")
+                            for e in errors), errors)
+
+    def test_qt611_endurance_retention_is_an_aggregate_warning(self):
+        path = self._set(os_name="macos", native_metrics={
+            "endurance_memory": {"slope_mib_per_min": 15.677,
+                                 "settled_increase_mib": 299.8}})
+        record = json.load(open(path, encoding="utf-8"))
+        record["target"]["qt_actual"] = "6.11.0"
+        _write(path, record)
+        budgets = json.loads(json.dumps(BUDGETS))
+        budgets["budgets"]["endurance_memory"] = {
+            "metric": "slope_mib_per_min", "limit": 1.0,
+            "settled_limit_mib": 50.0}
+        ok, errors, summary = self.fx.validate(budgets=budgets)
+        self.assertFalse(any("endurance_memory" in e for e in errors), errors)
+        self.assertTrue(any(w.startswith("scoped:endurance_memory:")
+                            for w in summary.get("warnings", [])))
+
+    def test_account_journey_records_inside_lanes_are_skipped(self):
+        path = self._set(os_name="macos", native_metrics={})
+        nested = os.path.join(os.path.dirname(path), "account-journey",
+                              "macos-26.8.1-qt6", "record.json")
+        _write(nested, {"schema": "ankiscape-account-journey-record",
+                        "version": 1, "run_id": "ui-account-lifecycle-1"})
+        ok, errors, summary = self.fx.validate()
+        self.assertTrue(ok, errors)
+        self.assertEqual(summary["records"], 4)
+
+
+class MacosRewardScopingAmendmentTests(unittest.TestCase):
+    """Scoping amendment 2026-09-27 (Wilson): macOS-runner reward p95 misses
+    are warnings within a 2x backstop — scoped exactly, darwin-only, never
+    silent, and the 250 ms budget itself is unchanged."""
+
+    # Real payload shape from release-verify 36330863967, macos-23.10.
+    MISS = "budget:reward_completion:p95:252.93"
+
+    def _scope(self, failures, platform="darwin", profile="release"):
+        return REL.scope_macos_reward_p95(
+            list(failures), [], platform=platform, profile=profile,
+            limit_ms=250.0)
+
+    def test_macos_release_miss_moves_to_warnings(self):
+        failures, warnings = self._scope([self.MISS, "journey_failed:x"])
+        self.assertEqual(failures, ["journey_failed:x"])
+        self.assertIn(self.MISS, warnings)
+        self.assertTrue(any(w.startswith("scoped:reward_completion:")
+                            for w in warnings))
+
+    def test_macos_nightly_also_scoped(self):
+        failures, _ = self._scope([self.MISS], profile="nightly")
+        self.assertEqual(failures, [])
+
+    def test_linux_and_windows_keep_failing(self):
+        for platform in ("linux", "win32"):
+            failures, warnings = self._scope([self.MISS], platform=platform)
+            self.assertEqual(failures, [self.MISS], platform)
+            self.assertEqual(warnings, [], platform)
+
+    def test_smoke_profile_untouched(self):
+        failures, warnings = self._scope([self.MISS], profile="smoke")
+        self.assertEqual(failures, [self.MISS])
+        self.assertEqual(warnings, [])
+
+    def test_gross_regression_beyond_backstop_keeps_failing(self):
+        gross = "budget:reward_completion:p95:500.01"
+        failures, warnings = self._scope([gross])
+        self.assertEqual(failures, [gross])
+        self.assertEqual(warnings, [])
+        at_ceiling = "budget:reward_completion:p95:500.0"
+        self.assertEqual(self._scope([at_ceiling])[0], [])
+
+    def test_other_reward_failures_never_scoped(self):
+        others = ["budget:reward_completion:samples:12",
+                  "budget:reward_completion:not_measured",
+                  "budget:reward_completion:rebuild_window:p95:10500.0",
+                  "reward_samples:unreconciled",
+                  "budget:reward_completion:p95:abc"]
+        failures, warnings = self._scope(others)
+        self.assertEqual(failures, others)
+        self.assertEqual(warnings, [])
+
+    def test_shipped_budget_file_keeps_limit_and_carries_amendment(self):
+        budgets = json.load(open(os.path.join(ROOT, "dev",
+                                              "reliability-budgets.json")))
+        self.assertEqual(budgets["budgets"]["reward_completion"]["limit"],
+                         250.0)
+        scope = budgets.get("reward_scoping_amendment") or {}
+        self.assertEqual(scope.get("approved_by"), "Wilson")
+        self.assertEqual(scope.get("date"), "2026-09-27")
+        self.assertIn("macOS", scope.get("decision", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

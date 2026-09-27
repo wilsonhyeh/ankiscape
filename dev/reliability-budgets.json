@@ -12,6 +12,12 @@
     "decision": "endurance_memory retention (slope_mib_per_min / settled_increase_mib) on Qt 6.11 lanes is a tracked CI observation, not a release gate: evaluated as warnings via scope_endurance_failures() for nightly and release profiles only. Qt 6.5 and earlier keep failing; unparseable runtime info fails closed; the metric numbers themselves are unchanged in the payload and the scoping itself is recorded as a warning.",
     "evidence": "A2-a falsified the QtWebEngine flag pair as the cause (nightly 35692375494: flags OFF = macOS 39.5 MiB/min vs 4.0 with flags, Linux identical, no 0xC0000005 crash returned); local macOS with the same absent flags shows memory falling — the runner environment is the remaining differentiator."
   },
+  "reward_scoping_amendment": {
+    "date": "2026-09-27",
+    "approved_by": "Wilson",
+    "decision": "An ordinary reward_completion p95 miss on a macOS runner is a documented warning, not a release gate: evaluated via scope_macos_reward_p95() for nightly and release profiles only, and only while p95 stays within 2x the limit (a gross regression keeps failing). The 250 ms limit is unchanged on every lane; Linux and Windows keep failing on a miss; the numbers stay in the payload and the scoping itself is recorded as a warning.",
+    "evidence": "release-verify 36330863967: macos-23.10 reward p95 245.6 / 254.8 / 253.7 across reps (aggregate 252.93), the same ~251-255 seen since nightly 36087409416, while all Linux/Windows lanes passed. Rewards have no paired control; the macOS runner alone costs ~148 ms event-loop lag p95 with no addon, against ~1-3 ms on Linux."
+  },
   "note": "Fixed acceptance targets from the AnkiScape reliability plan. These are not measured promises; changing one requires a documented plan amendment. Disk-full/locked-db failures are tested for safe degradation, not expected to meet normal successful-write latency.",
   "budgets": {
     "accepted_answer_hook": {
