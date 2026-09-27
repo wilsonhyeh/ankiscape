@@ -1020,6 +1020,7 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
         print(f"dev: (e2e) FAILED step: {step}", file=sys.stderr)
     if child.returncode != 0:
         print(f"dev: (e2e) Anki exit code {child.returncode}", file=sys.stderr)
+        _collect_crash_reports(base)
     perf_journey = journey in ("native-performance",
                                "native-performance-control")
     if (failed or child.returncode != 0
@@ -1058,7 +1059,14 @@ def _wait_e2e_phase(child, base: str, run_id: str, log_path: str,
             except (OSError, ValueError):
                 pass
         if child.poll() is not None:
-            break  # exited without assertions -> diagnose from log
+            # Exited without assertions -> diagnose from log, and keep the
+            # faulting frame: macos-26.8.1 lost three runs to a fast exit that
+            # never reached the stale-heartbeat path, the only place crash
+            # reports were collected.
+            print(f"dev: (e2e) Anki exited ({child.returncode}) without "
+                  f"assertions", file=sys.stderr)
+            _collect_crash_reports(base)
+            break
         # Stall detector (2026-09-22): a frozen or dead journey used to burn
         # the ENTIRE phase_timeout (~41 min for perf) polling corpse files
         # with no diagnosis — the exp-run seed-death was discovered 43 min

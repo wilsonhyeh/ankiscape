@@ -269,14 +269,8 @@ def _install_abort_writer():
             pass
 
 
-def _finish(exit_code):
-    global _COMPLETED
-    _COMPLETED = True
+def _write_result():
     RESULT["finished"] = time.time()
-    try:
-        _profile_stop()
-    except Exception:
-        pass
     try:
         from aqt.qt import qVersion
         RESULT["qt_version"] = str(qVersion())
@@ -288,6 +282,16 @@ def _finish(exit_code):
             json.dump(RESULT, fh, indent=2)
     except Exception:
         pass
+
+
+def _finish(exit_code):
+    global _COMPLETED
+    _COMPLETED = True
+    try:
+        _profile_stop()
+    except Exception:
+        pass
+    _write_result()
     _quit(exit_code)
 
 
@@ -5132,8 +5136,14 @@ def _poll_ui_account_lifecycle(state):
                 _account_fake_stop()
                 _finish(1)
             return
-        if not _click_rail("hiscores"):
-            return
+        # Click the rail ONCE, then poll. Re-clicking every tick re-ran the
+        # screen's on_show refresh, so the status read right after the click
+        # was always "Loading…" and the step only completed via the 400-tick
+        # fallthrough (release-verify 36330863967 and every earlier pass).
+        if not state.get("hiscores_clicked"):
+            if not _click_rail("hiscores"):
+                return
+            state["hiscores_clicked"] = True
         from aqt.qt import QApplication, QLabel, QListWidget, QWidget
         # The board is fetched ASYNCHRONOUSLY over the network. A single
         # processEvents() cannot wait for that round-trip, so on a loaded CI
@@ -5172,6 +5182,12 @@ def _poll_ui_account_lifecycle(state):
         _shot("ui-account-lifecycle-done")
         import ankiscape  # noqa: F401 (identity for the closure above)
         state["stage"] = "done"
+        # Persist the complete result BEFORE teardown: on macos-26.8.1 Anki
+        # died between this screenshot and _finish's write three runs in a
+        # row, discarding 33 passed steps as "no phase output". The launcher
+        # still requires a clean Anki exit, so a teardown crash keeps failing
+        # the journey — now with its exit code and the steps intact.
+        _write_result()
         _account_fake_stop()
         _finish(0 if not RESULT["errors"] else 1)
         return

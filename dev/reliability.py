@@ -42,6 +42,7 @@ DIST_DIR = os.path.join(ROOT, "dist")
 
 RECORD_SCHEMA = "ankiscape-reliability-record"
 RECORD_VERSION = 2
+ACCOUNT_JOURNEY_RECORD_SCHEMA = "ankiscape-account-journey-record"
 STAGES = ("pr", "nightly", "release")
 ROLES = ("shared", "backend", "native", "hosted")
 FILE_MTIME_SLACK_S = 600
@@ -425,6 +426,67 @@ def scope_endurance_failures(failures, warnings, *, observed_qt, profile):
     return kept, warn
 
 
+def _copy_crash_reports(base: str, out_dir: str, prefix: str) -> List[str]:
+    """Copy macOS crash reports that dev.py collected into a journey base."""
+    copied = []
+    names = sorted(os.listdir(base)) if os.path.isdir(base) else []
+    for name in names:
+        if not name.endswith((".ips", ".crash")):
+            continue
+        dest_name = f"{prefix}-{name}"
+        try:
+            shutil.copyfile(os.path.join(base, name),
+                            os.path.join(out_dir, dest_name))
+            copied.append(dest_name)
+        except OSError:
+            continue
+    return copied
+
+
+MACOS_REWARD_P95_PREFIX = "budget:reward_completion:p95:"
+
+
+def scope_macos_reward_p95(failures, warnings, *, platform, profile,
+                           limit_ms, backstop_factor=2.0):
+    """Scoping amendment 2026-09-27 (Wilson): an ordinary reward p95 miss on
+    a macOS runner is a documented warning, not a release gate. The 250 ms
+    budget itself is unchanged on every lane.
+
+    Evidence: release-verify 36330863967 measured macos-23.10 reward p95
+    245.6 / 254.8 / 253.7 across reps (the same ~251-255 seen since nightly
+    36087409416), while every Linux/Windows lane passed. Rewards have no
+    paired control, and the macOS runner alone costs ~148 ms of event-loop
+    lag p95 with no addon installed, against ~1-3 ms on Linux.
+
+    Scoped EXACTLY `budget:reward_completion:p95:<value>`, and only while the
+    value stays within `backstop_factor` x the limit: a gross regression
+    keeps failing. Samples, `not_measured`, the rebuild-window bound and
+    everything else are untouched. Non-darwin platforms and non
+    nightly/release profiles are never scoped; the scoping itself is
+    appended to warnings so it can never be silent.
+    """
+    if profile not in ("nightly", "release") or platform != "darwin":
+        return list(failures), list(warnings)
+    ceiling = float(limit_ms) * float(backstop_factor)
+
+    def _is_scoped(entry: str) -> bool:
+        if not entry.startswith(MACOS_REWARD_P95_PREFIX):
+            return False
+        try:
+            return float(entry[len(MACOS_REWARD_P95_PREFIX):]) <= ceiling
+        except ValueError:
+            return False
+
+    scoped = [f for f in failures if _is_scoped(f)]
+    if not scoped:
+        return list(failures), list(warnings)
+    kept = [f for f in failures if not _is_scoped(f)]
+    warn = list(warnings) + scoped + [
+        "scoped:reward_completion:macos_runner_observation"
+        "(budgets scoping amendment 2026-09-27, Wilson)"]
+    return kept, warn
+
+
 # ----------------------------------------------------------------- validate
 
 def _check(condition: bool, errors: List[str], message: str) -> bool:
@@ -476,6 +538,12 @@ def _collect_records(evidence_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
                 found.append((path, {}))
                 continue
             if isinstance(record, dict) and record.get("kind") == "baseline":
+                continue
+            # Per-lane account-journey records live inside lane bundles but
+            # belong to account_journey_e2e.py --collect, which validates them
+            # in the next aggregate step; as lane records they fail schema.
+            if isinstance(record, dict) and \
+                    record.get("schema") == ACCOUNT_JOURNEY_RECORD_SCHEMA:
                 continue
             found.append((path, record if isinstance(record, dict) else {}))
     return found
@@ -878,12 +946,28 @@ def validate_evidence(matrix_path: str, evidence_dir: str, *,
                 if not metrics.get(metric):
                     errors.append(f"missing_metric:{rel}:{metric}")
         if budgets is not None and metrics:
-            for failure in evaluate_budgets(metrics, budgets,
+            budget_failures = [
+                f for f in evaluate_budgets(metrics, budgets,
                                             enforce_samples=enforce_samples,
-                                            required=set(required_metrics) or None):
-                if ":target_missed:" in failure:
-                    continue  # target miss is reported, not a gate
-                errors.append(f"{failure}:{rel}")
+                                            required=set(required_metrics) or None)
+                if ":target_missed:" not in f]  # target miss is reported, not a gate
+            # Wilson's scoping amendments must bind here too: this re-check
+            # reads the lane's raw metrics, so without it a lane-scoped
+            # warning would come back as an aggregate failure.
+            budget_failures, scoped = scope_endurance_failures(
+                budget_failures, [],
+                observed_qt=str(target.get("qt_actual") or ""), profile=stage)
+            lane_os = str(target.get("os") or "").lower()
+            budget_failures, scoped = scope_macos_reward_p95(
+                budget_failures, scoped,
+                platform="darwin" if lane_os == "macos" else lane_os,
+                profile=stage,
+                limit_ms=float(((budgets.get("budgets") or {})
+                                .get("reward_completion") or {})
+                               .get("limit", 250.0)))
+            errors.extend(f"{failure}:{rel}" for failure in budget_failures)
+            summary.setdefault("warnings", []).extend(
+                f"{warning}:{rel}" for warning in scoped)
         errors.extend(_metric_sanity(metrics, rel))
         for spec in _scenarios_for_role(matrix, role, stage):
             min_minutes = spec.get("min_duration_min")
@@ -1163,7 +1247,7 @@ def run_scenario(ctx: Dict[str, Any], scenario: Dict[str, Any],
     if sid == "endurance-30m":
         return _run_endurance(ctx, 30, out_dir)
     if sid == "endurance-2h":
-        return _run_endurance(ctx, 120, out_dir)
+        return _run_endurance(ctx, 120, out_dir, sid=sid)
     if sid == "sync-local":
         return _run_sync_local(ctx, out_dir)
     if sid == "mutation-gate":
@@ -1360,6 +1444,7 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
     prefix = f"{scenario_id + '-' if scenario_id else ''}{journey}"
     for src_name, suffix in (("e2e-heartbeat.json", "heartbeat.json"),
                              ("e2e-fatal.txt", "fatal.txt"),
+                             ("e2e-faulthandler.log", "faulthandler.log"),
                              ("relaunch.json", "relaunch.json")):
         src = os.path.join(base, src_name)
         dest_name = f"{prefix}-{suffix}"
@@ -1369,6 +1454,7 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
                 extra_names.append(dest_name)
             except OSError:
                 pass
+    extra_names.extend(_copy_crash_reports(base, out_dir, prefix))
     # A multi-phase journey that fails its first phase never writes final
     # assertions; without the relaunch request the failing step's counts
     # vanished from the evidence. Surface them on the journey entry.
@@ -1450,6 +1536,7 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
         for src_name, suffix in (
                 ("e2e-heartbeat.json", "heartbeat.json"),
                 ("e2e-fatal.txt", "fatal.txt"),
+                ("e2e-faulthandler.log", "faulthandler.log"),
                 ("e2e-perf-native.json", "perf-native.json")):
             src = os.path.join(base, src_name)
             dest_name = f"native-matrix-{journey}-{suffix}"
@@ -1459,6 +1546,8 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
                     files.append(dest_name)
                 except OSError:
                     pass
+        files.extend(_copy_crash_reports(base, out_dir,
+                                         f"native-matrix-{journey}"))
         log_src = os.path.join(base, "anki-stdout.log")
         tail_name = f"native-matrix-{journey}-anki-stdout-tail.log"
         if os.path.isfile(log_src) and _copy_log_tail(
@@ -1583,9 +1672,12 @@ def _run_mutation_gate(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
             "files": _scenario_files(out_dir, [json_name, log_name])}
 
 
-def _run_endurance(ctx: Dict[str, Any], minutes: int, out_dir: str) -> Dict[str, Any]:
+def _run_endurance(ctx: Dict[str, Any], minutes: int, out_dir: str,
+                   sid: str = "") -> Dict[str, Any]:
     tool = os.path.join(ROOT, "dev", "native_performance.py")
-    sid = f"endurance-{minutes}m"
+    # Record under the matrix's scenario id: release requires `endurance-2h`,
+    # and a derived `endurance-120m` left all seven lanes missing it.
+    sid = sid or f"endurance-{minutes}m"
     if not os.path.exists(tool):
         return {"id": sid, "status": "fail", "command": "", "exit_status": 2,
                 "detail": "missing tool: dev/native_performance.py",
@@ -1964,6 +2056,8 @@ def cmd_verify_evidence(args) -> int:
     if errors:
         for err in errors:
             print(f"[reliability] evidence: {err}", file=sys.stderr)
+    for warning in summary.get("warnings") or []:
+        print(f"[reliability] evidence warning: {warning}", file=sys.stderr)
     if ok:
         print(f"[reliability] evidence ok: {summary.get('records')} records, "
               f"{len(summary.get('targets', {}))} targets, run "

@@ -563,6 +563,14 @@ def main(argv=None) -> int:
         failures, warnings,
         observed_qt=str((observed or {}).get("qt") or ""),
         profile=args.profile)
+    # Scoping amendment 2026-09-27 (Wilson): macOS-runner reward p95 misses
+    # are warnings within a 2x backstop; the 250 ms budget is unchanged.
+    with open(BUDGETS_PATH, encoding="utf-8") as fh:
+        reward_limit = float(json.load(fh)["budgets"]["reward_completion"]
+                             ["limit"])
+    failures, warnings = rel.scope_macos_reward_p95(
+        failures, warnings, platform=sys.platform, profile=args.profile,
+        limit_ms=reward_limit)
 
     payload = {
         "schema": "ankiscape-native-performance", "version": 1,
