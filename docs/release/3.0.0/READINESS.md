@@ -1,22 +1,55 @@
 # Release readiness — AnkiScape 3.0.0 (Evolved)
 
-Status: **BLOCKED — release rehearsal not complete.**
+Status: **READY FOR PUBLICATION — every automated row green on one immutable
+candidate; human rows recorded (one deferred by Wilson). Publication still
+requires Wilson's explicit authorization; this file is not a go decision.**
 
-Frozen source SHA: _not yet frozen_
-Artifact: _not yet frozen_ (name `ankiscape-3.0.0.ankiaddon`)
-Artifact SHA-256: _pending_ — no frozen candidate exists. The artifact of
-record for this tree is
-`a7731a9cdcdfcef5660d151ce636074881e8d5e590ffc2e7d5f3efb1fba32ef8`
-(`dist/ankiscape-3.0.0.ankiaddon`, 172 members, `prod_endpoint_baked=true`,
-`source_hash fd0baa39…`, `source_hash_no_generated b8592bfa…`); it is a build of
-record for `7471f71`, **not** a release candidate and not evidence for any
-automated row below. A frozen candidate needs a `release-verify` run bound to
-one immutable SHA; nothing here substitutes for that.
-Baked project: expected `vjqzamuogcughdvzskmf` (Supabase `ankiscape`)
+Frozen source SHA: `0684d956693b959468fedf0295b8222233ca5a6f` (main; the
+product tree is unchanged since `b6bc8b8` — #42, #45 and #46 touch only `dev/`,
+CI, tests and non-shipping docs)
+Artifact: `ankiscape-3.0.0.ankiaddon` (172 members, `prod_endpoint_baked=true`,
+`source_hash 7186fabf…`, `source_hash_no_generated 41747319…`)
+Artifact SHA-256:
+`c22876fe8f909f831b4dcf0f65affc894c799100966677711a8d7fc806af0e16` — the
+CI-built `candidate-artifact` of the evidence run below, byte-identical to the
+`b6bc8b8` build Wilson used for the live backup-restore retest.
+Baked project: `vjqzamuogcughdvzskmf` (Supabase `ankiscape`), key form
+`sb_publishable_` (Wilson, 2026-09-27), verified by the build job's key probe
 AnkiWeb ID: `1808450369` (same listing; verify current published version
 immediately before publication)
-Evidence run: _pending — no `release-verify` run has ever been dispatched, so
-no release-verify run id exists to cite. No row below claims one.
+Evidence run: **release-verify
+[`36365255588`](https://github.com/wilsonhyeh/ankiscape/actions/runs/36365255588)**
+(attempt 1, 2026-09-28 UTC) — build + key probe, shared, backend, hosted and all
+seven native lanes green; aggregate job `108786383509` passed
+`verify-evidence --stage release --expected-artifact-sha256 c22876fe…`
+(`evidence ok: 10 records, 7 targets, run 36365255588-1`) and
+`account_journey_e2e.py --collect --require-all-targets`
+(`account_journey: PASS (7 targets)`).
+
+Warnings carried by the evidence run, each from a documented Wilson scoping
+amendment in `dev/reliability-budgets.json` (numbers unchanged in the payload):
+
+- `macos-23.10-qt6` `reward_completion` p95 252.88 ms vs 250 —
+  `reward_scoping_amendment` (2026-09-27). Limit unchanged on every lane.
+- Qt 6.11 endurance retention — `scoping_amendment` (2026-09-21):
+  `macos-26.8.1-qt6` slope 11.1 MiB/min, settled +291.5 MiB (the runner family:
+  15.7 / 9.1 / 11.1 across the three release-verify runs);
+  `windows-26.8.1-qt6` slope 12.1, settled +460.3 MiB from an abnormally low
+  324.9 MiB baseline (its prior two runs: -0.4 and -0.8; the lane ended near its
+  usual ~760-790 MiB). `linux-26.8.1-qt6`, the same Qt 6.11, is flat (-0.16).
+
+Prior release-verify runs on the same product bytes, kept for provenance:
+`36330863967` (two macOS items: the reward p95 miss, now scoped, and an m26
+account-journey harness end-of-run failure, fixed in #45 along with four
+release-validator defects) and `36352832465` (one `linux-23.10-qt5`
+`ui-rebuild-review` exit-time SIGSEGV after all ten steps passed; the same
+journey passed in that lane's matrix; the same rare exit-time `-11` appeared on
+nightlies `35779841717` and `35692375494`; root cause not established).
+
+## History (pre-2026-09-27 blocker narrative)
+
+The notes below describe how the blockers were found and closed. Every row they
+call open is resolved in the matrix that follows.
 
 Nightly `35464480415` (dispatched 2026-09-19 on `7471f71`) is the most recent
 nightly and the first with an admissible record: `source.dirty: false`, schema
@@ -154,31 +187,31 @@ hosted step is `supabase db push` only — no function deploy is required.
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| Seven native targets (macOS/Windows/Linux × oldest/current, Qt5+Qt6) | pending — journeys now pass on all seven; the lanes still fail on `native-performance` (below) | release-verify `lanes` |
-| Native performance per target | **OPEN — the nearer release blocker.** `native-performance: exit 1` on all seven lanes: the journey completes (`answers=120`, `native_performance_completed` ok) and the app then does not exit — a 45 s faulthandler timeout with the main thread inside `aqt._run`. Pre-existing and previously masked by the credential red; the same evidence is in `35488210125`, which predates today's changes | nightly `35531744272`; `native-performance-runs/*/faulthandler.log` and `heartbeat.json` |
-| Two-hour endurance per target | pending — shape corrected 2026-09-19 (see above); no lane has run it yet. **Still blocked by the 26.08.1 retention** (below) | `endurance-2h` metrics |
+| Seven native targets (macOS/Windows/Linux × oldest/current, Qt5+Qt6) | **green** — all seven lanes | release-verify `36365255588` `lanes` |
+| Native performance per target | **green** on all seven (m23 reward p95 scoped to a warning, 2026-09-27 amendment; lag max judged by `max_control_delta_ms`, #42) | `36365255588` lane records `native-performance` |
+| Two-hour endurance per target | **green** on all seven (`endurance-2h`; Qt 6.11 retention scoped per the 2026-09-21 amendment — see warnings above) | `36365255588` lane records `endurance-2h` |
 | Endurance gate: current-RSS sampling everywhere, and no green on an unmeasured lifecycle | **fixed 2026-09-20** (#30) — `dev/rss.py` is the single sampler; `no_fixed_phase` fails a run with no fixed-phase samples | `dev/rss.py`, `dev/endurance_metrics.py`, `tests/test_endurance_metrics.py`, `tests/test_dev_rss.py` |
-| Endurance retention on the Anki 26.08.1 / Qt 6.11 / CPython 3.13 lanes | **OPEN — the second blocker, behind `native-performance` above.** Real memory, not an add-on leak: identical add-on code is neutral under both Qt versions with Anki absent, and the three pinned components are one indistinguishable variable in this matrix (`dev/runtime_manifest.json`). Requires a decision, not a patch — prove the runtime mechanism, ship on the 23.10 lanes, or both. No `evolved/ui` change can turn it green | nightly `35531744272` re-measured `slope:4.042>1.0` on `linux-26.8.1-qt6`; earlier `slope:4.001` in `35503351999` |
-| Shared checks + engine benchmarks | pending | `shared` record |
-| Linux backend: suite, parity, account contracts, sync, full mutation | pending | `backend` record |
-| Public demo board: five labeled demos, retried 24-account suite retired | pending | `hosted` record + `dev/demo_players.py --verify` |
-| Account identity: two-game model (local vs account), server-owned game uuid, login adoption, retired local outbox never uploaded, durable download-first sync, ten-second scheduling | pending | ui-account-lifecycle lane records + dev/account_journey_e2e.py + tests/test_bricked_recovery.py |
+| Endurance retention on the Anki 26.08.1 / Qt 6.11 / CPython 3.13 lanes | **scoped by Wilson 2026-09-21** — tracked observation, not a release gate; Qt ≤ 6.5 lanes still gate and pass | `dev/reliability-budgets.json` `scoping_amendment`; `36365255588` aggregate warnings |
+| Shared checks + engine benchmarks | **green** | `36365255588` `shared` record |
+| Linux backend: suite, parity, account contracts, sync, full mutation | **green** | `36365255588` `backend` record |
+| Public demo board: five labeled demos, retried 24-account suite retired | **green** | `36365255588` `hosted` record |
+| Account identity: two-game model (local vs account), server-owned game uuid, login adoption, retired local outbox never uploaded, durable download-first sync, ten-second scheduling | **green** — `ui-account-lifecycle` on all seven targets | `36365255588` account-journey records; `account_journey: PASS (7 targets)` |
 | Hosted migrations 0008/0009 and `account-status`/`username-login` deploy | deployed 2026-09-13 | `RELEASE-SMOKE.md:242` |
 | Hosted migration 0010 and `account-delete` deploy (JWT verification ON) | deployed 2026-09-14 | `server/OPERATIONS.md:111` |
 | Hosted migration 0011 `account_identity_rework` | **deployed 2026-09-19** | `server/supabase/migrations/0011_account_identity_rework.sql`; nightly `35468225639` hosted role `success` |
 | Hosted migration 0012 `service_role_table_grants` | **deployed 2026-09-19**; grants `service_role` the table/sequence DML the postgres-owned default ACL withholds, so the required `account-contracts` scenario can write fixtures. `anon`/`authenticated` unchanged | `server/supabase/migrations/0012_service_role_table_grants.sql` |
-| Hosted native public browsing/labels per current OS | pending | `native-journeys` target requirements |
-| Real-inbox delivery (human) | blocked | Wilson |
+| Hosted native public browsing/labels per current OS | **green** | `36365255588` `native-journeys` (`ui-test-leaderboard` on all seven) |
+| Real-inbox delivery (human) | **PASSED 2026-09-21** (Wilson, 13/13; defects fixed and merged in #33) | `RELEASE-SMOKE.md` inbox steps |
 | AnkiMobile/AnkiDroid checklist (human) | **deferred past 3.0 (Wilson, 2026-09-27)** — no phone/desktop synced setup available; release copy no longer claims phone interop | `KNOWN-LIMITATIONS.md` § Mobile; `RELEASE-SMOKE.md` mobile checklist |
 | Artwork publication decision (owner) | **closed 2026-09-19 — not a release blocker** (Wilson) | released by owner decision; no longer gating |
 | Rollback note: settled rule recorded | prepared | `ROLLBACK.md` |
-| Backup restore rehearsal (isolated profile, `ROLLBACK.md` steps) | **UI menu path PASSED 2026-09-27 (Wilson, live profile)** on the `b6bc8b8` build (sha256 `c22876fe…0e16`, fixes #43 + #44), after failing live on 2026-09-25. Earlier: engine round-trip performed 2026-09-19 — the documented criterion ("the restored state must equal the reference reducer over the same operations", `engine.projection()` boundary: xp_micro, inventory, levels, revision) is now asserted by `tests/test_accounts_backup.py::test_rollback_rehearsal_restored_projection_equals_reference`. That gap was real: the sibling test asserted only operation COUNT, so a restore could have restored the right number of operations while producing a different world. Still not covered: driving Export/Restore through `Settings -> Advanced` in a real profile, which no journey touches | `ROLLBACK.md`; `tests/test_accounts_backup.py` |
+| Backup restore rehearsal (isolated profile, `ROLLBACK.md` steps) | **UI menu path PASSED 2026-09-27 (Wilson, live profile)** on the `b6bc8b8` build (sha256 `c22876fe…0e16`, fixes #43 + #44), after failing live on 2026-09-25. Earlier: engine round-trip performed 2026-09-19 — the documented criterion ("the restored state must equal the reference reducer over the same operations", `engine.projection()` boundary: xp_micro, inventory, levels, revision) is now asserted by `tests/test_accounts_backup.py::test_rollback_rehearsal_restored_projection_equals_reference`. That gap was real: the sibling test asserted only operation COUNT, so a restore could have restored the right number of operations while producing a different world. The `Settings -> Advanced` Export/Restore path is still touched by no automated journey; Wilson's 2026-09-27 live retest is the evidence for it | `ROLLBACK.md`; `tests/test_accounts_backup.py` |
 
 Evidence pointers above are `file:line` references in this repository, or a
-recorded run id / artifact sha256. No `release-verify` run has ever been
-dispatched, so no row cites a release-verify run id; automated rows stay
-`pending` until one exists. A row that cannot be grounded in something that
-exists is recorded pending/unconfirmed rather than reported green.
+recorded run id / artifact sha256. Automated rows cite release-verify
+`36365255588`, the one run whose evidence all binds to artifact
+`c22876fe…0e16`. A row that cannot be grounded in something that exists is
+recorded pending/unconfirmed rather than reported green.
 
 Publication requires: every automated row green on one immutable candidate,
 human rows recorded, and Wilson's explicit authorization. Do not treat this
