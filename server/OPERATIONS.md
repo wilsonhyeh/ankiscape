@@ -4,6 +4,11 @@ Backend: Supabase Free Auth + Postgres. Accept the inactivity pause and finite
 storage. No new paid subscription is authorized. No keep-alive traffic to evade
 pausing.
 
+The daily backup job (see *Backups and rollback*) is not keep-alive traffic - it
+exists so the data can be recovered - but it does connect to the database once a
+day, so it registers as activity. That is a side effect, not a strategy. Do not
+add traffic whose purpose is to defeat the pause.
+
 ## Local development (root orchestration, working directory `server/`)
 
 ```bash
@@ -33,8 +38,45 @@ Daily local dev never uses hosted projects, real SMTP, or AnkiWeb logins.
   table (PostgREST `403` / `42501`), which made the required `account-contracts`
   scenario un-passable on a `db reset` stack. `anon`/`authenticated` unchanged.
 
-Rollback: `supabase migration repair` + `supabase db reset` to the target
-version; restore from `supabase db dump` backups taken before each migration.
+## Backups and rollback
+
+**The database is backed up daily, and the backup is not the provider's.**
+Supabase takes **no** backups on the Free plan — daily backups are
+Pro/Team/Enterprise only — so until 2026-09-28 the hosted database was the only
+copy of every account and all online progress. Two independent legs now cover
+it:
+
+- **Local** - `~/Documents/ankiscape-production-backups/` on Wilson's Mac,
+  launchd job `com.wilsonyeh.ankiscape-backup`, daily 12:00 local, 30-day
+  retention. Runs only when that machine is awake.
+- **Off-site** - private repo `wilsonhyeh/ankiscape-backups`, GitHub Actions
+  `database-backup.yml`, daily 08:17 UTC, 30-day retention.
+
+Each run writes schema + data + roles as gzipped SQL with a sha256 manifest and
+a row-count manifest, and **fails on a silently empty dump** rather than passing
+green.
+
+**Read the restore procedure before restoring.** Canonical copy:
+`~/Documents/ankiscape-production-backups/RESTORE.md`. Two things in it are
+load-bearing and were learned by running a drill, not by reading:
+
+- A plain `psql -f data.sql` restore **produces the right row counts and the
+  wrong data.** `public.players` is populated by a trigger on `auth.users`, and
+  `pg_dump` emits `auth.*` before `public.*`, so the trigger creates the player
+  rows first and the `public.players` COPY then dies on `players_pkey` - leaving
+  the correct count with every `created_at` reset to the restore date. Prepend
+  `SET session_replication_role = replica;` to the load.
+- The superuser on a Supabase project is `supabase_admin`, not `postgres`.
+
+**Migration rollback:** `supabase migration repair` + `supabase db reset` to the
+target version, then restore data from the most recent backup **taken before**
+the change you are undoing.
+
+⚠️ **Corrected 2026-09-28.** This section previously read *"restore from
+`supabase db dump` backups taken before each migration."* **No such backup was
+ever taken** across migrations `0001`-`0012`, so the documented rollback named a
+recovery source that did not exist. The daily schedule does not know a migration
+is coming: **if you need a pre-migration restore point, take a dump first.**
 
 ## Capacity (Free tier, verify at deploy time)
 
@@ -122,10 +164,19 @@ against production without it.
   request without any Authorization header still reaches the function — which
   fails closed with 401 `invalid_session` before reading any data. Both the
   edge check and the function's own session proof are load-bearing.
-- Scope: the server account, game progress, backups, scores and leaderboard
-  presence are removed. Provider backups, provider operational logs and
-  short-lived shared anti-abuse buckets are out of scope. Local progress is
-  kept unless the client opts in to remove it on that computer.
+- Scope: the server account, game progress, scores and leaderboard presence are
+  removed from the live database. Local progress is kept unless the client opts
+  in to remove it on that computer.
+- ⚠️ **Backup tail (added 2026-09-28).** Deletion is immediate and complete in
+  the live database, but it cannot reach the backups: a snapshot taken before
+  the deletion still contains the account for up to 30 days, on both legs (local
+  and `wilsonhyeh/ankiscape-backups`). The client copy says the account is
+  removed *"permanently"* and *"this cannot be undone"*
+  (`evolved/ui/account.py:329,347`), which is true of the live service and not
+  strictly true of retained snapshots. **Whether that wording changes is
+  Wilson's call, not an agent's - do not silently reword it.** Provider backups
+  and provider operational logs remain out of scope, and on the Free plan there
+  are none.
 - Rollout failure: stop and do not ship the client delete entry point against
   a server without the cleanup migration. An authorized rollback may disable
   the endpoint/client entry while keeping the additive migration; it cannot
