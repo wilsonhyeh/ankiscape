@@ -9,8 +9,12 @@ AnkiScape 3.0 "Evolved" is the biggest update since the 2.0 rewrite.
 - Catch-up rewards for review history the add-on has not credited yet (phone
   catch-up untested in 3.0)
 - Undo-aware rewards, pause-on-missing-materials, backups and recovery
-- RELEASE-STATUS: draft — fill in the verified candidate hash and evidence
-  link after release verification passes (see READINESS.md)
+
+Verified artifact: `ankiscape-3.0.0.ankiaddon`, SHA-256
+`c22876fe8f909f831b4dcf0f65affc894c799100966677711a8d7fc806af0e16`, from
+release verification
+[run 36365255588](https://github.com/wilsonhyeh/ankiscape/actions/runs/36365255588)
+(seven desktop targets on macOS, Windows and Linux). See READINESS.md.
 
 Install: download `ankiscape-3.0.0.ankiaddon` and use
 Tools → Add-ons → Install from file. The AnkiWeb listing (1808450369) gets the
