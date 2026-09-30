@@ -81,9 +81,12 @@ Qt5/Qt6, macOS/Linux/Windows.
 - Email is required for verification/recovery and is never shown on
   hiscores. Tokens/passwords never enter collection config, journals, or
   logs.
-- Hiscores (in-add-on, per-skill) are browsable without an account: username
-  + XP only. Signing in adds your own score and live sync. Five permanent
-  sample players appear labeled "Demo". No friends, clans or public site.
+- Hiscores (in-add-on) are browsable without an account: an Overall board and
+  one per skill, showing username, level and XP only. A podium for the top
+  three, your own rank with the XP gap to the next player, rank movement since
+  your last visit (remembered on this computer only) and a card for any player
+  with all six skills. Signing in adds your own score and live sync. No
+  friends, clans or public site.
 - Free-backend note: the sync backend runs on Supabase Free (pauses after
   a week idle; finite storage). At capacity the add-on stops online writes
   safely and keeps local pending operations — no paid upgrade, no

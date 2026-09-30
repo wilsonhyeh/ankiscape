@@ -1777,6 +1777,26 @@ def _evolved_end_session() -> None:
     _EVOLVED_CTX["session"] = None
 
 
+def _evolved_hiscores_seen_get() -> dict:
+    """Last-seen board ranks for rank-movement arrows: a small local file in
+    the profile folder. No memory (empty) on any problem."""
+    try:
+        from .evolved import hiscores_seen as _seen
+        pm = getattr(mw, "pm", None)
+        return _seen.load(pm.profileFolder()) if pm is not None else {}
+    except Exception:
+        return {}
+
+
+def _evolved_hiscores_seen_save(boards: dict) -> bool:
+    try:
+        from .evolved import hiscores_seen as _seen
+        pm = getattr(mw, "pm", None)
+        return bool(pm is not None and _seen.save(pm.profileFolder(), boards))
+    except Exception:
+        return False
+
+
 def _evolved_hiscores_cache_key(skill: str, cohort: bool = False) -> str:
     return ("test:" if cohort else "public:") + str(skill)
 
@@ -2775,6 +2795,8 @@ def _evolved_shell_deps() -> dict:
         "query_hiscores_async": _evolved_query_hiscores_async,
         "lookup_player_async": _evolved_lookup_async,
         "get_hiscores_cache": _evolved_hiscores_cache_get,
+        "get_hiscores_seen": _evolved_hiscores_seen_get,
+        "save_hiscores_seen": _evolved_hiscores_seen_save,
         "on_export": _evolved_export_backup,
         "on_restore": _evolved_restore_backup,
         "on_mode_switch": _switch_mode_now,

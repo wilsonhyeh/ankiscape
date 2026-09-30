@@ -28,6 +28,8 @@ SUCCESS = "#98C77A"          # ready / success states
 ERROR = "#F0A08C"            # errors, unmet requirements
 SLOT_INSET = "#2A251D"       # inset item slot background
 LOCKED = "#2E2A23"           # locked overlay wash (never color-only)
+SILVER = "#D6DAE0"           # Hiscores 2nd place
+BRONZE = "#DB9A62"           # Hiscores 3rd place
 
 PALETTE: Dict[str, str] = {
     "background": BACKGROUND,
@@ -41,6 +43,8 @@ PALETTE: Dict[str, str] = {
     "error": ERROR,
     "slot_inset": SLOT_INSET,
     "locked": LOCKED,
+    "silver": SILVER,
+    "bronze": BRONZE,
 }
 
 # --- Layout units (logical px at 100%) -------------------------------------
@@ -117,6 +121,14 @@ BODY_CONTRAST_PAIRS: Tuple[Tuple[str, str, str], ...] = (
     ("text_muted/background", TEXT_MUTED, BACKGROUND),
     ("text_muted/panel", TEXT_MUTED, PANEL),
     ("text_muted/panel_raised", TEXT_MUTED, PANEL_RAISED),
+    ("silver/panel", SILVER, PANEL),
+    ("silver/slot_inset", SILVER, SLOT_INSET),
+    ("bronze/panel", BRONZE, PANEL),
+    ("bronze/slot_inset", BRONZE, SLOT_INSET),
+    ("gold/slot_inset", GOLD, SLOT_INSET),
+    ("success/slot_inset", SUCCESS, SLOT_INSET),
+    ("error/slot_inset", ERROR, SLOT_INSET),
+    ("text_muted/slot_inset", TEXT_MUTED, SLOT_INSET),
     ("gold/background", GOLD, BACKGROUND),
     ("gold/panel", GOLD, PANEL),
     ("gold/panel_raised", GOLD, PANEL_RAISED),
@@ -292,6 +304,54 @@ QListWidget, QTreeWidget, QTableWidget {{
 QListWidget::item:selected, QTreeWidget::item:selected {{
   background-color: {PANEL_RAISED};
   color: {GOLD};
+}}
+QToolButton[hsTab="true"] {{
+  background-color: {PANEL};
+  border: 2px solid transparent;
+  border-radius: {radius}px;
+  padding: {scaled(3, s)}px {scaled(4, s)}px;
+  color: {TEXT_MUTED};
+  font-size: {max(10, body - 2)}px;
+}}
+QToolButton[hsTab="true"]:hover {{
+  background-color: {PANEL_RAISED};
+  border-color: {BORDER};
+  color: {TEXT};
+}}
+QToolButton[hsTab="true"]:checked {{
+  background-color: {PANEL_RAISED};
+  border-color: {GOLD};
+  color: {GOLD};
+}}
+QToolButton[hsTab="true"]:focus {{ border-color: {GOLD}; }}
+QPushButton[hsSort="true"] {{
+  padding: {scaled(2, s)}px {scaled(10, s)}px;
+}}
+QPushButton[hsSort="true"]:checked {{
+  background-color: {PANEL_RAISED};
+  border-color: {GOLD};
+  color: {GOLD};
+}}
+QFrame#ankiscape-hs-you {{
+  background-color: {PANEL_RAISED};
+  border: 2px solid {GOLD};
+  border-radius: {radius}px;
+}}
+QFrame#ankiscape-hs-you[state="quiet"] {{ border-color: {BORDER}; }}
+QLabel[medal="gold"] {{ color: {GOLD}; }}
+QLabel[medal="silver"] {{ color: {SILVER}; }}
+QLabel[medal="bronze"] {{ color: {BRONZE}; }}
+QLabel[hsMove="up"] {{ color: {SUCCESS}; }}
+QLabel[hsMove="down"] {{ color: {ERROR}; }}
+QLabel[hsMove="new"] {{ color: {GOLD}; }}
+QLabel[hsBig="true"] {{
+  font-family: "{DISPLAY_FONT}", {body_font_css()};
+  font-size: {body + 3}px;
+}}
+QFrame#ankiscape-hs-cardrow {{
+  background-color: {SLOT_INSET};
+  border: 2px solid {BORDER};
+  border-radius: {radius}px;
 }}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollBar:vertical {{
