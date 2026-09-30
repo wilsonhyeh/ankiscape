@@ -114,12 +114,20 @@ against production without it.
   test profiles are indistinguishable from unknown names.
 - `test_hiscores`/`test_public_profile`/`self_context` are authenticated-only
   and authorize from the caller's own player row, never a client flag.
-- Seed/verify: `python3 dev/demo_players.py --hosted --apply|--verify`
-  (see docs/RELIABILITY.md for credentials and rate limits). The old
+- **The demo players are removed from production (2026-09-29).** Do not run
+  `dev/demo_players.py --hosted --apply`; it recreates them. The hosted lane
+  runs `--verify-absent` (read-only) and fails if any reappear. The old
   hosted-v1 24-account suite is retired; `dev/seed_hosted_fixtures.py`
-  refuses to recreate it. Never delete registry-owned accounts.
+  refuses to recreate it. Never delete registry-owned accounts by hand.
 
 ## Public demo board (migration 0009)
+
+> **Retired on production 2026-09-29.** The five demo players were deleted at
+> the owner's request once real players began joining, and the nightly hosted
+> lane stopped re-seeding them (it now runs `demo_players.py --hosted
+> --verify-absent`). The `is_demo` column, the `[Demo]` label in the add-on and
+> the local/dev tooling remain, so a demo row is always visibly labeled. What
+> follows describes the mechanism, not current production contents.
 
 - `public.players.is_demo` marks the five permanent public demo players
   (DemoWillow, DemoFlint, DemoMoss, DemoRowan, DemoCopper). Privileged tooling
@@ -131,8 +139,9 @@ against production without it.
 - Visible membership = active real players plus published demos; temporary
   test rows stay excluded; demos rank under the same rules (never pinned).
 - Apply/verify: `python3 dev/demo_players.py --local|--hosted
-  --plan|--apply --plan-file PATH|--verify`. Every hosted deletion requires
-  an exact fixture_registry/user/game/email match and stops on drift.
+  --plan|--apply --plan-file PATH|--verify|--verify-absent`. Every hosted
+  deletion requires an exact fixture_registry/user/game/email match and
+  stops on drift. **Do not `--apply` against production.**
 
 ## Account status (migration 0008)
 

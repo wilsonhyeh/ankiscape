@@ -1716,19 +1716,16 @@ def _run_endurance(ctx: Dict[str, Any], minutes: int, out_dir: str,
 
 
 def _run_hosted_fixtures(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
-    plan_file = os.path.join(ROOT, "artifacts", "account-repair",
-                             "demo-plan-hosted.json")
+    """Hosted backend check for the public demo players: they must be ABSENT.
+
+    This lane used to plan/apply/verify the five demo players. `--apply` is
+    idempotent and runs with the service-role key, so every nightly and every
+    release verify quietly re-created accounts the owner had deleted from
+    production (2026-09-29). It is now read-only: a demo reappearing on the
+    public board or in the fixture registry fails the lane."""
     steps = [
-        (["dev/demo_players.py", "--hosted", "--plan"],
-         "public_demo_plan", 600),
-        (["dev/demo_players.py", "--hosted", "--apply",
-          "--plan-file", plan_file],
-         "public_demo_apply_1", 1800),
-        (["dev/demo_players.py", "--hosted", "--apply",
-          "--plan-file", plan_file],
-         "public_demo_apply_2_idempotent", 1800),
-        (["dev/demo_players.py", "--hosted", "--verify"],
-         "public_demo_verify", 1800),
+        (["dev/demo_players.py", "--hosted", "--verify-absent"],
+         "public_demo_absent", 1800),
     ]
     assertions = []
     files = []
@@ -1741,7 +1738,7 @@ def _run_hosted_fixtures(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
         files.append(log_name)
     ok = all(a["ok"] for a in assertions)
     return {"id": "hosted-fixtures", "status": "pass" if ok else "fail",
-            "command": "dev/demo_players.py (plan/apply/verify)",
+            "command": "dev/demo_players.py --verify-absent",
             "exit_status": 0 if ok else 1,
             "detail": "; ".join(f"{a['name']}:{a['detail']}" for a in assertions),
             "assertions": assertions, "counts": {},
