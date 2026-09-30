@@ -1398,9 +1398,54 @@ def _load_dev_module():
     return module
 
 
-def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
-                        *, scenario_id: str = "") -> Dict[str, Any]:
-    module = _load_dev_module()
+# One more launch when Anki never produced a result (see _e2e_journey_result).
+LAUNCH_RETRY_LIMIT = 1
+
+
+def _wait_for_anki_exit(timeout_s: int = 120) -> None:
+    """A lingering Anki from the failed attempt would swallow the next
+    launch's -b/-p (dev.py refuses to launch over one). Platforms without
+    pgrep return at once, as dev/ui_ux_verify.py does."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            proc = subprocess.run(["pgrep", "-x", "Anki"], capture_output=True,
+                                  text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if not (proc.stdout or "").strip():
+            return
+        time.sleep(1)
+
+
+def _settle_before_launch_retry() -> None:
+    _wait_for_anki_exit(120)
+    time.sleep(10)
+
+
+def _retire_previous_result(base: str) -> None:
+    """Rotate the last run's result aside before a launch. A journey can bail
+    before dev.py wipes its base (a leftover Anki, a packaging failure), and
+    reading `e2e-assertions.json` afterwards would report the previous run's
+    steps as this run's evidence. Same rule as dev/ui_ux_verify.py."""
+    for name, retired in (("e2e-assertions.json", "e2e-assertions.prev.json"),
+                          ("run-id.txt", "run-id.prev.txt")):
+        src = os.path.join(base, name)
+        if not os.path.exists(src):
+            continue
+        try:
+            os.replace(src, os.path.join(base, retired))
+        except OSError:
+            try:
+                os.unlink(src)
+            except OSError:
+                pass
+
+
+def _journey_attempt(module, ctx: Dict[str, Any], journey: str):
+    """One launch of a journey: (exit status, this run's assertions, base)."""
+    base = os.path.join(module.DEV_DIR, "e2e", journey)
+    _retire_previous_result(base)
     try:
         rc = module._e2e_suite(str(ctx.get("anki", "")), str(ctx.get("qt", "")),
                                journey, str(ctx.get("anki_bin", "") or ""),
@@ -1408,12 +1453,61 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
     except Exception as exc:  # noqa: BLE001
         rc = 1
         print(f"[reliability] journey {journey} raised {exc!r}", file=sys.stderr)
-    base = os.path.join(module.DEV_DIR, "e2e", journey)
-    assertions = {}
     try:
         assertions = load_json(os.path.join(base, "e2e-assertions.json"))
     except (OSError, ValueError):
         assertions = {}
+    return int(rc), assertions, base
+
+
+def _copy_journey_diagnostics(base: str, out_dir: str, prefix: str) -> List[str]:
+    """Keep the launched Anki's own evidence (heartbeat, faulthandler, crash
+    reports, stdout tail) so a pre-driver launch failure is diagnosable.
+    `prefix` names the journey, and the attempt when a launch was retried, so
+    neither a sibling journey nor the retry overwrites it."""
+    names = []
+    for src_name, suffix in (("e2e-heartbeat.json", "heartbeat.json"),
+                             ("e2e-fatal.txt", "fatal.txt"),
+                             ("e2e-faulthandler.log", "faulthandler.log"),
+                             ("relaunch.json", "relaunch.json")):
+        src = os.path.join(base, src_name)
+        dest_name = f"{prefix}-{suffix}"
+        if os.path.isfile(src):
+            try:
+                shutil.copyfile(src, os.path.join(out_dir, dest_name))
+                names.append(dest_name)
+            except OSError:
+                pass
+    names.extend(_copy_crash_reports(base, out_dir, prefix))
+    log_src = os.path.join(base, "anki-stdout.log")
+    tail_name = f"{prefix}-anki-stdout-tail.log"
+    if os.path.isfile(log_src) and _copy_log_tail(
+            log_src, os.path.join(out_dir, tail_name)):
+        names.append(tail_name)
+    return names
+
+
+def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
+                        *, scenario_id: str = "") -> Dict[str, Any]:
+    module = _load_dev_module()
+    prefix = f"{scenario_id + '-' if scenario_id else ''}{journey}"
+    rc, assertions, base = _journey_attempt(module, ctx, journey)
+    # Anki that dies before the driver writes any result (macos-26.8.1 lost
+    # three runs to a fast exit, release-verify 36727126349 another) says
+    # nothing about the product: no step ran, so nothing was asserted. Settle
+    # and launch once more, as the matrix path already does. A run that wrote
+    # assertions is never retried, so a failed step cannot be retried away, and
+    # the first attempt's evidence is kept under `-attempt1`.
+    retries = 0
+    retry_names: List[str] = []
+    while rc != 0 and not assertions and retries < LAUNCH_RETRY_LIMIT:
+        retries += 1
+        print(f"[reliability] journey {journey}: Anki exited {rc} without "
+              f"assertions; relaunching (attempt {retries + 1})")
+        retry_names.extend(_copy_journey_diagnostics(
+            base, out_dir, f"{prefix}-attempt{retries}"))
+        _settle_before_launch_retry()
+        rc, assertions, base = _journey_attempt(module, ctx, journey)
     steps = assertions.get("steps", [])
     failed = [s for s in steps if not s.get("ok")]
     runtime = assertions.get("runtime") or {}
@@ -1428,8 +1522,8 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
             # multi-journey scenario, and the later copy overwrote the
             # earlier record's hashed file (falsified on nightly
             # 34741568295, macos-23.10-qt6).
-            prefix = f"{scenario_id + '-' if scenario_id else ''}{journey}-"
-            dest_name = f"{prefix}{name[len('e2e-'):]}"
+            shot_prefix = f"{prefix}-"
+            dest_name = f"{shot_prefix}{name[len('e2e-'):]}"
             dest = os.path.join(out_dir, dest_name)
             try:
                 shutil.copyfile(src, dest)
@@ -1440,21 +1534,7 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
     # launch failure (e.g. Linux 23.10 Qt5) is diagnosable from evidence.
     # Include the journey name: a scenario running several journeys must not
     # have each tail overwrite the previous one.
-    extra_names = []
-    prefix = f"{scenario_id + '-' if scenario_id else ''}{journey}"
-    for src_name, suffix in (("e2e-heartbeat.json", "heartbeat.json"),
-                             ("e2e-fatal.txt", "fatal.txt"),
-                             ("e2e-faulthandler.log", "faulthandler.log"),
-                             ("relaunch.json", "relaunch.json")):
-        src = os.path.join(base, src_name)
-        dest_name = f"{prefix}-{suffix}"
-        if os.path.isfile(src):
-            try:
-                shutil.copyfile(src, os.path.join(out_dir, dest_name))
-                extra_names.append(dest_name)
-            except OSError:
-                pass
-    extra_names.extend(_copy_crash_reports(base, out_dir, prefix))
+    extra_names = retry_names + _copy_journey_diagnostics(base, out_dir, prefix)
     # A multi-phase journey that fails its first phase never writes final
     # assertions; without the relaunch request the failing step's counts
     # vanished from the evidence. Surface them on the journey entry.
@@ -1463,11 +1543,6 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
         relaunch = load_json(os.path.join(base, "relaunch.json")) or {}
     except (OSError, ValueError):
         relaunch = {}
-    log_src = os.path.join(base, "anki-stdout.log")
-    tail_name = f"{prefix}-anki-stdout-tail.log"
-    if os.path.isfile(log_src) and _copy_log_tail(
-            log_src, os.path.join(out_dir, tail_name)):
-        extra_names.append(tail_name)
     entry = {"journey": journey, "exit_status": int(rc),
              "steps": len(steps),
              "failed": [s.get("name") for s in failed],
@@ -1476,7 +1551,8 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
                             for s in steps],
              "screenshots": [os.path.join(out_dir, n) for n in shot_names],
              "files": _scenario_files(out_dir, shot_names + extra_names),
-             "runtime": runtime}
+             "runtime": runtime,
+             "launch_retries": retries}
     if relaunch.get("ok") is False:
         entry["relaunch_failed"] = [
             {"name": str(s.get("name")), "detail": str(s.get("detail", ""))[:200]}
@@ -1575,7 +1651,11 @@ def _run_native_journeys(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
     return {"id": "native-journeys", "status": "pass" if ok else "fail",
             "command": "dev._e2e_suite x " + ",".join(NEW_JOURNEYS),
             "exit_status": 0 if ok else 1,
-            "detail": "; ".join(f"{r['journey']}:{r['exit_status']}" for r in results),
+            "detail": "; ".join(
+                f"{r['journey']}:{r['exit_status']}"
+                + (f" (relaunched x{r['launch_retries']})"
+                   if r.get("launch_retries") else "")
+                for r in results),
             "assertions": [{"name": r["journey"], "ok": r["exit_status"] == 0
                             and not r["failed"], "detail": ",".join(r["failed"])}
                            for r in results],
@@ -1781,6 +1861,34 @@ def _observed_runtime_from(results) -> Dict[str, Any]:
     return {}
 
 
+# The release lane's two-hour endurance run is about two thirds of its wall
+# time, and it runs last. The validator fails a lane for any scenario that is
+# not `pass`, so once an earlier scenario has failed the lane is already red and
+# the endurance result cannot change the verdict: release-verify 36727126349
+# knew two lanes were red at minute ~10 of a 187-minute job. Skip it then.
+# Release only: the nightly's 30-minute run is a trend, and is cheap.
+FAIL_FAST_SKIPS = {"release": ("endurance-2h",)}
+
+
+def _failed_before(stage: str, scenario: Dict[str, Any],
+                   results: List[Dict[str, Any]]) -> List[str]:
+    """Ids of already-run scenarios that failed, when `scenario` is one the
+    stage skips after a failure; otherwise none."""
+    if str(scenario.get("id")) not in FAIL_FAST_SKIPS.get(stage, ()):
+        return []
+    return [str(item.get("id")) for item in results
+            if item.get("status") != "pass"]
+
+
+def _skipped_entry(scenario: Dict[str, Any], blockers: List[str]) -> Dict[str, Any]:
+    """A scenario that did not run. Its status is not `pass`, so the validator
+    still fails the lane and names it (`scenario_status:...:skipped`)."""
+    return {"id": str(scenario.get("id")), "status": "skipped", "command": "",
+            "exit_status": 2,
+            "detail": "skipped:earlier_scenario_failed:" + ",".join(blockers),
+            "assertions": [], "counts": {}, "files": []}
+
+
 def cmd_run_lane(args) -> int:
     stage = args.stage
     role = args.role
@@ -1832,6 +1940,13 @@ def cmd_run_lane(args) -> int:
 
     results = []
     for scenario in _scenarios_for_role(matrix, role, stage):
+        blockers = ([] if getattr(args, "keep_going", False)
+                    else _failed_before(stage, scenario, results))
+        if blockers:
+            print(f"[reliability] skipping {scenario.get('id')}: "
+                  f"{', '.join(blockers)} already failed in this lane")
+            results.append(_skipped_entry(scenario, blockers))
+            continue
         results.append(run_scenario(ctx, scenario, stage, out_dir))
     record["scenarios"] = results
     record["metrics"] = ctx.get("metrics", {}) or {}
@@ -2094,6 +2209,9 @@ def main(argv=None) -> int:
     p_lane.add_argument("--qt-actual", default="")
     p_lane.add_argument("--trusted", action="store_true")
     p_lane.add_argument("--native-timeout", type=int, default=7200)
+    p_lane.add_argument("--keep-going", action="store_true",
+                        help="run every scenario even after one failed "
+                             "(release skips endurance-2h otherwise)")
     p_base = sub.add_parser("baseline")
     p_base.add_argument("--out", default="")
     args = parser.parse_args(argv)

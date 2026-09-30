@@ -696,6 +696,29 @@ class ReliabilityEvidenceTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any(e.startswith("scenario_status") for e in errors), errors)
 
+    def test_fail_fast_skipped_entry_fails_and_is_named(self):
+        # The entry run-lane writes for a scenario it skipped because an
+        # earlier scenario of the lane failed (release skips endurance-2h; this
+        # fixture's matrix has no such row, so the shape is tested on another).
+        # It must fail the release and name the scenario.
+        path, record = self.fx.add_record(role="native", os_name="macos")
+        replaced = []
+        for index, item in enumerate(record["scenarios"]):
+            if item["id"] == "native-journeys":
+                record["scenarios"][index] = REL._skipped_entry(
+                    {"id": "native-journeys"}, ["native-matrix"])
+                replaced.append(index)
+        self.assertEqual(len(replaced), 1, "fixture has no native-journeys row")
+        _write(path, record)
+        self.fx.add_record(role="native", os_name="linux", anki="23.10")
+        self.fx.add_record(role="shared")
+        self.fx.add_record(role="hosted", trusted=True, job="hosted")
+        ok, errors, _ = self.fx.validate()
+        self.assertFalse(ok)
+        self.assertTrue(any(e.startswith("scenario_status") and
+                            e.endswith(":native-journeys:skipped") for e in errors),
+                        errors)
+
     def test_zero_test_success_report_fails(self):
         path, record = self.fx.add_record(role="shared")
         for item in record["scenarios"]:
