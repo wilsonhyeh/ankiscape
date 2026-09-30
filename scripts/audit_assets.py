@@ -2,7 +2,7 @@
 """scripts/audit_assets.py - Asset coverage, validity and package audit.
 
     python3 scripts/audit_assets.py --check
-    python3 scripts/audit_assets.py --check --archive dist/ankiscape-3.0.0.ankiaddon
+    python3 scripts/audit_assets.py --check --archive dist/ankiscape-3.0.1.ankiaddon
 
 --check derives the expected asset set independently of the manifest (from
 shared/rules-v1.json, evolved/assets.py, constants.py and the managed art

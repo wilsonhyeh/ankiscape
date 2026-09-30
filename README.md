@@ -6,12 +6,12 @@ Fishing, Cooking), with items, achievements, level-ups, and an XP HUD.
 Classic mode (2.0.2 gameplay) stays frozen and switchable; Evolved starts
 fresh at level 1/0 XP (no transfer — hiscore fairness).
 
-Same AnkiWeb listing `1808450369`, single 3.0.0 release. Anki 23.10+,
-Qt5/Qt6, macOS/Linux/Windows.
+Same AnkiWeb listing `1808450369`; current release 3.0.1 (3.0.0 was the first
+Evolved release). Anki 23.10+, Qt5/Qt6, macOS/Linux/Windows.
 
 ## Install
 
-1. Download `ankiscape-3.0.0.ankiaddon` from the release.
+1. Download `ankiscape-3.0.1.ankiaddon` from the release.
 2. In Anki: Tools -> Add-ons -> Install from file -> select the file.
 3. Restart Anki. New installs enter guided Evolved setup (pick a gathering
    skill and starting resource). Existing Classic users get an explicit
@@ -163,7 +163,7 @@ exists. New user and Upgrade replace that test profile; Resume preserves it.
 ## Packaging notes
 Deterministic build from an explicit allowlist:
 ```
-python3 scripts/build_addon.py   # -> dist/ankiscape-3.0.0.ankiaddon + manifest
+python3 scripts/build_addon.py   # -> dist/ankiscape-3.0.1.ankiaddon + manifest
 ```
 Excludes tests/dev/server/artifacts/dist/.dev/.git/.venv, credentials, journals,
 logs, caches, editor files. Secret-content scan fails the build on privileged

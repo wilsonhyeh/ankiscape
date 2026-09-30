@@ -23,7 +23,7 @@ body:
     attributes:
       label: Versions and platform
       description: Anki version, AnkiScape add-on version, OS (and Qt/Python if shown in diagnostics).
-      placeholder: "Anki 26.08.1, AnkiScape 3.0.0, macOS 15.6 (arm64, Qt 6)"
+      placeholder: "Anki 26.08.1, AnkiScape 3.0.1, macOS 15.6 (arm64, Qt 6)"
     validations:
       required: true
   - type: textarea
