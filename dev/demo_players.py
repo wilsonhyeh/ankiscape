@@ -6,6 +6,9 @@ PUBLIC leaderboard labeled "Demo", and retires the old known surplus
 hosted-v1 fixture identities.
 
 Modes:
+  --verify-absent            read-only guard: fail if any demo player exists
+                             (the demos were removed from production
+                             2026-09-29; the hosted lane no longer seeds them)
   --plan                     write an exact action manifest + summary
   --apply --plan-file PATH   execute a checksum-verified plan (idempotent,
                              resumable via a local ledger)
@@ -665,6 +668,72 @@ def cmd_verify(args) -> int:
     return 0
 
 
+def cmd_verify_absent(args) -> int:
+    """Read-only guard: the public demo players must NOT exist.
+
+    The five demo players were removed from production on 2026-09-29 at the
+    owner's request. The hosted lane used to re-create them on every nightly
+    (--apply is idempotent), which silently undid the removal; it now runs
+    this instead, so a demo reappearing on the public board fails the lane
+    instead of going unnoticed. Nothing is written.
+    """
+    target = resolve_target(args.local, args.hosted)
+    key = _service_key(target)
+    transport = Transport(target["url"], target["anon"], key)
+    names = set(demo_traces.DISPLAY_NAMES)
+    norms = sorted(t["username_norm"] for t in _traces().values())
+    findings: List[str] = []
+    checked = {"boards": 0, "rows": 0}
+    for skill in ("overall", "mining", "woodcutting", "smithing", "crafting",
+                  "fishing", "cooking"):
+        try:
+            rows = _public_rows(transport, skill)
+        except (SeedError, DemoError) as exc:
+            if skill == "overall" and "bad_skill" in str(exc):
+                continue  # a server older than migration 0013
+            raise
+        checked["boards"] += 1
+        checked["rows"] += len(rows)
+        for row in rows:
+            if row.get("is_demo") is True or str(row.get("username")) in names:
+                findings.append(
+                    f"{skill}: demo player {row.get('username')} is on the "
+                    "public board")
+    if key:
+        for row in _registry_rows(transport, demo_traces.SUITE_ID,
+                                  demo_traces.SUITE_VERSION):
+            findings.append("fixture_registry holds "
+                            f"{row.get('username_norm')}")
+        for norm, player in _players_by_norm(transport, norms).items():
+            findings.append(f"players still has {norm} "
+                            f"(is_demo={player.get('is_demo')})")
+        flagged = transport.request(
+            "GET", "/rest/v1/players",
+            params={"select": "username_norm", "is_demo": "eq.true"},
+            service=True) or []
+        for row in flagged:
+            findings.append("a player is flagged is_demo: "
+                            f"{row.get('username_norm')}")
+    report = {"target": target.get("kind"), "checked_at": _now_iso(),
+              "checked": checked, "service_checks": bool(key),
+              "findings": findings}
+    out = os.path.join(ROOT, "artifacts", "reliability",
+                       "public-demo-absent.json")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    if findings:
+        for finding in findings[:20]:
+            print(f"demo absent: FAIL {finding}", file=sys.stderr)
+        print(f"demo absent: FAIL ({len(findings)} findings)")
+        return 1
+    print(f"demo absent: PASS ({checked['boards']} boards, "
+          f"{checked['rows']} rows, service checks "
+          f"{'on' if key else 'skipped: no service key'})")
+    return 0
+
+
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     target = parser.add_mutually_exclusive_group(required=True)
@@ -674,6 +743,8 @@ def main(argv: List[str]) -> int:
     mode.add_argument("--plan", action="store_true")
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--verify", action="store_true")
+    mode.add_argument("--verify-absent", action="store_true",
+                      help="read-only: fail if any demo player exists")
     parser.add_argument("--plan-file", default="")
     args = parser.parse_args(argv)
     try:
@@ -681,6 +752,8 @@ def main(argv: List[str]) -> int:
             return cmd_plan(args)
         if args.apply:
             return cmd_apply(args)
+        if args.verify_absent:
+            return cmd_verify_absent(args)
         return cmd_verify(args)
     except (DemoError, SeedError) as exc:
         print(f"demo_players: BLOCKED: {exc}", file=sys.stderr)

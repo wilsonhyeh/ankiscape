@@ -535,8 +535,9 @@ def _print_fixture_account_steps(fixture: str) -> None:
               f"({module.email_for(name)});")
         print("dev:      derive its password from ANKISCAPE_FIXTURE_SECRET "
               "with dev/demo_players.py's password_for(secret, name).")
-        print("dev:      Demo players appear on the public Hiscores labeled "
-              "Demo.")
+        print("dev:      NOTE: the demo players were removed from production "
+              "2026-09-29; this account exists only on a stack that was "
+              "seeded locally.")
     except Exception as exc:
         print(f"dev:   fixture instructions unavailable: {exc!r}")
 

@@ -178,5 +178,93 @@ class TestPlanFilePaths(unittest.TestCase):
                         .endswith("demo-plan-hosted.json"))
 
 
+class TestVerifyAbsent(unittest.TestCase):
+    """The demo players were removed from production; the hosted lane must
+    prove they stay gone rather than recreate them."""
+
+    def _run(self, routes, service_key="svc"):
+        import argparse
+        import tempfile
+        fake = _FakeTransport(routes)
+        target = {"kind": "hosted", "url": "https://prod.example",
+                  "anon": "anon", "service": service_key}
+        saved = (demo_players.Transport, demo_players.resolve_target,
+                 demo_players.ROOT)
+        with tempfile.TemporaryDirectory() as tmp:
+            demo_players.Transport = lambda url, anon, key: fake
+            demo_players.resolve_target = lambda local, hosted: target
+            demo_players.ROOT = tmp
+            try:
+                rc = demo_players.cmd_verify_absent(
+                    argparse.Namespace(local=False, hosted=True))
+            finally:
+                (demo_players.Transport, demo_players.resolve_target,
+                 demo_players.ROOT) = saved
+        return rc, fake
+
+    def _routes(self, board=None, registry=None, players=None, flagged=None):
+        return {
+            "POST /rest/v1/rpc/hiscores":
+                lambda body, params: list(board or []),
+            "GET /rest/v1/fixture_registry":
+                lambda body, params: list(registry or []),
+            "GET /rest/v1/players": lambda body, params: (
+                list(flagged or []) if params.get("is_demo")
+                else list(players or [])),
+        }
+
+    def test_passes_when_no_demo_exists(self):
+        rc, fake = self._run(self._routes(
+            board=[{"rank": 1, "username": "RealPerson", "xp": 5,
+                    "is_demo": False}]))
+        self.assertEqual(rc, 0)
+        # Read-only: nothing but reads and the public read RPC.
+        for call in fake.calls:
+            self.assertIn(call["method"], ("GET", "POST"))
+            if call["method"] == "POST":
+                self.assertEqual(call["path"], "/rest/v1/rpc/hiscores")
+
+    def test_fails_on_a_demo_row_on_the_public_board(self):
+        rc, _ = self._run(self._routes(
+            board=[{"rank": 1, "username": "DemoWillow", "xp": 5,
+                    "is_demo": True}]))
+        self.assertEqual(rc, 1)
+
+    def test_fails_on_demo_name_even_without_the_flag(self):
+        rc, _ = self._run(self._routes(
+            board=[{"rank": 1, "username": "DemoFlint", "xp": 5,
+                    "is_demo": False}]))
+        self.assertEqual(rc, 1)
+
+    def test_fails_when_registry_still_holds_a_demo(self):
+        rc, _ = self._run(self._routes(
+            registry=[{"username_norm": "demowillow"}]))
+        self.assertEqual(rc, 1)
+
+    def test_fails_when_a_demo_player_row_exists(self):
+        rc, _ = self._run(self._routes(
+            players=[{"username_norm": "demomoss", "is_demo": True}]))
+        self.assertEqual(rc, 1)
+
+    def test_fails_when_any_player_is_flagged_demo(self):
+        rc, _ = self._run(self._routes(
+            flagged=[{"username_norm": "someone"}]))
+        self.assertEqual(rc, 1)
+
+    def test_without_service_key_only_the_public_board_is_checked(self):
+        routes = {"POST /rest/v1/rpc/hiscores": lambda body, params: []}
+        rc, fake = self._run(routes, service_key="")
+        self.assertEqual(rc, 0)
+        self.assertTrue(all(c["path"] == "/rest/v1/rpc/hiscores"
+                            for c in fake.calls))
+
+    def test_never_calls_apply_paths(self):
+        rc, fake = self._run(self._routes())
+        self.assertEqual(rc, 0)
+        self.assertFalse([c for c in fake.calls
+                          if c["method"] in ("PUT", "PATCH", "DELETE")
+                          or "/auth/v1" in c["path"]])
+
+
 if __name__ == "__main__":
     unittest.main()
