@@ -78,7 +78,7 @@ jobs:
           python3 run_tests.py
           python3 scripts/build_addon.py
           python3 scripts/audit_assets.py --check
-          python3 scripts/audit_assets.py --archive dist/ankiscape-3.0.0.ankiaddon
+          python3 scripts/audit_assets.py --archive dist/ankiscape-3.0.1.ankiaddon
       - name: Assert the endpoint is baked
         run: |
           python3 - <<'PY'
@@ -99,7 +99,7 @@ jobs:
         with:
           name: candidate-artifact
           path: |
-            dist/ankiscape-3.0.0.ankiaddon
+            dist/ankiscape-3.0.1.ankiaddon
             dist/manifest.json
           retention-days: 90
 
@@ -360,7 +360,7 @@ jobs:
       - name: Extract evidence tars
         run: |
           mkdir -p dist artifacts/reliability
-          cp merged/ankiscape-3.0.0.ankiaddon dist/
+          cp merged/ankiscape-3.0.1.ankiaddon dist/
           cp merged/manifest.json dist/
           for bundle in merged/evidence-*.tar; do
             [ -f "$bundle" ] || continue
