@@ -3790,13 +3790,22 @@ def _logged_in_via_fixture(state):
         return False, "fixture sign-in raised: " + repr(exc)[:160]
 
 
-def _poll_ui_test_leaderboard(state):
-    """Public board browsing with demo labels and legacy isolation.
+def _hiscores_rows(shell):
+    """Every player row on the Hiscores board, as text (the list items carry
+    "#4 Name — Lv 12 — 34 XP", and name the medal for the top three)."""
+    from aqt.qt import QListWidget
+    listing = shell.findChild(QListWidget, "ankiscape-hiscores-list")
+    if listing is None:
+        return []
+    return [listing.item(i).text() for i in range(listing.count())]
 
-    The old 24-name hosted test cohort is retired: the public board now
-    carries the five permanent demo players labeled "Demo". This journey
-    browses logged out through the real shell and asserts the labeled demo
-    rows and the absence of the retired hosted-v1 identities."""
+
+def _poll_ui_test_leaderboard(state):
+    """Public board browsing, logged out, against the hosted backend.
+
+    The old 24-name hosted test cohort and the five public demo players are
+    both retired. This journey browses through the real shell and asserts the
+    board has real rows and none of the retired identities or demo labels."""
     stage = state.get("stage", "setup")
     if stage == "setup":
         if _drive_onboarding(state, "mining") is not True:
@@ -3832,9 +3841,7 @@ def _poll_ui_test_leaderboard(state):
             return
         status = shell.findChild(QLabel, "ankiscape-hiscores-status")
         text = str(status.text()) if status is not None else ""
-        listing = shell.findChild(QListWidget, "ankiscape-hiscores-list")
-        rows = [listing.item(i).text() for i in range(listing.count())] \
-            if listing is not None else []
+        rows = _hiscores_rows(shell)
         loading = (not text) or text.startswith("Loading")
         if (loading or not rows) and state.get("wait_ticks", 0) <= 400:
             state["wait_ticks"] = state.get("wait_ticks", 0) + 1
@@ -3845,11 +3852,16 @@ def _poll_ui_test_leaderboard(state):
               (not text.startswith("Service problem")) and bool(rows)
               and (cta is None or cta.isVisible()),
               f"rows={len(rows)} status={text[:80]}")
+        # The five public demo players were removed from production on
+        # 2026-09-29. Real players are unlabeled, so a "[Demo]" row on the
+        # hosted board means fixtures were seeded again, which this journey
+        # exists to catch. (Demo labeling itself is proven against the fake
+        # server in ui-account-lifecycle, which serves a demo row.)
         demo_hits = sorted(n for n in DEMO_NAMES
                            if any(n in row for row in rows))
-        labeled = any("[Demo]" in row for row in rows)
-        _step("test_leaderboard_labeled", bool(demo_hits) and labeled,
-              f"demos={demo_hits} labeled={labeled}")
+        labeled = [row for row in rows if "[Demo]" in row]
+        _step("test_leaderboard_no_demos", not demo_hits and not labeled,
+              f"demos={demo_hits} labeled={labeled[:2]}")
         leaked = sorted(n for n in LEGACY_FIXTURE_NAMES
                         if any(n in row for row in rows))
         _step("test_leaderboard_public_isolated", not leaked,
@@ -5156,8 +5168,7 @@ def _poll_ui_account_lifecycle(state):
         status = shell.findChild(QLabel, "ankiscape-hiscores-status")
         text = str(status.text()) if status is not None else ""
         listing = shell.findChild(QListWidget, "ankiscape-hiscores-list")
-        rows = [listing.item(i).text() for i in range(listing.count())] \
-            if listing is not None else []
+        rows = _hiscores_rows(shell)
         loading = (not text) or text.startswith("Loading")
         if (loading or not rows) and state.get("board_ticks", 0) <= 400:
             state["board_ticks"] = state.get("board_ticks", 0) + 1
@@ -5167,11 +5178,12 @@ def _poll_ui_account_lifecycle(state):
         _step("public_board_logged_out",
               cta is not None and cta.isVisible() and listing is not None,
               f"rows={len(rows)} status={text[:80]}")
-        # Require the REAL board, not merely the substring "Demo": the status
-        # line itself reads "Demo players are labeled ...", so the old check
-        # could be satisfied by placeholder text and passed with rows=2 against
-        # an unreachable endpoint. Name the expected demos explicitly, the same
-        # way the leaderboard journey does, and record what was actually seen.
+        # Require the REAL board, not merely the substring "Demo": name the
+        # expected demo rows explicitly and require the "[Demo]" label on a
+        # row, so placeholder text or an unreachable endpoint cannot satisfy
+        # it. This runs against the journey's FAKE server, which serves a
+        # DemoWillow row with is_demo set: it is the proof that demo rows are
+        # labeled even though production no longer has any.
         demo_hits = sorted(n for n in DEMO_NAMES
                            if any(n in r for r in rows))
         _step("demo_labels_visible",

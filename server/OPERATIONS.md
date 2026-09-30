@@ -143,6 +143,23 @@ against production without it.
   deletion requires an exact fixture_registry/user/game/email match and
   stops on drift. **Do not `--apply` against production.**
 
+## Overall board (migration 0013)
+
+- `public.hiscores(p_skill, p_limit)` also accepts `p_skill = 'overall'`, ranking
+  players by **total XP across the six skills**. Same row shape
+  `{rank, username, xp, is_demo}`, same visibility rules and filter-before-rank
+  as the per-skill boards; every per-skill result is unchanged and an unknown
+  skill still raises `bad_skill`. Read-only: no table, grant or capability
+  changes (only the private `_hiscores_public` helper is replaced).
+- Ranked by XP, not total level, because levels come from the shared rules
+  table client-side; duplicating it in SQL would add a second source of truth
+  that scoring parity does not cover. The add-on derives Overall levels from
+  the six skill boards.
+- `test_hiscores` (the authenticated test cohort) does **not** support
+  `overall`; the add-on hides the Overall tab in that mode. A server without
+  0013 raises `bad_skill` for it, and the add-on hides the tab too.
+- Tests: `server/supabase/tests/0008_overall_board.test.sql`.
+
 ## Account status (migration 0008)
 
 - `public.account_lifecycle_status(email, username)` is service-role only and

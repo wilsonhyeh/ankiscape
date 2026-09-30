@@ -317,6 +317,41 @@ class TestQueryPublicProfile(unittest.TestCase):
             self.assertIsNone(out["rows"][0]["rank"])
             self.assertEqual(out["rows"][0]["xp_display"], "0.123")
 
+    def test_profile_carries_the_whole_skill_table(self):
+        with _Fixture() as fx:
+            self._route_found(
+                fx, state_xp={"mining": 5_000_000, "fishing": 2_000_000,
+                              "unknown_skill": 9},
+                hiscores_rows=[{"rank": 1, "username": "Amy",
+                                "xp": 5_000_000}])
+            out = query_public_profile(post_json, fx.endpoint, None,
+                                       username="Amy", skill="mining")
+            table = out["profile"]["skills_xp"]
+            self.assertEqual(table["mining"], 5_000_000)
+            self.assertEqual(table["fishing"], 2_000_000)
+            self.assertEqual(table["cooking"], 0)
+            self.assertNotIn("unknown_skill", table)
+
+    def test_overall_lookup_sums_the_six_skills(self):
+        with _Fixture() as fx:
+            self._route_found(
+                fx, state_xp={"mining": 5_000_000, "fishing": 2_000_000},
+                hiscores_rows=[{"rank": 2, "username": "Amy",
+                                "xp": 7_000_000}])
+            out = query_public_profile(post_json, fx.endpoint, None,
+                                       username="Amy", skill="overall")
+            self.assertEqual(out["profile"]["xp"], 7_000_000)
+            self.assertEqual(out["profile"]["rank"], 2)
+            self.assertEqual(fx.seen[1]["body"]["p_skill"], "overall")
+
+    def test_negative_skill_xp_in_profile_is_malformed(self):
+        with _Fixture() as fx:
+            self._route_found(fx, state_xp={"mining": 1, "fishing": -5},
+                              hiscores_rows=[])
+            with self.assertRaises(NetError):
+                query_public_profile(post_json, fx.endpoint, None,
+                                     username="Amy", skill="mining")
+
     def test_mixed_case_input_is_normalized_for_the_rpc(self):
         with _Fixture() as fx:
             self._route_found(

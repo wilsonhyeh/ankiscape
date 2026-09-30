@@ -422,15 +422,29 @@ def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
     xp_table = state.get("xp")
     if not isinstance(xp_table, dict):
         raise NetError("malformed_response", "public_profile missing xp table")
-    xp_raw = xp_table.get(skill, 0)
-    if isinstance(xp_raw, bool):
-        raise NetError("malformed_response", "public_profile xp is not numeric")
-    try:
-        xp_micro = int(xp_raw)
-    except (TypeError, ValueError):
-        raise NetError("malformed_response", "public_profile xp is not numeric")
-    if xp_micro < 0:
-        raise NetError("malformed_response", "public_profile xp is negative")
+    def _micro(raw) -> int:
+        if isinstance(raw, bool):
+            raise NetError("malformed_response",
+                           "public_profile xp is not numeric")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise NetError("malformed_response",
+                           "public_profile xp is not numeric")
+        if value < 0:
+            raise NetError("malformed_response",
+                           "public_profile xp is negative")
+        return value
+
+    all_skills = ("mining", "woodcutting", "smithing", "crafting", "fishing",
+                  "cooking")
+    # The whole per-skill table, so a player card can be built for anyone the
+    # loaded boards do not cover. Unknown keys are ignored, absent skills are 0.
+    skills_xp = {name: _micro(xp_table.get(name, 0)) for name in all_skills}
+    if skill == "overall":
+        xp_micro = sum(skills_xp.values())
+    else:
+        xp_micro = _micro(xp_table.get(skill, 0))
     rank: Optional[int] = None
     try:
         for row in _fetch_hiscores_rows(post, endpoint, session,
@@ -446,7 +460,7 @@ def query_public_profile(post: PostFn, endpoint: Endpoint, session, *,
     return {"ok": True,
             "profile": {"username": name, "skill": skill, "rank": rank,
                         "xp": xp_micro, "xp_display": format_xp(xp_micro),
-                        "is_demo": is_demo},
+                        "is_demo": is_demo, "skills_xp": skills_xp},
             "rows": format_hiscores_rows([row]),
             "fetched_at": time.time()}
 
