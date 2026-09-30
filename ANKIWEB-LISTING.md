@@ -19,6 +19,8 @@ Title: AnkiScape: Evolved — OSRS Skills for Anki
 - A compact review HUD anchored above or below the card area (never over
   your card) with the active skill, level, XP bar, and pause reasons.
 - Read-only Bank, achievements, and Overall and per-skill hiscores inside the add-on.
+  The same read-only board (username, level and XP only) is also at
+  https://hiscores.ankiscape.xyz, which search engines do not index.
 - Catch-up rewards for review history the add-on has not credited yet, such
   as reviews made while it was off. Phone (AnkiMobile/AnkiDroid) catch-up is
   untested in 3.0. No phone game UI.

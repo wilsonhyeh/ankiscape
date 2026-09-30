@@ -82,11 +82,14 @@ Evolved release). Anki 23.10+, Qt5/Qt6, macOS/Linux/Windows.
   hiscores. Tokens/passwords never enter collection config, journals, or
   logs.
 - Hiscores (in-add-on) are browsable without an account: an Overall board and
-  one per skill, showing username, level and XP only. A podium for the top
-  three, your own rank with the XP gap to the next player, rank movement since
+  one per skill, showing username, level and XP only. Everyone is on one list;
+  ranks 1-3 carry a gold, silver or bronze bar and a matching outline. You also
+  get your own rank with the XP gap to the next player, rank movement since
   your last visit (remembered on this computer only) and a card for any player
   with all six skills. Signing in adds your own score and live sync. No
-  friends, clans or public site.
+  friends or clans. A read-only copy of the same board (username, level and
+  XP only, with the same player cards) is also published at
+  https://hiscores.ankiscape.xyz. That page is not indexed by search engines.
 - Free-backend note: the sync backend runs on Supabase Free (pauses after
   a week idle; finite storage). At capacity the add-on stops online writes
   safely and keeps local pending operations — no paid upgrade, no
