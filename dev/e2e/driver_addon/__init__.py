@@ -3396,13 +3396,34 @@ def _visual_polish_checks(state):
     except Exception as exc:
         _step("visual_min_size_usable", False, repr(exc))
 
-    # 3. Icon cache: repeated full cycles must not re-decode files. One
-    # warm-up cycle establishes the cache; the measured cycles must reuse it.
+    # 3. Icon cache: repeated full cycles must not re-decode files. Warm-up
+    # cycles establish the cache; the measured cycles must reuse it. Some icons
+    # arrive after the tab tour: a late projection publish fills the item
+    # screens, and the public Hiscores board (fetched over the network, which
+    # the guard allows) brings the rank medals. On a slow runner a single fixed
+    # warm-up cycle ends before they land and the measured cycles then pay for
+    # them. Warm up until one full cycle decodes nothing new (bounded), so the
+    # measured cycles test reuse rather than arrival order. A real leak or
+    # eviction still fails: it keeps decoding, or loses keys, after this.
     try:
+        import time as _time
         cache = ui_widgets._ICON_CACHE
-        for section in ART_SECTIONS:
-            _click_rail(section)
-            QApplication.processEvents()
+        _wait_projection_settled()
+        warmups = 0
+        for warmups in range(1, 9):
+            decodes_start = _visual_stat(ui_widgets.icon_cache_stats(),
+                                         "decodes")
+            for section in ART_SECTIONS:
+                _click_rail(section)
+                QApplication.processEvents()
+            # Let network/worker completions for this cycle land before judging.
+            deadline = _time.monotonic() + 0.75
+            while _time.monotonic() < deadline:
+                QApplication.processEvents()
+                _time.sleep(0.05)
+            if _visual_stat(ui_widgets.icon_cache_stats(),
+                            "decodes") == decodes_start:
+                break
         before = ui_widgets.icon_cache_stats()
         keys_before = set(cache._data.keys())
         for _ in range(2):
@@ -3418,6 +3439,7 @@ def _visual_polish_checks(state):
             f"{str(k[0])[-28:]}|{k[2]}|{k[3]}" for k in fresh[:6])
         _step("visual_icon_cache_reuse", decodes <= 4 and hits > 0,
               f"re-decodes={decodes} hits={hits} lost_keys={len(lost)} "
+              f"warmups={warmups} "
               f"entries={after.get('entries')} fresh={sample}")
         _step("visual_icon_cache_bounded",
               _visual_stat(after, "entries") <= 256
