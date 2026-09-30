@@ -1861,6 +1861,34 @@ def _observed_runtime_from(results) -> Dict[str, Any]:
     return {}
 
 
+# The release lane's two-hour endurance run is about two thirds of its wall
+# time, and it runs last. The validator fails a lane for any scenario that is
+# not `pass`, so once an earlier scenario has failed the lane is already red and
+# the endurance result cannot change the verdict: release-verify 36727126349
+# knew two lanes were red at minute ~10 of a 187-minute job. Skip it then.
+# Release only: the nightly's 30-minute run is a trend, and is cheap.
+FAIL_FAST_SKIPS = {"release": ("endurance-2h",)}
+
+
+def _failed_before(stage: str, scenario: Dict[str, Any],
+                   results: List[Dict[str, Any]]) -> List[str]:
+    """Ids of already-run scenarios that failed, when `scenario` is one the
+    stage skips after a failure; otherwise none."""
+    if str(scenario.get("id")) not in FAIL_FAST_SKIPS.get(stage, ()):
+        return []
+    return [str(item.get("id")) for item in results
+            if item.get("status") != "pass"]
+
+
+def _skipped_entry(scenario: Dict[str, Any], blockers: List[str]) -> Dict[str, Any]:
+    """A scenario that did not run. Its status is not `pass`, so the validator
+    still fails the lane and names it (`scenario_status:...:skipped`)."""
+    return {"id": str(scenario.get("id")), "status": "skipped", "command": "",
+            "exit_status": 2,
+            "detail": "skipped:earlier_scenario_failed:" + ",".join(blockers),
+            "assertions": [], "counts": {}, "files": []}
+
+
 def cmd_run_lane(args) -> int:
     stage = args.stage
     role = args.role
@@ -1912,6 +1940,13 @@ def cmd_run_lane(args) -> int:
 
     results = []
     for scenario in _scenarios_for_role(matrix, role, stage):
+        blockers = ([] if getattr(args, "keep_going", False)
+                    else _failed_before(stage, scenario, results))
+        if blockers:
+            print(f"[reliability] skipping {scenario.get('id')}: "
+                  f"{', '.join(blockers)} already failed in this lane")
+            results.append(_skipped_entry(scenario, blockers))
+            continue
         results.append(run_scenario(ctx, scenario, stage, out_dir))
     record["scenarios"] = results
     record["metrics"] = ctx.get("metrics", {}) or {}
@@ -2174,6 +2209,9 @@ def main(argv=None) -> int:
     p_lane.add_argument("--qt-actual", default="")
     p_lane.add_argument("--trusted", action="store_true")
     p_lane.add_argument("--native-timeout", type=int, default=7200)
+    p_lane.add_argument("--keep-going", action="store_true",
+                        help="run every scenario even after one failed "
+                             "(release skips endurance-2h otherwise)")
     p_base = sub.add_parser("baseline")
     p_base.add_argument("--out", default="")
     args = parser.parse_args(argv)
