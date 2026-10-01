@@ -33,6 +33,17 @@ _COMPLETED = False
 # declaring the award absent: for the fixture (level 23, Iron ore) a miss costs
 # p=0.24 per answer, so P(miss every time) is 0.24**8 ~ 1.1e-5.
 AWARD_ANSWER_BUDGET = 8
+# Anki 23.10 on Qt5/Linux segfaults on exit (code -11) when it is quit while it
+# is still starting up. `ui-credential-fallback` finishes on its first tick, about
+# 1.6 s after launch with the deck browser still loading, and crashed in 31 of 240
+# launches on both the pre-redesign and current code and on both runner images; the
+# same journey held open about 8 s crashed in 0 of 90 (CI experiment 2026-10-01).
+# `_quit` therefore keeps Anki up for at least this long since the driver loaded;
+# only journeys that finish earlier wait, and the event loop keeps running.
+MIN_UPTIME_BEFORE_QUIT_S = 10.0
+_IMPORTED_AT = time.time()
+_QUIT_DEFERRED = False
+_PENDING_EXIT = 0
 
 
 def _load_run_id():
@@ -317,7 +328,7 @@ def _finish_phase(next_phase):
     _quit(0)
 
 
-def _quit(exit_code):
+def _quit(exit_code, _after_floor=False):
     """End the phase without raising out of a Qt slot.
 
     Raising SystemExit inside the tick slot hands the exception to PyQt's
@@ -326,9 +337,27 @@ def _quit(exit_code):
     intermittently segfaults (crash report 2026-09-12:
     cleanup_on_exit -> cleanup_qobject -> EXC_BAD_ACCESS). Stop our own
     timers, ask the app to exit with the journey's code and return."""
-    global _QUITTING, _COMPLETED
+    global _QUITTING, _COMPLETED, _QUIT_DEFERRED, _PENDING_EXIT
     _QUITTING = True
     _COMPLETED = True
+    remaining = MIN_UPTIME_BEFORE_QUIT_S - (time.time() - _IMPORTED_AT)
+    if remaining > 0 and not _after_floor:
+        # Too early: quitting during startup can segfault Anki on exit (see
+        # MIN_UPTIME_BEFORE_QUIT_S). Our timers are already stopped (_QUITTING)
+        # and _finish has already written the result, so wait out the floor.
+        # A repeat call while the wait is pending only updates the exit code
+        # (the last call wins, as before); it must not skip the floor.
+        _PENDING_EXIT = int(exit_code)
+        if _QUIT_DEFERRED:
+            return
+        try:
+            from aqt.qt import QTimer
+            QTimer.singleShot(int(remaining * 1000) + 50,
+                              lambda: _quit(_PENDING_EXIT, _after_floor=True))
+            _QUIT_DEFERRED = True
+            return
+        except Exception:
+            pass  # no Qt timer: quit now rather than hang
     try:
         import faulthandler
         faulthandler.cancel_dump_traceback_later()
