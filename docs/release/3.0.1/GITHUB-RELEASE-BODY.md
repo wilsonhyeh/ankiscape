@@ -9,8 +9,11 @@ changes, and installing over 3.0.0 keeps your progress.
 - Rank movement since your last visit, remembered only on your computer
 - Click any player for a card with all six skills
 
-Verified artifact: `ankiscape-3.0.1.ankiaddon`, SHA-256 `PENDING`, from release
-verification run `PENDING`. See `READINESS.md`.
+Verified artifact: `ankiscape-3.0.1.ankiaddon`, SHA-256
+`31eb1b58e265e30e29ad314d854c9247a7392339e45470c330da6baf09cf62a7`, from release
+verification
+[run 36883256412](https://github.com/wilsonhyeh/ankiscape/actions/runs/36883256412)
+(seven desktop targets on macOS, Windows and Linux). See READINESS.md.
 
 Install: download `ankiscape-3.0.1.ankiaddon` and use
 Tools → Add-ons → Install from file. The AnkiWeb listing (1808450369) gets the
