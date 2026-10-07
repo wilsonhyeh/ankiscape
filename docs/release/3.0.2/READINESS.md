@@ -1,7 +1,7 @@
 # Release readiness — AnkiScape 3.0.2
 
-Status: **PUBLISHED ON GITHUB (2026-10-07, tag `v3.0.2`); AnkiWeb upload
-pending (owner-manual).** Every automated row is green on one immutable
+Status: **PUBLISHED (2026-10-07): GitHub release `v3.0.2` and AnkiWeb
+listing `1808450369`.** Every automated row is green on one immutable
 candidate. Publication was authorized by Wilson on 2026-10-07.
 
 Scope: 3.0.2 is 3.0.1 plus the two threading fixes for #60
@@ -76,7 +76,7 @@ and `on_sync` 4001 ms on `MainThread`.
 | Reporter's own confirmation | open | the #60 reporter A/B-tested an equivalent `uses_collection=False` patch on Windows 11 / Anki 26.09.3 and saw the popup go away; they have not run 3.0.2 |
 | Human rows from 3.0.0 | carried | unchanged by 3.0.2; see `docs/release/3.0.0/READINESS.md` |
 | GitHub release `v3.0.2` | done | published 2026-10-07 21:15 UTC with the verified artifact and `SHA256SUMS.txt`; marked Latest |
-| AnkiWeb upload | owner-manual | Wilson; no API |
+| AnkiWeb upload | done | uploaded by Wilson 2026-10-07; the public listing shows "0.38MB. Updated 2026-10-07" (the artifact is 403,571 bytes) |
 
 ## Known gaps
 
