@@ -156,14 +156,15 @@
     },
     {
       "id": "native-journeys",
-      "title": "New native journeys (deferred rewards, rebuild, reporting, polish, test leaderboard, account lifecycle, credentials, profile races, recovery)",
+      "title": "New native journeys (deferred rewards, rebuild, reporting, polish, test leaderboard, account lifecycle, credentials, profile races, recovery, slow sync, sync stall)",
       "role": "native",
       "stages": ["nightly", "release"],
       "require_journeys": ["ui-deferred-rewards", "ui-rebuild-review",
                            "ui-report-bug", "ui-visual-polish",
                            "ui-test-leaderboard", "ui-account-lifecycle",
                            "ui-credential-fallback",
-                           "ui-profile-races", "ui-recovery"],
+                           "ui-profile-races", "ui-recovery",
+                           "ui-slow-sync", "ui-sync-stall"],
       "target_requirements": [
         {
           "target": { "os": "macos", "anki": "26.8.1", "qt": "6" },

@@ -1882,6 +1882,28 @@ def _evolved_set_board_visibility(visible: bool) -> dict:
         return {"ok": False, "error": repr(exc)[:200]}
 
 
+_EVOLVED_NET_EXECUTOR: dict = {"executor": None}
+
+
+def _evolved_run_off_collection(task, on_done) -> None:
+    """Run network/journal work on AnkiScape's own worker thread and hand the
+    Future to on_done on the main thread.
+
+    Never use taskman.run_in_background for this: its default executor is
+    Anki's single collection thread, so a slow Supabase round-trip there makes
+    the next card's answer CollectionOp wait and Anki shows "Processing...".
+    One worker keeps AnkiScape's own jobs serialized as they were before."""
+    executor = _EVOLVED_NET_EXECUTOR["executor"]
+    if executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+        executor = ThreadPoolExecutor(max_workers=1,
+                                      thread_name_prefix="ankiscape-net")
+        _EVOLVED_NET_EXECUTOR["executor"] = executor
+    run_on_main = mw.taskman.run_on_main
+    future = executor.submit(task)
+    future.add_done_callback(lambda fut: run_on_main(lambda: on_done(fut)))
+
+
 def _evolved_query_hiscores_async(skill: str, limit: int, on_done,
                                   cohort: bool = False) -> None:
     """Run the query off the Qt thread; deliver on the main thread guarded by
@@ -1938,7 +1960,7 @@ def _evolved_query_hiscores_async(skill: str, limit: int, on_done,
                     return
                 _deliver(value)
 
-            taskman.run_in_background(_wrapped, _on_bg)
+            _evolved_run_off_collection(_wrapped, _on_bg)
             return
         except Exception:
             pass
@@ -2000,7 +2022,7 @@ def _evolved_lookup_async(username: str, skill: str, on_done,
                 except Exception as exc:
                     value = {"ok": False, "error": str(exc)[:200]}
                 _deliver(value)
-            taskman.run_in_background(_task, _on_bg)
+            _evolved_run_off_collection(_task, _on_bg)
             return
         except Exception:
             pass
@@ -2032,7 +2054,7 @@ def _evolved_account_runner(work, deliver):
                 except Exception as exc:
                     value = exc
                 deliver(value)
-            taskman.run_in_background(_tracked, _bg)
+            _evolved_run_off_collection(_tracked, _bg)
             return
         except Exception:
             pass
@@ -3207,20 +3229,6 @@ def _evolved_last_error() -> str:
     except Exception:
         pass
     return ""
-
-
-def _evolved_manual_sync() -> dict:
-    """Manual Sync button path: run now, return structured result for the
-    Hiscores status line (never a modal on failure)."""
-    try:
-        svc = _evolved_sync_service()
-        if svc is None:
-            if not _evolved_logged_in():
-                return {"ok": False, "error": "logged_out_no_network"}
-            return {"ok": False, "error": "sync_unconfigured"}
-        return svc.force_sync()
-    except Exception as exc:
-        return {"ok": False, "error": repr(exc)[:200]}
 
 
 def _evolved_query_hiscores(skill: str, limit: int = 50,
