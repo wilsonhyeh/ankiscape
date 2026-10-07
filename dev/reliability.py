@@ -53,7 +53,8 @@ MAX_RUN_SECONDS = 48 * 3600
 NEW_JOURNEYS = ("ui-deferred-rewards", "ui-rebuild-review", "ui-report-bug",
                 "ui-visual-polish", "ui-test-leaderboard",
                 "ui-account-lifecycle", "ui-credential-fallback",
-                "ui-profile-races", "ui-recovery")
+                "ui-profile-races", "ui-recovery", "ui-slow-sync",
+                "ui-sync-stall")
 
 
 class ReliabilityError(Exception):

@@ -3828,6 +3828,151 @@ def _poll_ui_rebuild_review(state):
         return
 
 
+# ui-slow-sync: how long the fake network job holds AnkiScape's worker, and
+# the answer budget. Anki shows its "Processing..." window 600 ms into a
+# CollectionOp, so an answer that takes that long is the user-visible bug.
+SLOW_SYNC_HOLD_S = 4.0
+SLOW_SYNC_ANSWER_BUDGET_MS = 600.0
+
+
+def _poll_ui_slow_sync(state):
+    """Answering is not queued behind a slow AnkiScape network job.
+
+    Each answer is made while a 4 s job is in flight on the same runner real
+    sync uses. Before the fix that runner was Anki's single collection thread,
+    so the answer's CollectionOp waited for the job and Anki showed
+    "Processing..." (user report, 2026-10-06)."""
+    from aqt import mw
+    import time as _time
+    stage = state.get("stage", "setup")
+    if stage == "setup":
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        _seed_deck(state, count=4, prefix="SLOWSYNC")
+        _open_reviewer(state, "SLOWSYNC")
+        state["ops_baseline"] = len(_journal_ops())
+        state["stage"] = "answers"
+        return
+    if stage != "answers":
+        return
+    try:
+        if getattr(mw.progress, "_win", None) is not None:
+            state["progress_shown"] = state.get("progress_shown", 0) + 1
+    except Exception:
+        pass
+    if state.get("awaiting"):
+        done = len(_journal_ops()) - state["ops_baseline"]
+        if done < state["answers_done"]:
+            return
+        state["answer_ms"].append(
+            (_time.perf_counter() - state["answer_start"]) * 1000.0)
+        state["awaiting"] = 0
+    if state.get("answers_done", 0) >= 3:
+        samples = state.get("answer_ms") or []
+        listing = ", ".join(f"{ms:.0f}" for ms in samples)
+        _step("slow_sync_answer_not_queued",
+              bool(samples) and max(samples) < SLOW_SYNC_ANSWER_BUDGET_MS,
+              f"answer=[{listing}]ms budget<{SLOW_SYNC_ANSWER_BUDGET_MS:.0f}ms "
+              f"with a {SLOW_SYNC_HOLD_S:.0f}s job in flight")
+        _step("slow_sync_no_processing_window",
+              not state.get("progress_shown"),
+              f"progress window seen on {state.get('progress_shown', 0)} ticks")
+        _shot("ui-slow-sync")
+        _finish(0 if not RESULT["errors"] else 1)
+        return
+    if not _reviewer_answerable(state):
+        return
+    # One job per answer; _answer_current_card takes a tick to reveal the
+    # answer side first, so start a fresh job if this one is nearly done.
+    now = _time.time()
+    if state.get("job_for") != state.get("answers_done", 0) or \
+            now - state.get("job_at", 0) > SLOW_SYNC_HOLD_S - 1.5:
+        import ankiscape
+        ankiscape._evolved_account_runner(
+            lambda: _time.sleep(SLOW_SYNC_HOLD_S), lambda _value: None)
+        state["job_for"] = state.get("answers_done", 0)
+        state["job_at"] = now
+        return
+    state["answer_start"] = _time.perf_counter()
+    if not _answer_current_card(state):
+        return
+    state.setdefault("answer_ms", [])
+    state["awaiting"] = 1
+    state["answers_done"] = state.get("answers_done", 0) + 1
+
+
+# ui-sync-stall: the Sync buttons and the Hiscores tab call on_sync on the Qt
+# thread. It must queue the sync and return, never run it there.
+SYNC_STALL_HOLD_S = 4.0
+SYNC_STALL_BUDGET_MS = 250.0
+
+
+class _SlowSyncService:
+    """Stands in for SyncService: force_sync takes SYNC_STALL_HOLD_S."""
+
+    def __init__(self):
+        import threading
+        self.calls = []
+        self.lock = threading.Lock()
+
+    def force_sync(self):
+        import threading
+        import time as _time
+        _time.sleep(SYNC_STALL_HOLD_S)
+        with self.lock:
+            self.calls.append(threading.current_thread().name)
+        return {"ok": True, "pending": 0, "rejected": 0}
+
+    def note_reviews(self, count=1):
+        pass
+
+
+def _poll_ui_sync_stall(state):
+    """on_sync (Sync buttons, Hiscores open) returns at once and the sync
+    still runs, off the main thread (user report, issue #60, 2026-10-07)."""
+    import time as _time
+    import threading
+    stage = state.get("stage", "setup")
+    if stage == "setup":
+        if _drive_onboarding(state, "mining") is not True:
+            return
+        import ankiscape
+        fake = _SlowSyncService()
+        state["fake"] = fake
+        state["saved"] = (ankiscape._evolved_sync_service,
+                          ankiscape._evolved_logged_in)
+        ankiscape._evolved_sync_service = lambda: fake
+        ankiscape._evolved_logged_in = lambda: True
+        ankiscape._EVOLVED_SYNC_TIMER.update({"scheduler": None, "svc": None})
+        on_sync = ankiscape._evolved_shell_deps()["on_sync"]
+        start = _time.perf_counter()
+        result = on_sync()
+        state["call_ms"] = (_time.perf_counter() - start) * 1000.0
+        state["result"] = repr(result)[:120]
+        state["main_thread"] = threading.current_thread().name
+        state["waited_at"] = _time.time()
+        state["stage"] = "wait"
+        return
+    if stage != "wait":
+        return
+    fake = state["fake"]
+    with fake.lock:
+        calls = list(fake.calls)
+    if not calls and _time.time() - state["waited_at"] < SYNC_STALL_HOLD_S + 20:
+        return
+    import ankiscape
+    ankiscape._evolved_sync_service, ankiscape._evolved_logged_in = \
+        state["saved"]
+    _step("on_sync_returns_immediately",
+          state["call_ms"] < SYNC_STALL_BUDGET_MS,
+          f"on_sync took {state['call_ms']:.0f}ms "
+          f"budget<{SYNC_STALL_BUDGET_MS:.0f}ms result={state['result']}")
+    _step("sync_ran_off_main_thread",
+          len(calls) == 1 and calls[0] != state["main_thread"],
+          f"sync calls={calls} main={state['main_thread']}")
+    _finish(0 if not RESULT["errors"] else 1)
+
+
 # Retired hosted-v1 fixture display names (dev/fixtures/hosted-v1.json). Any
 # of these appearing in public standings is an isolation failure.
 LEGACY_FIXTURE_NAMES = {
@@ -6473,6 +6618,8 @@ _PHASE_POLLS = {
     ("ui-visual-polish", 2): _poll_ui_visual_polish_2,
     ("ui-deferred-rewards", 1): _poll_ui_deferred_rewards,
     ("ui-rebuild-review", 1): _poll_ui_rebuild_review,
+    ("ui-slow-sync", 1): _poll_ui_slow_sync,
+    ("ui-sync-stall", 1): _poll_ui_sync_stall,
     ("ui-test-leaderboard", 1): _poll_ui_test_leaderboard,
     ("ui-account-lifecycle", 1): _poll_ui_account_lifecycle,
     ("ui-credential-fallback", 1): _poll_ui_credential_fallback,

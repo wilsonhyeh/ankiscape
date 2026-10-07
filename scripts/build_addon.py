@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """scripts/build_addon.py - Deterministic package build from an explicit allowlist.
 
-Builds dist/ankiscape-3.0.1.ankiaddon with manifest package 1808450369.
+Builds dist/ankiscape-3.0.2.ankiaddon with manifest package 1808450369.
 Excludes tests/dev/server/artifacts/dist/.dev/.git/.venv, credentials/env
 files, meta.json, user_files, journals, logs, caches, editor files. Asserts
 the exact archive member set, traversal safety, required assets and source
@@ -20,7 +20,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
-VERSION = "3.0.1"
+VERSION = "3.0.2"
 PACKAGE_ID = "1808450369"
 ARCHIVE = os.path.join(DIST, f"ankiscape-{VERSION}.ankiaddon")
 
