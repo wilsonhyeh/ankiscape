@@ -21,6 +21,8 @@ unchanged. 3.0.1 adds or changes only the following.
   token and no account identity, for any profile including "Play offline".
 - The test-cohort leaderboard (server-reported test accounts only) has no
   Overall tab.
-- Looked at by eye on macOS only. Windows, Linux (Qt5 and Qt6) and Anki 23.10
-  are covered by the automated release-verify journeys (see `READINESS.md` for
-  the run), not by anyone viewing the screen.
+- The level sort, player cards and rank arrows have been looked at by eye on
+  macOS only. On Windows 26.8.1 and Linux 23.10 Qt5 the board itself (icon tabs,
+  sort pills, medal bars and outlines, sign-in bar) was viewed in the
+  release-verify screenshots, captured while level totals were still loading;
+  all journeys pass on every native lane (see `READINESS.md` for the run).
