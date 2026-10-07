@@ -7,8 +7,11 @@ changes, and installing over 3.0.1 keeps your progress.
   up Anki when it saves your answer (#60)
 - Opening Hiscores or pressing Sync no longer freezes the window
 
-Verified artifact: `ankiscape-3.0.2.ankiaddon`, SHA-256 `PENDING`, from release
-verification run `PENDING`. See `READINESS.md`.
+Verified artifact: `ankiscape-3.0.2.ankiaddon`, SHA-256
+`b5ea6f7d588dcb12ee9d96f08baa8f4ebd6210070760ee937ee5b30d372db8e5`, from release
+verification
+[run 37661546595](https://github.com/wilsonhyeh/ankiscape/actions/runs/37661546595)
+(seven desktop targets on macOS, Windows and Linux). See READINESS.md.
 
 Install: download `ankiscape-3.0.2.ankiaddon` and use
 Tools → Add-ons → Install from file. The AnkiWeb listing (1808450369) gets the
