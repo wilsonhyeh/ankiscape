@@ -5,7 +5,7 @@
 -- transaction as the Auth deletion, while Auth cascades cover operations,
 -- review claims and game_state. A failed deletion rolls the cleanup back.
 begin;
-select plan(18);
+select plan(20);
 
 -- ---------------------------------------------------------------------------
 -- Fixtures: ordinary player, fixture-registered player, untouched player.
@@ -66,6 +66,17 @@ select p.game_uuid, 1, jsonb_build_object('xp_micro', jsonb_build_object(
   from public.players p
  where p.username_norm in ('deluser', 'fixdel', 'keepuser');
 
+-- Scoring fold rows (0017): fold, review keys, and one snapshot per game.
+select public._evolved_fold_rebuild(p.game_uuid, false)
+  from public.players p
+ where p.username_norm in ('deluser', 'fixdel', 'keepuser');
+insert into public.game_fold_snapshots(game_uuid, user_id, folded_ops, wm_lamport,
+                                       wm_device, wm_seq, wm_op, state)
+select f.game_uuid, f.user_id, 100, 1, 'dev-a', 1, gen_random_uuid(), f.state
+  from public.game_fold f
+  join public.players p on p.game_uuid = f.game_uuid
+ where p.username_norm in ('deluser', 'fixdel', 'keepuser');
+
 insert into public.moderation_audit(target_user_id, action, reason)
 select p.user_id, 'note', 'pre-delete-fixture'
   from public.players p
@@ -112,6 +123,22 @@ select is(
   (select count(*)::int from public.moderation_audit a
     where a.target_user_id = '50000000-0000-4000-8000-000000000001'),
   0, 'moderation audit rows removed by the cleanup trigger');
+select is(
+  (select count(*)::int from public.game_fold f
+    where f.game_uuid = 'dddddddd-0000-4000-8000-000000000001')
+  + (select count(*)::int from public.game_fold_snapshots f
+    where f.game_uuid = 'dddddddd-0000-4000-8000-000000000001')
+  + (select count(*)::int from public.game_review_keys f
+    where f.game_uuid = 'dddddddd-0000-4000-8000-000000000001'),
+  0, 'scoring fold, snapshots and review keys removed by cascade');
+select is(
+  (select count(*)::int from public.game_fold f
+    where f.game_uuid = 'dddddddd-0000-4000-8000-000000000003')
+  + (select count(*)::int from public.game_fold_snapshots f
+    where f.game_uuid = 'dddddddd-0000-4000-8000-000000000003')
+  + (select count(*)::int from public.game_review_keys f
+    where f.game_uuid = 'dddddddd-0000-4000-8000-000000000003'),
+  3, 'another game''s fold, snapshot and review key are untouched');
 
 -- 3. The other player is untouched.
 select is(

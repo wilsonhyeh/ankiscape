@@ -286,6 +286,13 @@ jobs:
           RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
           python3 dev/reliability.py run-lane --stage nightly --role hosted \
             --trusted --out "artifacts/reliability/${RUN_ID}/hosted"
+      - name: Production health
+        # Read-only capacity check (migration 0017 ops_health): database size,
+        # stale or missing scoring folds, largest game, pg_cron failures.
+        env:
+          ANKISCAPE_PROD_URL: ${{ secrets.ANKISCAPE_PROD_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python3 dev/prod_health.py
       - name: Bundle and upload evidence
         if: always()
         run: |

@@ -1,10 +1,11 @@
--- server/supabase/tests/0010_checkpoint_retention.test.sql - One checkpoint
--- per game (migration 0015).
+-- server/supabase/tests/0010_checkpoint_retention.test.sql - game_checkpoints
+-- stays small (migrations 0015 + 0017).
 -- Run: cd server && supabase test db
 -- submit_operations used to append a full-state checkpoint on every accepted
--- submit and never remove one; on production that table reached 406 MB.
--- Several submits must leave exactly one row per game, at the latest revision,
--- and must not touch another game's checkpoint.
+-- submit and never remove one; on production that table reached 406 MB. 0015
+-- kept one row per game; 0017 stops writing it (nothing reads it) and keeps
+-- the scoring state in game_fold instead. Submits must write no checkpoint,
+-- keep a current fold, and not touch another game's checkpoint rows.
 begin;
 select plan(5);
 
@@ -52,16 +53,16 @@ select is(
 select is(
   (select count(*)::int from public.game_checkpoints
     where game_uuid = 'aaaaaaaa-9999-4999-8999-999999999999'),
-  1, 'only one checkpoint is kept for the game');
+  0, 'submits no longer write game_checkpoints');
 select is(
-  (select revision::int from public.game_checkpoints
-    where game_uuid = 'aaaaaaaa-9999-4999-8999-999999999999'),
-  3, 'the kept checkpoint is the latest revision');
+  (select folded_ops::int from public.game_fold
+    where game_uuid = 'aaaaaaaa-9999-4999-8999-999999999999' and not stale),
+  3, 'the fold covers all three operations and is current');
 select is(
-  (select state->'xp_micro' from public.game_checkpoints
+  (select xp from public.game_state
     where game_uuid = 'aaaaaaaa-9999-4999-8999-999999999999'),
   public.evolved_replay('aaaaaaaa-9999-4999-8999-999999999999')->'xp_micro',
-  'the kept checkpoint holds the current replay state');
+  'game_state holds the full-replay XP');
 select is(
   (select count(*)::int from public.game_checkpoints
     where game_uuid = 'bbbbbbbb-9999-4999-8999-999999999999'),

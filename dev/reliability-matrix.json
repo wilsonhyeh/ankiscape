@@ -123,6 +123,13 @@
       "command": ["python", "dev/scoring_parity.py", "--local"]
     },
     {
+      "id": "incremental-parity",
+      "title": "Incremental scoring fold == full replay after every upload (local stack)",
+      "role": "backend",
+      "stages": ["pr", "nightly", "release"],
+      "command": ["python", "dev/incremental_parity.py", "--local", "--cases", "300"]
+    },
+    {
       "id": "account-contracts",
       "title": "Real account/service contract journey (local stack)",
       "role": "backend",

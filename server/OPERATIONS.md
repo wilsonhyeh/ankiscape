@@ -60,6 +60,50 @@ Daily local dev never uses hosted projects, real SMTP, or AnkiWeb logins.
   public.game_checkpoints;` by hand (production 2026-10-08: 0.15 s, table
   406 MB -> 1.4 MB, database 443 MB -> 39 MB). Guarded by
   `tests/0010_checkpoint_retention.test.sql`.
+- `server/supabase/migrations/0016_aligned_replay.sql` - server scoring matches
+  the Python reducer: one winner per review key (earliest direct, else a skip
+  suppresses, else earliest catch-up) and catch-up presets sorted by
+  `effective_ts`. The per-winner step is one function, `_evolved_apply_winner`,
+  used by every scoring path. Production had 0 duplicate keys and 0 presets
+  when it shipped, so no score changed. Parity vectors `duplicate_keys` and
+  `unsorted_presets` in `dev/scoring_parity.py`.
+- `server/supabase/migrations/0017_incremental_fold.sql` - each upload is
+  scored by folding only its own operations onto a stored per-game fold
+  (`game_fold`, `game_fold_snapshots`, `game_review_keys`), so upload cost no
+  longer grows with history. An undo of a recent award rewinds to a snapshot
+  (every 100 operations, newest 20 kept). Anything the fast path cannot prove
+  equal to a full replay (duplicate claim, late canonical insertion, catch-up
+  preset, undo older than the window, rules change) rebuilds synchronously for
+  games of <= 3,000 operations, otherwise marks the fold stale. `game_state`
+  then keeps its previous values until the background job rebuilds it, so that
+  player's Hiscores entry can lag about a minute. `game_checkpoints` is no
+  longer written. Guarded by `tests/0011_incremental_fold.test.sql` (incl. a
+  200-op upload on 50,000 ops under 1 s) and `dev/incremental_parity.py`.
+
+## Scoring fold and background jobs (0017)
+
+- **pg_cron jobs.** `ankiscape-fold-rebuild` runs `select
+  public._evolved_fold_rebuild_stale(5)` every minute as `postgres` (no
+  statement timeout). `ankiscape-cron-history-purge` deletes
+  `cron.job_run_details` rows older than 7 days at 03:15 UTC.
+- **Inspect:** `select jobname, schedule, active from cron.job;` and `select
+  jobid, status, start_time, return_message from cron.job_run_details order by
+  start_time desc limit 20;`. Stale folds: `select game_uuid, stale_since from
+  public.game_fold where stale;`.
+- **Rebuild one game by hand:** `select public._evolved_fold_rebuild('<game
+  uuid>', true);` (takes no lock itself; production uploads lock the
+  `players` row, so run it inside `begin; select 1 from public.players where
+  game_uuid = '<game uuid>' for update; ... commit;`).
+- **Any migration that changes `rules_versions` must also run** `update
+  public.game_fold set stale = true, stale_since = now();`. The fast path
+  checks `rules_version`, but stale marking is what gets the job to rebuild.
+- **Synchronous limit:** `ankiscape.sync_rebuild_max_ops` (default 3,000)
+  is read with `current_setting(..., true)`. Tests set it to `0` to force the
+  background path. Production does not set it.
+- **Nightly check:** `dev/prod_health.py` (step "Production health" in the
+  trusted hosted job) calls the service_role-only `public.ops_health()` and
+  fails over 350 MB, on a fold stale > 15 min, on a game missing its fold, on
+  a game over 20,000 live operations, or on any failed pg_cron run in 24 h.
 
 ## Backups and rollback
 
