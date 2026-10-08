@@ -50,6 +50,16 @@ Daily local dev never uses hosted projects, real SMTP, or AnkiWeb logins.
   Replay is still O(history): ~80 us/op locally, ~0.5 ms/op on production
   (2,951 ops in 1.5 s, 2026-10-08), so the 8 s ceiling moves from ~3,000 to
   roughly 15,000 operations per game, not away.
+- `server/supabase/migrations/0015_checkpoint_retention.sql` - one
+  `game_checkpoints` row per game. `submit_operations` (0004) appended the full
+  replay state on every accepted submit and never removed one; nothing reads
+  the table (current state is `game_state`). On 2026-10-08 it was 406 MB of a
+  443 MB production database. 0015 deletes a game's older revisions after
+  writing the new one and prunes the backlog once. `VACUUM FULL` cannot run in
+  a migration, so after applying run `vacuum (full, analyze)
+  public.game_checkpoints;` by hand (production 2026-10-08: 0.15 s, table
+  406 MB -> 1.4 MB, database 443 MB -> 39 MB). Guarded by
+  `tests/0010_checkpoint_retention.test.sql`.
 
 ## Backups and rollback
 
@@ -97,6 +107,10 @@ is coming: **if you need a pre-migration restore point, take a dump first.**
   week of inactivity. Do not claim slots without checking at deploy time.
 - Measure storage per 100,000 operations and replay cost; the backend-tests
   benchmark reports actual memory/time/database size.
+- Check the real size before assuming headroom:
+  `select pg_size_pretty(pg_database_size('postgres'));`. On 2026-10-08 it
+  had reached 443 MB unnoticed (see 0015); the daily backup's data file size
+  is the cheapest early warning.
 - At capacity: stop online writes safely, retain local pending operations
   until capacity restores. No automatic paid upgrade.
 
