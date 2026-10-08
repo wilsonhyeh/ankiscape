@@ -37,6 +37,19 @@ Daily local dev never uses hosted projects, real SMTP, or AnkiWeb logins.
   inherit it. Without it `service_role` cannot write any migration-created
   table (PostgREST `403` / `42501`), which made the required `account-contracts`
   scenario un-passable on a `db reset` stack. `anon`/`authenticated` unchanged.
+- `server/supabase/migrations/0013_overall_hiscores.sql` - `overall` board (see
+  *Overall board* below).
+- `server/supabase/migrations/0014_linear_replay.sql` - `evolved_replay` in
+  linear time (issue #63). The 0005 body was quadratic in the game's history
+  and every `submit_operations` call replays it, so at ~3,000 operations a
+  submit passed the `authenticated` role's 8 s `statement_timeout` (PostgREST
+  `57014`) and the player could never upload again. Same signature, grants and
+  output (byte-identical on 500 randomized histories); claim resolution is one
+  window-function scan, so no plan depends on table statistics. Guarded by
+  `tests/0009_replay_scale.test.sql` (200-op submit on 6,000 ops under 8 s).
+  Replay is still O(history): ~80 us/op locally, ~0.5 ms/op on production
+  (2,951 ops in 1.5 s, 2026-10-08), so the 8 s ceiling moves from ~3,000 to
+  roughly 15,000 operations per game, not away.
 
 ## Backups and rollback
 
