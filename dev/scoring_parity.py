@@ -38,7 +38,9 @@ MIGRATION = os.path.join(ROOT, "server", "supabase", "migrations",
                          "0004_authoritative_scoring.sql")
 MIGRATIONS = (MIGRATION,
               os.path.join(ROOT, "server", "supabase", "migrations",
-                           "0005_gem_inventory_grant.sql"))
+                           "0005_gem_inventory_grant.sql"),
+              os.path.join(ROOT, "server", "supabase", "migrations",
+                           "0014_linear_replay.sql"))
 API_URL = "http://127.0.0.1:55321"
 NS = uuid.NAMESPACE_URL
 PW = "parity-pass-1"
