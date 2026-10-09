@@ -452,6 +452,16 @@ def _deletion_contract_checks(*, anon, service, endpoint, check, stamp,
         check("owned operations are gone after deletion",
               _rows(service, f"/rest/v1/game_operations?game_uuid=eq.{game}"
                              f"&select=op_id") == [])
+        check("archived operations are gone after deletion",
+              _rows(service, f"/rest/v1/game_operation_segments?game_uuid=eq.{game}"
+                             f"&select=first_id") == []
+              and _rows(service, f"/rest/v1/game_compaction_marks?game_uuid=eq.{game}"
+                                 f"&select=device_id") == [])
+        check("the scoring fold is gone after deletion",
+              _rows(service, f"/rest/v1/game_fold?game_uuid=eq.{game}"
+                             f"&select=game_uuid") == []
+              and _rows(service, f"/rest/v1/game_review_keys?game_uuid=eq.{game}"
+                                 f"&select=review_key") == [])
         check("review claims are gone after deletion",
               _rows(service, f"/rest/v1/review_claims?game_uuid=eq.{game}"
                              f"&select=review_key") == [])

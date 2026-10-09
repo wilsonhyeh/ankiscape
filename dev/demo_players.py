@@ -439,7 +439,9 @@ def _retire_surplus(transport: Transport, item: Dict[str, Any]) -> None:
                         "refusing to delete")
     # Data rows first (exact game/user match), then registry row, then Auth.
     if item.get("game_uuid"):
-        for table in ("game_operations", "game_state", "game_checkpoints"):
+        for table in ("game_operations", "game_operation_segments", "game_compaction_marks",
+                      "game_fold", "game_fold_snapshots", "game_review_keys",
+                      "game_state", "game_checkpoints"):
             try:
                 transport.request(
                     "DELETE", f"/rest/v1/{table}",

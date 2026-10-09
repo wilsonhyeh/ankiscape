@@ -9,8 +9,8 @@ production is drifting toward a limit that would break sync for players:
   * a scoring fold stale for over 15 minutes (the background rebuild runs
     every minute; a fold this old means the job is failing)
   * a game missing its fold   (every game with operations should have one)
-  * a game over 20,000 live operations (the size where Phase 2 archiving of
-    HQ plans/ankiscape-incremental-scoring-and-compaction.md must be live)
+  * a game over 20,000 live operations (archived operations, migration 0018,
+    do not count: past this the daily compaction job is not keeping up)
   * any failed pg_cron run in the last 24 hours
 
 Environment (same names as the hosted nightly lane):
@@ -63,7 +63,7 @@ def problems(h: dict, now: _dt.datetime) -> list:
         out.append(f"{h['missing_folds']} game(s) with operations have no scoring fold")
     if int(h.get("largest_game_ops") or 0) > LIVE_OPS_PER_GAME_MAX:
         out.append(f"largest game has {h['largest_game_ops']} live operations "
-                   f"(limit {LIVE_OPS_PER_GAME_MAX}; archiving must be live)")
+                   f"(limit {LIVE_OPS_PER_GAME_MAX}; is the compaction job running?)")
     if int(h.get("cron_failures_24h") or 0) > 0:
         out.append(f"{h['cron_failures_24h']} failed pg_cron run(s) in the last 24 h")
     return out
