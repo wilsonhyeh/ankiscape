@@ -34,13 +34,31 @@ from evolved.data import load_rules                      # noqa: E402
 from evolved import reviews as reviews_mod               # noqa: E402
 from evolved.reducer import replay as py_replay          # noqa: E402
 
-MIGRATION = os.path.join(ROOT, "server", "supabase", "migrations",
-                         "0004_authoritative_scoring.sql")
-MIGRATIONS = (MIGRATION,
-              os.path.join(ROOT, "server", "supabase", "migrations",
-                           "0005_gem_inventory_grant.sql"),
-              os.path.join(ROOT, "server", "supabase", "migrations",
-                           "0014_linear_replay.sql"))
+MIGRATIONS_DIR = os.path.join(ROOT, "server", "supabase", "migrations")
+MIGRATION = os.path.join(MIGRATIONS_DIR, "0004_authoritative_scoring.sql")
+# Scoring functions are redefined by later migrations (0005, 0014, 0015, 0016,
+# 0017, ...). Re-applying only an early file silently reinstalls an old
+# definition: until 2026-10-08 this list re-applied 0004 after 0015, which put
+# the 0004 submit_operations back on the stack for every later scenario. So
+# re-apply EVERY migration from 0004 on that defines a scoring function, in
+# order, and the newest definition always wins. Each must stay re-runnable.
+_SCORING_FN = re.compile(
+    r"create or replace function public\.(evolved_replay|submit_operations|_evolved_)")
+
+
+def _scoring_migrations() -> tuple:
+    out = []
+    for name in sorted(os.listdir(MIGRATIONS_DIR)):
+        if not name.endswith(".sql") or name < "0004":
+            continue
+        path = os.path.join(MIGRATIONS_DIR, name)
+        with open(path, encoding="utf-8") as fh:
+            if _SCORING_FN.search(fh.read()):
+                out.append(path)
+    return tuple(out)
+
+
+MIGRATIONS = _scoring_migrations()
 API_URL = "http://127.0.0.1:55321"
 NS = uuid.NAMESPACE_URL
 PW = "parity-pass-1"
@@ -323,6 +341,37 @@ def build_vectors() -> list:
         _direct(g, "dev-i", 2, 2, 9002, "cooking", "Trout", policy=1),
     ]
     out.append({"name": "cooking_level_gate", "game": g, "ops": ops})
+
+    # 10. Several awards for one review key (0016): one winner per key, the
+    # earliest direct beating catch-up, the earliest of two directs, and the
+    # earliest of two catch-ups. Before 0016 the SQL applied a winner once
+    # per award row.
+    g = str(uuid.uuid5(NS, "parity-dupkeys"))
+    d = _direct(g, "dev-j", 2, 2, 1001, "mining", "Rune essence", policy=2)
+    c = _catchup(g, "dev-j", 1, 1, 1001)
+    c["payload"]["review_key"] = d["payload"]["review_key"]
+    d2a = _direct(g, "dev-j", 3, 3, 1002, "mining", "Clay", policy=2)
+    d2b = _direct(g, "dev-j", 4, 4, 1003, "mining", "Copper ore", policy=2)
+    d2b["payload"]["review_key"] = d2a["payload"]["review_key"]
+    c3a = _catchup(g, "dev-j", 5, 5, 1004)
+    c3b = _catchup(g, "dev-j", 6, 6, 1005)
+    c3b["payload"]["review_key"] = c3a["payload"]["review_key"]
+    ops = [c, d, d2a, d2b, c3a, c3b]
+    out.append({"name": "duplicate_keys", "game": g, "ops": ops})
+
+    # 11. Presets uploaded out of effective_ts order (0016): catch-up skill is
+    # the last preset by effective_ts at or before the review, as in the
+    # reducer's sorted preset timeline.
+    g = str(uuid.uuid5(NS, "parity-presets"))
+    ops = [
+        _op(g, "dev-k", 1, 1, "catchup_preset",
+            {"skill": "woodcutting", "effective_ts": 1_800_000_050}),
+        _op(g, "dev-k", 2, 2, "catchup_preset",
+            {"skill": "fishing", "effective_ts": 1_800_000_000}),
+        _catchup(g, "dev-k", 3, 3, 1101),
+        _catchup(g, "dev-k", 60, 60, 1102),
+    ]
+    out.append({"name": "unsorted_presets", "game": g, "ops": ops})
     return out
 
 
