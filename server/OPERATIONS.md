@@ -79,6 +79,15 @@ Daily local dev never uses hosted projects, real SMTP, or AnkiWeb logins.
   player's Hiscores entry can lag about a minute. `game_checkpoints` is no
   longer written. Guarded by `tests/0011_incremental_fold.test.sql` (incl. a
   200-op upload on 50,000 ops under 1 s) and `dev/incremental_parity.py`.
+- `server/supabase/migrations/0018_operation_archive.sql` - old operations move
+  into `game_operation_segments` (1,000 per row, the exact
+  `to_jsonb(game_operations row)` objects, lz4-compressed; ~160 B/op instead
+  of ~900-1,100 B/op live). Nothing is deleted from history:
+  `fetch_operations`, `evolved_replay` and the fold rebuild read live +
+  archive (`public.game_operations_all`), and retries of archived operations
+  stay idempotent through `game_compaction_marks`. No add-on change. Guarded
+  by `tests/0012_operation_archive.test.sql` (every `fetch_operations` page
+  byte-identical before and after) and `dev/incremental_parity.py --compact`.
 
 ## Scoring fold and background jobs (0017)
 
@@ -104,6 +113,40 @@ Daily local dev never uses hosted projects, real SMTP, or AnkiWeb logins.
   trusted hosted job) calls the service_role-only `public.ops_health()` and
   fails over 350 MB, on a fold stale > 15 min, on a game missing its fold, on
   a game over 20,000 live operations, or on any failed pg_cron run in 24 h.
+
+## Operation archive (0018)
+
+- **What is archived.** Per game, the longest id-ordered prefix of live
+  operations that are all older than 7 days (`created_at`), at least 2,000
+  canonical positions behind the newest operation, and before the oldest
+  `game_fold_snapshots` watermark; only whole 1,000-op segments. A game whose
+  fold is stale is skipped. So the newest 2,000 operations of every game, and
+  everything from the last week, are always live.
+- **Job.** `ankiscape-compaction` runs `select public._evolved_compact_all(20)`
+  at 09:30 UTC daily (up to 20 games with >= 3,000 live operations, >= 1,000
+  of them a week old). By hand: `select public._evolved_compact_game('<game
+  uuid>');` (takes the `players` row lock itself; returns operations archived).
+- **Inspect:** `select game_uuid, count(*), sum(op_count) from
+  public.game_operation_segments group by 1;`. `ops_health()` reports
+  `archived_ops`, `segments` and `archive_bytes`; `live_ops` and
+  `largest_game_ops` stay live-only, so the nightly's 20,000 limit now means
+  compaction is not keeping up.
+- **Disk.** Deleting the archived rows from `game_operations` frees space
+  inside the table for new rows (autovacuum), but `pg_database_size` does not
+  drop until `vacuum full public.game_operations;` (exclusive lock on the
+  table; seconds at today's size). Only worth running when the size matters.
+- **Reading operations:** use `public.game_operations_all` (same columns as
+  `game_operations`) for anything that needs a game's whole history; a query
+  on `game_operations` alone now silently misses archived rows.
+- **Restore.** `pg_dump` includes the segments table. After a restore, this
+  must be true or new uploads would reuse archived ids and break
+  `fetch_operations` cursors: `select (select coalesce(max(last_id), 0) from
+  public.game_operation_segments) < pg_sequence_last_value(
+  pg_get_serial_sequence('public.game_operations', 'id')::regclass);`.
+- **Known limit.** An operation whose `op_id` matches an archived one but
+  whose `(device_id, device_seq)` does not is accepted as new instead of
+  `id_conflict` (live rows still catch it). The add-on never reuses an
+  `op_id` with a different slot.
 
 ## Backups and rollback
 

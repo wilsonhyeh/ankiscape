@@ -114,11 +114,20 @@ def cmd_unban(args) -> int:
 
 
 def cmd_export(args) -> int:
-    status, ops = _req("GET", "/rest/v1/game_operations?select=*&"
-                              f"game_uuid=eq.{args.game}&order=id&limit=100000")
-    if status != 200:
-        print(f"maintainer: export failed: {status} {ops}", file=sys.stderr)
-        return 1
+    # game_operations_all (0018) = live + archived operations. Paged by id:
+    # PostgREST caps a response at the project's max-rows (1,000 by default).
+    ops, cursor = [], 0
+    while True:
+        status, page = _req("GET", "/rest/v1/game_operations_all?select=*&"
+                                   f"game_uuid=eq.{args.game}&id=gt.{cursor}"
+                                   "&order=id&limit=1000")
+        if status != 200:
+            print(f"maintainer: export failed: {status} {page}", file=sys.stderr)
+            return 1
+        if not page:
+            break
+        ops.extend(page)
+        cursor = page[-1]["id"]
     bundle = {"game_uuid": args.game, "operations": ops}
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(bundle, fh, indent=2)
@@ -132,7 +141,10 @@ def cmd_delete_data(args) -> int:
               f"to confirm", file=sys.stderr)
         return 2
     # Order matters (FK): operations first, then state, then unlink player.
-    for table in ("game_operations", "game_state"):
+    # The archive (0018) and the scoring fold (0017) are per-game data too.
+    for table in ("game_operations", "game_operation_segments",
+                  "game_compaction_marks", "game_fold", "game_fold_snapshots",
+                  "game_review_keys", "game_state"):
         status, body = _req("DELETE", f"/rest/v1/{table}?"
                                       f"game_uuid=eq.{args.game}")
         print(f"maintainer: delete {table}: {status}")

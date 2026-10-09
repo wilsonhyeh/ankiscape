@@ -184,6 +184,11 @@ values ('{game_uuid}'::uuid, '{user_id}'::uuid, 0,
   '{{}}'::jsonb, '[]'::jsonb, '{{}}'::jsonb)
 on conflict (game_uuid) do update set user_id = excluded.user_id;
 delete from public.game_operations where game_uuid = '{game_uuid}'::uuid;
+delete from public.game_operation_segments where game_uuid = '{game_uuid}'::uuid;
+delete from public.game_compaction_marks where game_uuid = '{game_uuid}'::uuid;
+delete from public.game_fold where game_uuid = '{game_uuid}'::uuid;
+delete from public.game_fold_snapshots where game_uuid = '{game_uuid}'::uuid;
+delete from public.game_review_keys where game_uuid = '{game_uuid}'::uuid;
 """
 
 

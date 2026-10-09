@@ -135,7 +135,10 @@ def main():
                   f"accounts: {blocked}")
             created_users[:] = [uid for uid in created_users if uid not in protected]
         for game in games:
-            _admin("DELETE", f"/rest/v1/game_operations?game_uuid=eq.{game}")
+            for table in ("game_operations", "game_operation_segments",
+                          "game_compaction_marks", "game_fold",
+                          "game_fold_snapshots", "game_review_keys"):
+                _admin("DELETE", f"/rest/v1/{table}?game_uuid=eq.{game}")
             _admin("DELETE", f"/rest/v1/game_state?game_uuid=eq.{game}")
             _admin("PATCH", f"/rest/v1/players?game_uuid=eq.{game}",
                    {"game_uuid": None})

@@ -17,7 +17,16 @@ PostgreSQL, through the real RPC:
     sorted diagnostics) and the fold must not be stale.
 
 Half the cases set ankiscape.sync_rebuild_max_ops = 0, which forces every
-fallback through the stale/background path. One JSON line per case is
+fallback through the stale/background path.
+
+--compact (migration 0018) uses 3,200-4,800-op histories, backdates the
+live operations by 8 days and runs public._evolved_compact_game after the
+first 3,000 and at random points later, so uploads, undo (including undo of
+an archived winner), presets and late insertions are folded on top of an
+archived history. It also re-sends earlier batches, which must be accepted
+unchanged (applied 0, no conflicts) whether their rows are live or
+archived, and checks that live + archived rows always total what was
+uploaded. One JSON line per case is
 appended to artifacts/incremental_parity/<timestamp>.jsonl as it runs.
 
 Exit codes: 0 = no mismatches; nonzero = mismatch or error. Never touches
@@ -170,10 +179,41 @@ end $$;
 """
 
 
-def case_sql(ops_batches: list, sync_limit: int) -> str:
+def compact_batches(rng: random.Random, ops: list) -> list:
+    """The first 3,000 operations in 200-op batches, then random sizes."""
+    out = [ops[i:i + 200] for i in range(0, 3000, 200)]
+    return out + batches(rng, ops[3000:])
+
+
+RETRY_SQL = """
+do $$
+declare
+  r jsonb := public.submit_operations({game}, {wire}::jsonb);
+begin
+  if (r->>'applied')::int <> 0 or jsonb_array_length(r->'conflicts') <> 0
+     or jsonb_array_length(r->'accepted') <> {n} then
+    raise exception 'RETRY batch {batch}: re-sent batch was not accepted unchanged: %', r;
+  end if;
+end $$;
+"""
+
+COUNT_SQL = """
+do $$
+begin
+  if (select count(*) from public.game_operations_all where game_uuid = {game}) <> {n} then
+    raise exception 'COUNT batch {batch}: live + archived rows <> {n} uploaded';
+  end if;
+end $$;
+"""
+
+
+def case_sql(ops_batches: list, sync_limit: int, compact: bool = False,
+             rng: random.Random = None) -> str:
     game = lit(GAME)
     parts = [
         "set client_min_messages = warning;",
+        f"delete from public.game_operation_segments where game_uuid = {game};",
+        f"delete from public.game_compaction_marks where game_uuid = {game};",
         f"delete from public.game_operations where game_uuid = {game};",
         f"delete from public.game_fold where game_uuid = {game};",
         f"delete from public.game_fold_snapshots where game_uuid = {game};",
@@ -182,6 +222,8 @@ def case_sql(ops_batches: list, sync_limit: int) -> str:
         f" counters = '{{}}', achievements = '[]', checkpoint = '{{}}' where game_uuid = {game};",
         "create temp table if not exists _ip(batch int, path text);",
         "truncate _ip;",
+        "create temp table if not exists _ipc(archived int);",
+        "truncate _ipc;",
         f"select set_config('ankiscape.sync_rebuild_max_ops', '{sync_limit}', false);",
         "select set_config('request.jwt.claims', " +
         lit(json.dumps({"sub": USER_ID, "role": "authenticated"})) + ", false);",
@@ -202,8 +244,21 @@ def case_sql(ops_batches: list, sync_limit: int) -> str:
             f" else 'fast' end"
             f" from public.game_fold f left join _ipb b on true where f.game_uuid = {game};")
         parts.append("select 1 from public._evolved_fold_rebuild_stale(100);")
+        uploaded = sum(len(b) for b in ops_batches[:i])
+        if compact and (uploaded == 3000 or (uploaded > 3000 and rng.random() < 0.15)):
+            parts.append(f"update public.game_operations set created_at = created_at"
+                         f" - interval '8 days' where game_uuid = {game};")
+            parts.append(f"insert into _ipc select public._evolved_compact_game({game});")
+        if compact and i > 1 and rng.random() < 0.1:
+            old = ops_batches[rng.randrange(i - 1)]
+            parts.append(RETRY_SQL.format(
+                game=game, wire=lit(json.dumps(old, separators=(",", ":"))),
+                n=len(old), batch=i))
+        if compact:
+            parts.append(COUNT_SQL.format(game=game, n=uploaded, batch=i))
         parts.append(ASSERT_SQL.format(game=game, batch=i))
     parts.append("select path || '=' || count(*) from _ip group by path order by path;")
+    parts.append("select 'archived=' || coalesce(sum(archived), 0) from _ipc;")
     return "\n".join(parts)
 
 
@@ -213,6 +268,8 @@ def main(argv=None) -> int:
                         help="run against the local Supabase PostgreSQL stack")
     parser.add_argument("--cases", type=int, default=300)
     parser.add_argument("--seed", type=int, default=20261008)
+    parser.add_argument("--compact", action="store_true",
+                        help="archive old operations mid-history (migration 0018)")
     args = parser.parse_args(argv)
     if not args.local:
         print("incremental_parity: pass --local", file=sys.stderr)
@@ -235,18 +292,22 @@ def main(argv=None) -> int:
         return 2
 
     rng = random.Random(args.seed)
-    totals = {"fast": 0, "rebuild": 0, "stale": 0}
+    totals = {"fast": 0, "rebuild": 0, "stale": 0, "archived": 0}
     failures = 0
     started = time.monotonic()
     try:
         for case in range(args.cases):
-            n_ops = 2500 if rng.random() < 0.04 else rng.choice([5, 20, 60, 150, 300, 500])
+            if args.compact:
+                n_ops = rng.randint(3200, 4800)
+            else:
+                n_ops = 2500 if rng.random() < 0.04 else rng.choice([5, 20, 60, 150, 300, 500])
             sync_limit = 0 if case % 2 else 3000
             profile = "production" if case % 4 < 2 else "chaos"
             ops = generate(rng, n_ops, profile)
-            plan = batches(rng, ops)
+            plan = compact_batches(rng, ops) if args.compact else batches(rng, ops)
             t0 = time.monotonic()
-            rc, out, err = psql_script(container, case_sql(plan, sync_limit))
+            rc, out, err = psql_script(container,
+                                       case_sql(plan, sync_limit, args.compact, rng))
             paths = {}
             for line in out.split():
                 if "=" in line:
@@ -272,7 +333,8 @@ def main(argv=None) -> int:
     elapsed = round(time.monotonic() - started, 1)
     print(f"incremental_parity: cases={case + 1} failures={failures} "
           f"batches fast={totals.get('fast', 0)} rebuild={totals.get('rebuild', 0)} "
-          f"stale->background={totals.get('stale', 0)} seconds={elapsed}")
+          f"stale->background={totals.get('stale', 0)} "
+          f"archived={totals.get('archived', 0)} seconds={elapsed}")
     print(f"incremental_parity: evidence {os.path.relpath(log_path, ROOT)}")
     if failures:
         print("incremental_parity: FAILED")

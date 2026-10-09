@@ -130,6 +130,13 @@
       "command": ["python", "dev/incremental_parity.py", "--local", "--cases", "300"]
     },
     {
+      "id": "incremental-parity-compact",
+      "title": "Fold == full replay on top of archived operations; retries of archived ops idempotent (local stack)",
+      "role": "backend",
+      "stages": ["pr", "nightly", "release"],
+      "command": ["python", "dev/incremental_parity.py", "--local", "--compact", "--cases", "10"]
+    },
+    {
       "id": "account-contracts",
       "title": "Real account/service contract journey (local stack)",
       "role": "backend",
