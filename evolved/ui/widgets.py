@@ -411,7 +411,7 @@ class ItemSlot(QFrame):
     def set_item(self, display: str, qty: int = 0, *,
                  selected: bool = False, locked: bool = False,
                  paused: bool = False, level_req: int = 0,
-                 produced: bool = False) -> None:
+                 produced: bool = False, training: bool = True) -> None:
         self._display = str(display)
         art = theme.scaled(theme.ITEM_ART, self._scale)
         pix = icon_pixmap(display_icon(self._display), art)
@@ -428,7 +428,10 @@ class ItemSlot(QFrame):
             self._badge.setText("Paused")
             state = "paused"
         elif selected:
-            self._badge.setText("Training" if not produced else "Output")
+            # A selected slot can be a preview on a skill you are not
+            # training; only claim "Training" when the caller says it is.
+            self._badge.setText("Output" if produced
+                                else ("Training" if training else ""))
             state = "selected"
         else:
             self._badge.setText("Output" if produced else "")

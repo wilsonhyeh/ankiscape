@@ -478,5 +478,73 @@ class SkillsGridReuseTest(unittest.TestCase):
                          "a skill must not end up with duplicate visible slots")
 
 
+    # -- the Train button reflects the active skill, not a remembered pick --
+    def _train_button(self):
+        buttons = [w for w in self.screen.findChildren(_FakeWidget)
+                   if w.objectName() == "ankiscape-train-button"]
+        self.assertEqual(len(buttons), 1)
+        return buttons[0]
+
+    def test_remembered_pick_on_another_skill_is_still_trainable(self):
+        # AnkiWeb report: training Woodcutting, Cooking remembers Shrimp from
+        # earlier. Opening Cooking -> Shrimp said "Currently training" and the
+        # button was disabled, so Cooking could never be started again.
+        self.shell.values["get_active_skill"] = "woodcutting"
+        self.shell.values["get_selections"] = {"woodcutting": "Tree",
+                                               "cooking": "Shrimp"}
+        self.shell.values["get_projection"] = {
+            "levels": {}, "inventory": {"Shrimp": 1000}, "xp_micro": {}}
+        tiles = {w.objectName(): w for w in self.screen.findChildren(_FakeWidget)
+                 if w.objectName().startswith("ankiscape-skill-tile-")}
+        tiles["ankiscape-skill-tile-cooking"].click()
+        train = self._train_button()
+        self.assertNotEqual(train.text(), "Currently training")
+        self.assertTrue(train.isEnabled(),
+                        "a resource on a skill you are not training must be "
+                        "trainable even if it was that skill's last pick")
+        shrimp = [s for s in self._live_slots()
+                  if s.isVisible() and s._display == "Shrimp"]
+        self.assertEqual(len(shrimp), 1)
+        self.assertNotEqual(shrimp[0]._badge.text(), "Training",
+                            "a previewed tile must not claim it is training")
+
+    def test_the_active_skill_and_resource_still_read_currently_training(self):
+        self.shell.values["get_active_skill"] = "cooking"
+        self.shell.values["get_selections"] = {"cooking": "Shrimp"}
+        self.shell.values["get_projection"] = {
+            "levels": {}, "inventory": {"Shrimp": 1000}, "xp_micro": {}}
+        tiles = {w.objectName(): w for w in self.screen.findChildren(_FakeWidget)
+                 if w.objectName().startswith("ankiscape-skill-tile-")}
+        tiles["ankiscape-skill-tile-cooking"].click()
+        train = self._train_button()
+        self.assertEqual(train.text(), "Currently training")
+        self.assertFalse(train.isEnabled())
+        shrimp = [s for s in self._live_slots()
+                  if s.isVisible() and s._display == "Shrimp"]
+        self.assertEqual(shrimp[0]._badge.text(), "Training")
+
+
+    def _tiles(self):
+        return {w.objectName(): w for w in self.screen.findChildren(_FakeWidget)
+                if w.objectName().startswith("ankiscape-skill-tile-")}
+
+    def test_only_the_active_skill_tile_is_marked_training(self):
+        # The Skills grid must show which skill reviews are paying into,
+        # whichever skill the player is browsing.
+        self.shell.values["get_active_skill"] = "woodcutting"
+        tiles = self._tiles()
+        tiles["ankiscape-skill-tile-cooking"].click()
+        marked = sorted(name for name, tile in tiles.items()
+                        if "(training)" in tile.text())
+        self.assertEqual(marked, ["ankiscape-skill-tile-woodcutting"])
+
+    def test_cooking_reward_names_the_cooked_output(self):
+        self.shell.values["get_selections"] = {"cooking": "Shrimp"}
+        self._tiles()["ankiscape-skill-tile-cooking"].click()
+        reward = [w for w in self.screen.findChildren(_FakeWidget)
+                  if w.objectName() == "ankiscape-resource-reward"][0]
+        self.assertIn("one Cooked Shrimp", reward.text())
+
+
 if __name__ == "__main__":
     unittest.main()

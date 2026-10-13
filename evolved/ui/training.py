@@ -214,7 +214,7 @@ def build_training_screen(shell, deps: Dict[str, Any]):
                     f"{home['resource']}; a failed attempt earns 25% XP.")
         else:
             earn = (f"A successful {home['skill_label'].lower()} review earns about "
-                    f"{home['expected_success_xp']} XP and one {home['resource']}.")
+                    f"{home['expected_success_xp']} XP and one {output_display}.")
             earn += f" A {home['expected_fail_label'].lower()} earns no output."
         reward_line.setText(earn)
 
