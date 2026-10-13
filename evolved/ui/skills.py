@@ -124,11 +124,12 @@ def build_skills_screen(shell, deps: Dict[str, Any]):
         inventory = projection.get("inventory", {}) or {}
         selections = shell.call("get_selections", default={}) or {}
         skill = state["skill"]
+        active_skill = str(shell.call("get_active_skill", default="") or "")
         for name, tile in tiles.items():
             tile.set_state(int(levels.get(name, 1)),
                            int((projection.get("xp_micro", {}) or {}).get(name, 0)),
                            rules.get("thresholds", []),
-                           trained=(name == skill and False))
+                           trained=(name == active_skill))
             tile.setChecked(name == skill)
         entries = resource_entries(rules, skill, levels, inventory,
                                    state["resource"] or selections.get(skill, ""))
@@ -150,6 +151,8 @@ def build_skills_screen(shell, deps: Dict[str, Any]):
                 slot.clicked = _select_resource
                 slots_by_display[display] = slot
             slot.set_item(display, 0, selected=entry["selected"],
+                          training=(skill == active_skill
+                                    and display == selections.get(skill, "")),
                           locked=entry["locked"],
                           paused=(not entry["materials_ready"]),
                           level_req=entry["level"])
@@ -175,9 +178,15 @@ def build_skills_screen(shell, deps: Dict[str, Any]):
             detail_missing.setVisible(False)
             train.setEnabled(False)
             return
+        # Selections are remembered per skill, so a match alone only means
+        # "this skill's last pick". It is being trained only when the skill
+        # is also the active one; otherwise the player could never switch
+        # back to a skill whose remembered resource is the one they want.
         current_selection = (shell.call("get_selections", default={}) or {}).get(
             state["skill"], "")
-        taken = entry["display"] == current_selection
+        active_skill = str(shell.call("get_active_skill", default="") or "")
+        taken = (state["skill"] == active_skill
+                 and entry["display"] == current_selection)
         detail_name.setText(entry["display"])
         detail_level.setText(
             f"Requires level {entry['level']} {SKILL_LABELS.get(state['skill'], '')}"
@@ -191,7 +200,8 @@ def build_skills_screen(shell, deps: Dict[str, Any]):
         else:
             detail_reward.setText(
                 f"Per review: {entry['base_xp']} base XP and one "
-                f"{entry['display']}.")
+                + (f"Cooked {entry['display']}" if state["skill"] == "cooking"
+                   else str(entry["display"])) + ".")
         if entry["needs"]:
             parts = []
             for name, qty in entry["needs"].items():
