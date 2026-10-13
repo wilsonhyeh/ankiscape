@@ -2483,6 +2483,18 @@ def _set_combo(shell, object_name, text):
         return False
 
 
+def _click_skill_tile(skill):
+    from aqt.qt import QApplication
+    QApplication.processEvents()
+    shell = _find_shell()
+    tile = _find_child(shell, f"ankiscape-skill-tile-{skill}") if shell else None
+    if tile is None:
+        return False
+    tile.click()
+    QApplication.processEvents()
+    return True
+
+
 def _config(key, default=None):
     try:
         from aqt import mw
@@ -2582,6 +2594,74 @@ def _poll_ui_training(state):
         _shot("ui-training-training")
         _step("ui_training_commit", True)
         _shot("ui-training-home")
+        state["stage"] = "switch_away"
+        return
+    # AnkiWeb report (3.0.3): after training another skill, the Skills screen
+    # said "Currently training" on a skill's remembered resource and disabled
+    # Train, so the player could never switch back. Train Woodcutting, then
+    # return to Mining, whose remembered pick is still Clay.
+    if stage == "switch_away":
+        if not _click_rail("skills") or not _click_skill_tile("woodcutting"):
+            return
+        if not _click_slot("Tree"):
+            return
+        train = _find_child(_find_shell(), "ankiscape-train-button")
+        if train is None or not train.isEnabled():
+            state["away_ticks"] = state.get("away_ticks", 0) + 1
+            if state["away_ticks"] > 60:
+                _step("ui_training_switch_away", False,
+                      "Woodcutting Train button missing or disabled")
+            return
+        train.click()
+        state["stage"] = "verify_away"
+        return
+    if stage == "verify_away":
+        if _config("ankiscape_evolved_current_skill", "") != "woodcutting":
+            state["away_ticks"] = state.get("away_ticks", 0) + 1
+            if state["away_ticks"] > 60:
+                _step("ui_training_switch_away", False, "skill not persisted")
+            return
+        _step("ui_training_switch_away", True)
+        if not _click_rail("skills") or not _click_skill_tile("mining"):
+            return
+        from aqt.qt import QApplication
+        QApplication.processEvents()
+        shell = _find_shell()
+        train = _find_child(shell, "ankiscape-train-button")
+        detail = _find_child(shell, "ankiscape-resource-name")
+        mining = _find_child(shell, "ankiscape-skill-tile-mining")
+        woodcutting = _find_child(shell, "ankiscape-skill-tile-woodcutting")
+        _shot("ui-training-switch-back")
+        shown = detail.text() if detail is not None else ""
+        label = train.text() if train is not None else ""
+        _step("ui_training_switch_back_enabled",
+              shown == "Clay" and train is not None and train.isEnabled()
+              and label != "Currently training",
+              f"resource={shown!r} button={label!r}")
+        _step("ui_training_tile_marks_active",
+              mining is not None and woodcutting is not None
+              and "(training)" in woodcutting.text()
+              and "(training)" not in mining.text(),
+              f"mining={mining.text() if mining else None!r} "
+              f"woodcutting={woodcutting.text() if woodcutting else None!r}")
+        if train is None or not train.isEnabled():
+            state["stage"] = "screens"
+            return
+        train.click()
+        state["stage"] = "verify_back"
+        return
+    if stage == "verify_back":
+        if _config("ankiscape_evolved_current_skill", "") != "mining":
+            state["back_ticks"] = state.get("back_ticks", 0) + 1
+            if state["back_ticks"] > 60:
+                _step("ui_training_switch_back", False, "skill not persisted")
+                state["stage"] = "screens"
+            return
+        _step("ui_training_switch_back",
+              _config("ankiscape_evolved_current_mining", "") == "Clay")
+        state["stage"] = "screens"
+        return
+    if stage == "screens":
         # Bank + achievements screens render with real data paths.
         _click_rail("bank")
         _shot("ui-training-bank")
