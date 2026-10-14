@@ -9,8 +9,13 @@ over 3.0.2 keeps your progress.
   badge only appears on the resource actually being trained
 - Cooking now says it earns Cooked fish, which is what it always gave
 
-Verified artifact: `ankiscape-3.0.3.ankiaddon`, SHA-256 `PENDING`, from release
-verification run `PENDING`. See `READINESS.md`.
+Verified artifact: `ankiscape-3.0.3.ankiaddon`, SHA-256
+`f6c287c9c3aba15f64b2342e5199083b3e18684fe1a6c61be5125892d9a0a84f`, from release
+verification
+[run 38444772317](https://github.com/wilsonhyeh/ankiscape/actions/runs/38444772317)
+(seven desktop targets on macOS, Windows and Linux; the fix passed on all
+seven). One macOS target missed a performance budget on a single sample in a
+code path this release does not change; see READINESS.md.
 
 Install: download `ankiscape-3.0.3.ankiaddon` and use
 Tools → Add-ons → Install from file. The AnkiWeb listing (1808450369) gets the
