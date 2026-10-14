@@ -12,3 +12,8 @@ and 3.0.0) still applies unchanged. 3.0.3 adds only the following.
   screen, the Training screen and how scoring picks the skill and resource.
   Bank, Feats, Hiscores and sync were not re-reviewed for 3.0.3, and GitHub
   issues were not read (the CLI was signed out).
+- **One target shipped without its endurance run.** On `macos-26.8.1-qt6` a
+  single 474 ms event-loop sample failed the performance budget, so that
+  lane skipped its two-hour endurance run. Wilson accepted this rather than
+  re-running release verification (READINESS.md, "The accepted exception").
+  The other six targets ran endurance and passed.
