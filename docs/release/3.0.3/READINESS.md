@@ -1,11 +1,12 @@
 # Release readiness — AnkiScape 3.0.3
 
-Status: **READY TO PUBLISH, with one owner-accepted exception.** Every row
+Status: **PUBLISHED (2026-10-14 UTC): GitHub release `v3.0.3` and AnkiWeb
+listing `1808450369`, with one owner-accepted exception.** Every row
 below is green on one immutable candidate except a single macOS performance
 sample; Wilson accepted it on 2026-10-13 instead of a full re-run:
 *"looks like it's unlikely this test run result will affect the end user …
 I'd like to not waste several hours doing the entire test again if
-possible."* Publication (GitHub release, AnkiWeb upload) is Wilson's.
+possible."* Wilson published the GitHub release and uploaded to AnkiWeb.
 
 Scope: 3.0.3 is 3.0.2 plus the Skills-screen fix for the AnkiWeb "cannot
 switch to Cooking" report (`docs/release/3.0.3/CHANGELOG.md`). The only
@@ -40,7 +41,8 @@ Evidence run: **release-verify
 | Local `ui-training` | pass | 3.0.2 UI code fails it (`button='Currently training'`); fix passes on Anki 26.8.1 and 23.10.1 |
 | Reporter's confirmation | not possible | AnkiWeb review; no reply channel |
 | Human rows from 3.0.0 | carried | unchanged by 3.0.3; see `docs/release/3.0.0/READINESS.md` |
-| AnkiWeb upload | owner-manual | Wilson; no API |
+| GitHub release `v3.0.3` | done | published by Wilson 2026-10-14 00:15 UTC with the verified artifact and `SHA256SUMS.txt`; marked Latest; the published asset re-downloaded as `f6c287c9…` |
+| AnkiWeb upload | done | uploaded by Wilson 2026-10-14; the public listing shows "0.39MB. Updated 2026-10-14" (the artifact is 403,860 bytes) |
 
 ## The accepted exception
 
