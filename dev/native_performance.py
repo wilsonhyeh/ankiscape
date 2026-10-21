@@ -227,6 +227,101 @@ def _collect_perf(runs, mode):
     return values
 
 
+STALL_NOTE_MS = 150.0
+STALL_NOTES_PER_RUN = 12
+
+
+def _overlapping(events, start, end, kind):
+    """Events (at, ms) whose interval overlaps [start, end], as short text."""
+    found = []
+    for event in events or []:
+        try:
+            e_start = float(event["at"])
+            e_end = e_start + float(event.get("ms") or 0.0) / 1000.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if e_start <= end and e_end >= start:
+            extra = (f" gen{event['generation']}"
+                     if event.get("generation") is not None else "")
+            found.append(f"{kind}{extra} {float(event.get('ms') or 0):.0f} ms "
+                         f"@{e_start:.2f}s [{event.get('thread', '?')}]")
+    return found
+
+
+_IDLE_FRAME_FILES = ("threading.py", "queue.py", "selectors.py",
+                     "socket.py", "stall_capture.py")
+
+
+def _busy_threads(threads, limit=3):
+    """Innermost frame of each non-main thread that is not just waiting."""
+    busy = []
+    for name, lines in sorted((threads or {}).items()):
+        if name == "MainThread" or not lines:
+            continue
+        frame = str(lines[-1])
+        if frame.split(":", 1)[0] in _IDLE_FRAME_FILES:
+            continue
+        busy.append(f"{name}: {frame}")
+    return busy[:limit]
+
+
+def _stall_notes(runs):
+    """One line per lag sample over STALL_NOTE_MS: when, how long, what the
+    main thread was doing (from the driver's stall capture), whether the
+    watchdog itself was starved (GIL held), and which gc runs or checkpoint
+    calls overlapped it. Diagnosis only; never a verdict."""
+    notes = []
+    for run in runs:
+        raw = run.get("raw") or {}
+        capture = raw.get("stall_capture") or {}
+        if not isinstance(capture, dict):
+            capture = {}
+        where = (f"rep{run.get('repetition', '?')}-"
+                 f"{raw.get('run_mode') or ('addon' if run.get('install_addon') else 'control')}")
+        samples = (list(zip(raw.get("lag_ms") or [], raw.get("lag_at") or [],
+                            raw.get("lag_phase") or []))
+                   + list(zip(raw.get("rebuild_lag_ms") or [],
+                              raw.get("rebuild_lag_at") or [],
+                              raw.get("rebuild_lag_phase") or [])))
+        stalls = [s for s in samples if float(s[0]) >= STALL_NOTE_MS]
+        # Largest first, so a cap never drops the stall that matters.
+        stalls = sorted(stalls, key=lambda s: -float(s[0]))
+        if len(stalls) > STALL_NOTES_PER_RUN:
+            notes.append(f"{where}: {len(stalls) - STALL_NOTES_PER_RUN} smaller "
+                         f"stalls over {STALL_NOTE_MS:.0f} ms not listed")
+            stalls = stalls[:STALL_NOTES_PER_RUN]
+        for sample, at, phase in sorted(stalls, key=lambda s: s[1]):
+            end = float(at)
+            start = end - float(sample) / 1000.0
+            parts = [f"{where} {float(sample):.0f} ms ending @{end:.2f}s ({phase})"]
+            for cap in capture.get("captures") or []:
+                if start - 0.05 <= float(cap.get("at", -1)) <= end + 0.05:
+                    main = (cap.get("threads") or {}).get("MainThread") or []
+                    parts.append("main: " + (main[-1] if main else "?"))
+                    gap = cap.get("watchdog_gap_ms")
+                    if gap is not None and gap >= STALL_NOTE_MS / 2:
+                        parts.append(f"watchdog starved {gap:.0f} ms (GIL held)")
+                    break
+            else:
+                gaps = [g for g in capture.get("watchdog_gaps") or []
+                        if start - 0.05 <= float(g.get("at", -1)) <= end + 0.2]
+                if gaps:
+                    parts.append(f"watchdog starved {gaps[0]['gap_ms']:.0f} ms "
+                                 f"(GIL held)")
+                    busy = _busy_threads(gaps[0].get("threads"))
+                    if busy:
+                        parts.append("just after: " + "; ".join(busy))
+                else:
+                    parts.append("no capture")
+            overlaps = _overlapping(capture.get("gc_events"), start, end, "gc")
+            for kind, events in sorted((capture.get("calls") or {}).items()):
+                overlaps += _overlapping(events, start, end, kind)
+            parts.append("overlaps: " + ("; ".join(overlaps) if overlaps
+                                         else "none recorded"))
+            notes.append(" | ".join(parts))
+    return notes
+
+
 def _rep_maxima(runs, mode):
     """Each successful rep's worst ordinary event-loop lag sample."""
     maxima = []
@@ -617,6 +712,9 @@ def main(argv=None) -> int:
     warnings = list(warnings) + [
         f"teardown_retried:{r['journey']}:rep{r.get('repetition', '?')}"
         for r in runs if r.get("teardown_retries")]
+    stall_notes = _stall_notes(runs)
+    for note in stall_notes:
+        print(f"native_performance: stall: {note}", file=sys.stderr)
 
     payload = {
         "schema": "ankiscape-native-performance", "version": 1,
@@ -633,6 +731,7 @@ def main(argv=None) -> int:
                   "teardown_retries": r.get("teardown_retries", 0)}
                  for r in runs],
         "failures": failures, "warnings": warnings,
+        "stall_notes": stall_notes,
         "pass": not failures,
     }
     if args.raw:

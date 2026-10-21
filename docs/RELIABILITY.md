@@ -85,6 +85,17 @@ same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
   teardown failure fails the journey (players quit Anki too). The first
   attempt's logs are kept (`-attempt1`), and each relaunch is listed as a
   `teardown_retried:<scenario>:<journey>:x<n>:<record>` evidence warning.
+- Event-loop stall (since 2026-10-21): every perf rep's `perf-native.json`
+  carries `stall_capture` (driver `stall_capture.py`). It holds all thread
+  stacks whenever the 100 ms lag tick ran >150 ms late; `watchdog_gaps`, the
+  times the capture thread itself could not run (the GIL was held, as by a large
+  `json.dumps`), each with a stack snapshot taken right after; gc runs
+  (every gen 2, gen 0/1 at or above 5 ms); and `Journal.save_checkpoint` /
+  `ProjectionWorker._build` timings, all on the `lag_at` clock.
+  `native-performance.log` prints one `native_performance: stall:` line per
+  sample ≥150 ms, naming the main-thread frame or the busy thread and any
+  overlapping gc run or checkpoint call; the same lines are in the metrics
+  file's `stall_notes`. Capture stops before the idle window.
 
 ## Fixtures and secrets
 
