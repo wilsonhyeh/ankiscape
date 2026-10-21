@@ -139,6 +139,63 @@ class LaunchRetryTests(unittest.TestCase):
         self.assertEqual(entry["assertions"], [])
         self.assertEqual(entry["exit_status"], 1)
 
+    # A journey whose steps all passed but whose Anki crashed or hung on quit
+    # (dev.E2E_TEARDOWN_FAILED = 3) is launched once more.
+
+    def test_teardown_failure_is_relaunched_and_the_second_result_counts(self):
+        fake, entry = self._run([
+            {"rc": 3, "steps": [{"name": "a", "ok": True}],
+             "stdout": "segfault on quit\n"},
+            {"rc": 0, "steps": [{"name": "a", "ok": True}]}])
+        self.assertEqual(fake.calls, 2)
+        self.assertEqual(entry["teardown_retries"], 1)
+        self.assertEqual(entry["launch_retries"], 0)
+        self.assertEqual(entry["exit_status"], 0)
+        kept = os.path.join(
+            self.out_dir, f"native-journeys-{JOURNEY}-attempt1-anki-stdout-tail.log")
+        with open(kept, encoding="utf-8") as fh:
+            self.assertIn("segfault on quit", fh.read())
+
+    def test_second_teardown_failure_is_reported(self):
+        fake, entry = self._run([
+            {"rc": 3, "steps": [{"name": "a", "ok": True}]},
+            {"rc": 3, "steps": [{"name": "a", "ok": True}]},
+            {"rc": 0, "steps": [{"name": "a", "ok": True}]}])
+        self.assertEqual(fake.calls, 2)
+        self.assertEqual(entry["teardown_retries"], 1)
+        self.assertEqual(entry["exit_status"], 3)
+
+    def test_launch_retry_then_teardown_retry_each_run_once(self):
+        fake, entry = self._run([
+            {"rc": 1},
+            {"rc": 3, "steps": [{"name": "a", "ok": True}]},
+            {"rc": 0, "steps": [{"name": "a", "ok": True}]}])
+        self.assertEqual(fake.calls, 3)
+        self.assertEqual((entry["launch_retries"], entry["teardown_retries"]),
+                         (1, 1))
+        self.assertEqual(entry["exit_status"], 0)
+        names = [f["path"] for f in entry["files"]]
+        self.assertIn(f"native-journeys-{JOURNEY}-attempt1-anki-stdout-tail.log",
+                      names)
+        self.assertIn(f"native-journeys-{JOURNEY}-attempt2-anki-stdout-tail.log",
+                      names)
+
+    def test_scenario_detail_names_the_teardown_relaunch(self):
+        fake = FakeDev(self.dev_dir, [
+            {"rc": 3, "steps": [{"name": "a", "ok": True}]},
+            {"rc": 0, "steps": [{"name": "a", "ok": True}]}])
+        REL._load_dev_module = lambda: fake
+        orig = REL.NEW_JOURNEYS
+        REL.NEW_JOURNEYS = (JOURNEY,)
+        try:
+            result = REL._run_native_journeys(
+                {"anki": "26.08.1", "qt": "6", "anki_bin": "/x/Anki"},
+                self.out_dir)
+        finally:
+            REL.NEW_JOURNEYS = orig
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("teardown relaunched x1", result["detail"])
+
     def test_scenario_detail_names_the_relaunch(self):
         fake = FakeDev(self.dev_dir, [
             {"rc": 1}, {"rc": 0, "steps": [{"name": "a", "ok": True}]}])

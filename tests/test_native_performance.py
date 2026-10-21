@@ -183,7 +183,8 @@ class NativePerformanceEvaluationTests(unittest.TestCase):
         runs = _paired(addon={"lag_ms": [560.0]},
                        control={"lag_ms": [26.0]})
         _metrics, failures = NP._evaluate("smoke", cfg, runs)
-        self.assertIn("budget:event_loop_lag:max:560.0", failures)
+        # One rep: its max is the median rep max (lag-max amendment 2026-10-21).
+        self.assertIn("budget:event_loop_lag:max:median_rep:560.0", failures)
 
     def test_absolute_p95_limit_still_applies_over_fast_control(self):
         cfg = _synthetic_cfg()
@@ -198,6 +199,61 @@ class NativePerformanceEvaluationTests(unittest.TestCase):
                        control={"lag_ms": [900.0]})
         _metrics, failures = NP._evaluate("smoke", cfg, runs)
         self.assertEqual(failures, [])
+
+    # Lag-max amendment (Wilson 2026-10-21): the max verdict reads the median
+    # of each rep's worst sample; a pooled sample over 1000 ms still fails.
+
+    @staticmethod
+    def _reps(addon_maxima, control_maxima, rc=None):
+        """Three paired reps whose lag samples are 1..25 ms plus one max."""
+        runs = []
+        for index, (a_max, c_max) in enumerate(zip(addon_maxima,
+                                                   control_maxima)):
+            base = [float(i) for i in range(1, 26)]
+            control = _run(False, _control_raw(lag_ms=base + [c_max]))
+            # Only the first shell open of the run is cold.
+            shells = {} if index == 0 else {"shell_ms": [40.0, 45.0, 50.0]}
+            addon = _run(True, _addon_raw(lag_ms=base + [a_max], **shells))
+            if rc and index in rc:
+                addon["rc"] = rc[index]
+            runs.extend([control, addon])
+        return runs
+
+    def test_one_slow_rep_no_longer_fails_the_max(self):
+        # Nightly 38399323789 linux-23.10-qt6: failed today on the pooled rule.
+        runs = self._reps([146.8, 437.5, 187.8], [184.5, 131.8, 273.7])
+        metrics, failures = NP._evaluate("smoke", _synthetic_cfg(), runs)
+        self.assertEqual(failures, [])
+        lag = metrics["event_loop_lag"]
+        self.assertEqual(lag["max_ms"], 437.5)
+        self.assertEqual(lag["rep_max_ms"], [146.8, 437.5, 187.8])
+        self.assertEqual(lag["rep_max_median_ms"], 187.8)
+        self.assertEqual(lag["control_rep_max_ms"], [184.5, 131.8, 273.7])
+        self.assertEqual(lag["control_rep_max_median_ms"], 184.5)
+
+    def test_typical_rep_over_ceiling_and_control_still_fails(self):
+        runs = self._reps([230.0, 260.0, 250.0], [26.0, 25.0, 27.0])
+        _metrics, failures = NP._evaluate("smoke", _synthetic_cfg(), runs)
+        self.assertIn("budget:event_loop_lag:max:median_rep:250.0", failures)
+
+    def test_typical_rep_within_control_delta_passes(self):
+        # Nightly 38716440823 macos-23.10: median 206.2 vs control 169.4.
+        runs = self._reps([244.4, 206.2, 163.3], [160.9, 169.4, 173.2])
+        _metrics, failures = NP._evaluate("smoke", _synthetic_cfg(), runs)
+        self.assertEqual(failures, [])
+
+    def test_one_second_freeze_in_any_rep_fails_the_backstop(self):
+        runs = self._reps([30.0, 1200.0, 31.0], [25.0, 25.0, 25.0])
+        _metrics, failures = NP._evaluate("smoke", _synthetic_cfg(), runs)
+        self.assertIn("budget:event_loop_lag:max:backstop:1200.0", failures)
+        self.assertFalse(any(":median_rep:" in f for f in failures), failures)
+
+    def test_a_failed_rep_is_left_out_of_the_rep_maxima(self):
+        runs = self._reps([150.0, 900.0, 160.0], [140.0, 141.0, 142.0],
+                          rc={1: 1})
+        metrics, _failures = NP._evaluate("smoke", _synthetic_cfg(), runs)
+        self.assertEqual(metrics["event_loop_lag"]["rep_max_ms"], [150.0, 160.0])
+        self.assertEqual(metrics["event_loop_lag"]["rep_max_median_ms"], 155.0)
 
     def test_rebuild_window_max_within_budget_passes(self):
         cfg = _synthetic_cfg()

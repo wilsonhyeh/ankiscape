@@ -78,6 +78,13 @@ same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
   the empty report rather than accepting a green-looking run.
 - Flaky-looking native failure: reruns are allowed for diagnosis only, and
   both attempts are retained (`actions/upload-artifact` keeps first failure).
+- Teardown relaunch (since 2026-10-21): when every step of a journey passed
+  but Anki then crashed or hung on quit, `dev._e2e_suite` returns
+  `E2E_TEARDOWN_FAILED` (3) and the journey, matrix and performance runners
+  launch it once more. A failed step is never relaunched, and a second
+  teardown failure fails the journey (players quit Anki too). The first
+  attempt's logs are kept (`-attempt1`), and each relaunch is listed as a
+  `teardown_retried:<scenario>:<journey>:x<n>:<record>` evidence warning.
 
 ## Fixtures and secrets
 
@@ -167,3 +174,25 @@ and `dev/reliability.py`:
   present with zero recorded rebuilds fail `rebuild_window_lag:unreconciled`
   / `rebuild_reward_samples:unreconciled` (the empty-bucket guard applies
   to payloads of either shape).
+
+### 2026-10-21 lag-max amendment (approved by Wilson)
+
+The event-loop-lag max is judged on the typical rep, not the single worst
+sample. `event_loop_lag.max_verdict` is `median_rep_max`: the gate takes each
+rep's worst ordinary sample (`rep_max_ms`, `control_rep_max_ms`) and compares
+their medians (`rep_max_median_ms`, `control_rep_max_median_ms`) against the
+unchanged 200 ms ceiling and 50 ms paired-control delta, failing with
+`budget:event_loop_lag:max:median_rep:<ms>`. Any pooled sample above
+`max_backstop_ms` (1000 ms) still fails with
+`budget:event_loop_lag:max:backstop:<ms>`, so a one-second freeze in a single
+rep is never averaged away. A payload without per-rep maxima falls back to
+the pooled rule. The pooled `max_ms` / `control_max_ms` stay in the payload.
+
+Rationale: on nightlies 2026-10-12..10-21 (unchanged code), 5 lane failures
+were a single runner tick in one rep while the other reps sat in budget, e.g.
+linux-23.10-qt6 addon reps 146.8 / 437.5 / 187.8 ms against control
+184.5 / 131.8 / 273.7 ms. Replayed on those 5 lanes plus all 7 lanes of a
+green nightly, the median rule passes all 12. The tradeoff: a stall that
+shows up in only 1 of 3 reps and stays under the backstop no longer fails the
+gate on its own. The amendment is recorded in the budget file's
+`lag_max_amendment` object.

@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import sys
 import time
 
@@ -161,6 +162,25 @@ def _run_journey(journey: str, *, install_addon: bool, config: dict,
                         install_addon=install_addon, extra_config=config,
                         phase_timeout_s=phase_timeout)
     base = os.path.join(dev.DEV_DIR, "e2e", journey)
+    teardown_retries = 0
+    if rc == getattr(dev, "E2E_TEARDOWN_FAILED", 3):
+        # The rep measured cleanly, then Anki crashed or hung on quit
+        # (run 38716440823 linux-qt5 lost a rep to SIGSEGV this way). Keep the
+        # first attempt's evidence and measure the rep once more; a second
+        # teardown failure fails the rep as before.
+        print(f"native_performance: {journey}: every step passed but Anki "
+              f"crashed or hung on quit; re-running the rep once",
+              file=sys.stderr)
+        if evidence_dir:
+            try:
+                _archive_run_evidence(base, evidence_dir + "-attempt1")
+            except OSError:
+                pass
+        teardown_retries = 1
+        _rel()._settle_before_launch_retry()
+        rc = dev._e2e_suite(anki, str(qt), journey, anki_bin, "",
+                            install_addon=install_addon, extra_config=config,
+                            phase_timeout_s=phase_timeout)
     # Metrics truth: an absent, unreadable or empty payload used to collapse
     # into `raw = {}`, which then surfaced as a generic `native_performance =>
     # None` with no way to tell a crashed journey from a real measurement. The
@@ -195,7 +215,7 @@ def _run_journey(journey: str, *, install_addon: bool, config: dict,
     return {"journey": journey, "install_addon": install_addon,
             "rc": int(rc), "raw": raw, "runtime": runtime,
             "metrics_state": metrics_state, "metrics_path": metrics_path,
-            "evidence": evidence}
+            "evidence": evidence, "teardown_retries": teardown_retries}
 
 
 def _collect_perf(runs, mode):
@@ -205,6 +225,18 @@ def _collect_perf(runs, mode):
             continue
         values.extend(float(v) for v in run["raw"].get("lag_ms") or [])
     return values
+
+
+def _rep_maxima(runs, mode):
+    """Each successful rep's worst ordinary event-loop lag sample."""
+    maxima = []
+    for run in runs:
+        if run["raw"].get("run_mode") != mode or run["rc"] != 0:
+            continue
+        lag = run["raw"].get("lag_ms") or []
+        if lag:
+            maxima.append(round(max(float(v) for v in lag), 3))
+    return maxima
 
 
 def _collect_field(runs, field, mode=None):
@@ -359,6 +391,16 @@ def _evaluate(profile: str, cfg: dict, runs: list, endurance_report=None):
         rel.nearest_rank_percentile(control_lag, 95) if control_lag else None
     metrics["event_loop_lag"]["control_max_ms"] = \
         max(control_lag) if control_lag else None
+    # Lag-max amendment 2026-10-21: the max verdict reads the median of each
+    # rep's worst sample; the pooled max above stays for the backstop.
+    rep_max = _rep_maxima(addon_runs, "addon")
+    control_rep_max = _rep_maxima(control_runs, "control")
+    metrics["event_loop_lag"]["rep_max_ms"] = rep_max
+    metrics["event_loop_lag"]["rep_max_median_ms"] = \
+        round(statistics.median(rep_max), 3) if rep_max else None
+    metrics["event_loop_lag"]["control_rep_max_ms"] = control_rep_max
+    metrics["event_loop_lag"]["control_rep_max_median_ms"] = \
+        round(statistics.median(control_rep_max), 3) if control_rep_max else None
     metrics["event_loop_lag"]["rebuild_window"] = _summary(rebuild_lag)
     metrics["warm_shell_open"] = _summary(warm_shells)
     metrics["cold_shell_appearance"] = {"ms": min(colds) if colds else None,
@@ -571,6 +613,10 @@ def main(argv=None) -> int:
     failures, warnings = rel.scope_macos_reward_p95(
         failures, warnings, platform=sys.platform, profile=args.profile,
         limit_ms=reward_limit)
+    # A rep re-run after a teardown crash/hang is recorded, never silent.
+    warnings = list(warnings) + [
+        f"teardown_retried:{r['journey']}:rep{r.get('repetition', '?')}"
+        for r in runs if r.get("teardown_retries")]
 
     payload = {
         "schema": "ankiscape-native-performance", "version": 1,
@@ -583,7 +629,9 @@ def main(argv=None) -> int:
                   "runtime": r["runtime"],
                   "raw_len": len(json.dumps(r["raw"])),
                   "metrics_state": r.get("metrics_state"),
-                  "evidence": len(r.get("evidence") or [])} for r in runs],
+                  "evidence": len(r.get("evidence") or []),
+                  "teardown_retries": r.get("teardown_retries", 0)}
+                 for r in runs],
         "failures": failures, "warnings": warnings,
         "pass": not failures,
     }
