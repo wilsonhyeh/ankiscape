@@ -18,6 +18,12 @@
     "decision": "An ordinary reward_completion p95 miss on a macOS runner is a documented warning, not a release gate: evaluated via scope_macos_reward_p95() for nightly and release profiles only, and only while p95 stays within 2x the limit (a gross regression keeps failing). The 250 ms limit is unchanged on every lane; Linux and Windows keep failing on a miss; the numbers stay in the payload and the scoping itself is recorded as a warning.",
     "evidence": "release-verify 36330863967: macos-23.10 reward p95 245.6 / 254.8 / 253.7 across reps (aggregate 252.93), the same ~251-255 seen since nightly 36087409416, while all Linux/Windows lanes passed. Rewards have no paired control; the macOS runner alone costs ~148 ms event-loop lag p95 with no addon, against ~1-3 ms on Linux."
   },
+  "lag_max_amendment": {
+    "date": "2026-10-21",
+    "approved_by": "Wilson",
+    "decision": "event_loop_lag max is judged on the median of each rep's worst ordinary sample instead of the single worst sample pooled across reps (max_verdict: median_rep_max), for both the 200 ms ceiling and the 50 ms paired-control delta; both thresholds are unchanged. A pooled single sample above max_backstop_ms (1000 ms) still fails on any lane, so a one-second freeze in any rep is never averaged away. The pooled max_ms, control_max_ms and every rep's max stay in the payload.",
+    "evidence": "Nightlies 2026-10-12..10-21 on unchanged code (aad24ed): 5 lane failures were budget:event_loop_lag:max with typical reps in budget (e.g. 38399323789 linux-23.10-qt6 addon reps 146.8/437.5/187.8 vs control 184.5/131.8/273.7; 39405375634 macos-23.10 233.6/170.0/198.9 vs 165.7/150.1/151.0). Replayed on those 5 plus all 7 lanes of green nightly 39020828590, the median rule passes all 12 (highest median 206.2 ms, macos-23.10, within 50 ms of its control); the largest pooled ordinary sample seen was 437.5 ms."
+  },
   "note": "Fixed acceptance targets from the AnkiScape reliability plan. These are not measured promises; changing one requires a documented plan amendment. Disk-full/locked-db failures are tested for safe degradation, not expected to meet normal successful-write latency.",
   "budgets": {
     "accepted_answer_hook": {
@@ -36,6 +42,8 @@
       "p95_control_delta_ms": 50.0,
       "max_limit_ms": 200.0,
       "max_control_delta_ms": 50.0,
+      "max_verdict": "median_rep_max",
+      "max_backstop_ms": 1000.0,
       "min_samples": 300,
       "kind": "native",
       "rebuild_window": {

@@ -937,6 +937,64 @@ class BudgetEvaluationTests(unittest.TestCase):
         failures = REL.evaluate_budgets(metrics, self.MAX_DELTA_BUDGETS)
         self.assertIn("budget:event_loop_lag:max:459.0", failures)
 
+    # ------------------------------------------- median-of-rep-max verdict
+    # Lag-max amendment (Wilson 2026-10-21).
+
+    MEDIAN_BUDGETS = {"budgets": {"event_loop_lag": {
+        "metric": "p95_ms", "limit": 50.0,
+        "p95_control_delta_ms": 50.0, "max_limit_ms": 200.0,
+        "max_control_delta_ms": 50.0, "max_verdict": "median_rep_max",
+        "max_backstop_ms": 1000.0}}}
+
+    @staticmethod
+    def _median_lag(**overrides):
+        lag = {"p95_ms": 20.0, "max_ms": 437.5, "control_p95_ms": 10.0,
+               "control_max_ms": 273.7,
+               "rep_max_ms": [146.8, 437.5, 187.8], "rep_max_median_ms": 187.8,
+               "control_rep_max_ms": [184.5, 131.8, 273.7],
+               "control_rep_max_median_ms": 184.5}
+        lag.update(overrides)
+        return {"event_loop_lag": lag}
+
+    def test_median_verdict_ignores_one_slow_rep(self):
+        self.assertEqual(REL.evaluate_budgets(self._median_lag(),
+                                              self.MEDIAN_BUDGETS), [])
+        # The same numbers fail the pooled rule.
+        self.assertIn("budget:event_loop_lag:max:437.5",
+                      REL.evaluate_budgets(self._median_lag(),
+                                           self.MAX_DELTA_BUDGETS))
+
+    def test_median_over_ceiling_beyond_control_delta_fails(self):
+        failures = REL.evaluate_budgets(self._median_lag(
+            rep_max_median_ms=258.3, control_rep_max_median_ms=93.5),
+            self.MEDIAN_BUDGETS)
+        self.assertIn("budget:event_loop_lag:max:median_rep:258.3", failures)
+
+    def test_median_over_ceiling_within_control_delta_passes(self):
+        self.assertEqual(REL.evaluate_budgets(self._median_lag(
+            rep_max_median_ms=206.2, control_rep_max_median_ms=169.4),
+            self.MEDIAN_BUDGETS), [])
+
+    def test_median_without_control_median_fails_closed(self):
+        failures = REL.evaluate_budgets(self._median_lag(
+            rep_max_median_ms=206.2, control_rep_max_median_ms=None),
+            self.MEDIAN_BUDGETS)
+        self.assertIn("budget:event_loop_lag:max:median_rep:206.2", failures)
+
+    def test_payload_without_rep_maxima_falls_back_to_pooled(self):
+        lag = self._median_lag()
+        for key in ("rep_max_ms", "rep_max_median_ms", "control_rep_max_ms",
+                    "control_rep_max_median_ms"):
+            del lag["event_loop_lag"][key]
+        failures = REL.evaluate_budgets(lag, self.MEDIAN_BUDGETS)
+        self.assertIn("budget:event_loop_lag:max:437.5", failures)
+
+    def test_backstop_fails_a_single_one_second_sample(self):
+        failures = REL.evaluate_budgets(self._median_lag(max_ms=1200.0),
+                                        self.MEDIAN_BUDGETS)
+        self.assertEqual(failures,
+                         ["budget:event_loop_lag:max:backstop:1200.0"])
+
     def test_control_p95_missing_fails_absolute(self):
         metrics = {"event_loop_lag": {"p95_ms": 220.0, "max_ms": 220.0}}
         failures = REL.evaluate_budgets(metrics, self.DELTA_BUDGETS)
@@ -1031,6 +1089,10 @@ class BudgetEvaluationTests(unittest.TestCase):
         self.assertEqual(lag["p95_control_delta_ms"], 50.0)
         self.assertEqual(lag["max_control_delta_ms"], 50.0)
         self.assertEqual(lag["rebuild_window"]["max_limit_ms"], 5000.0)
+        self.assertEqual(lag["max_verdict"], "median_rep_max")
+        self.assertEqual(lag["max_backstop_ms"], 1000.0)
+        self.assertEqual(budgets["lag_max_amendment"]["date"], "2026-10-21")
+        self.assertEqual(budgets["lag_max_amendment"]["approved_by"], "Wilson")
         rewards = budgets["budgets"]["reward_completion"]
         self.assertEqual(rewards["limit"], 250.0)
         self.assertEqual(rewards["rebuild_window"]["p95_limit_ms"], 10000.0)

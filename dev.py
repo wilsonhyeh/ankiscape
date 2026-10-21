@@ -830,6 +830,15 @@ def _kill_owned_child(child, base: str) -> None:
     _reap_mpv(base)
 
 
+# Returned by _e2e_suite when the journey itself passed (every step ok, this
+# run's result) but Anki then crashed or hung on quit. Callers treat it as a
+# failure like any non-zero code; the reliability, matrix and performance
+# runners relaunch it once (2026-10-21: 12 of 12 crash/hang journey failures
+# on nightlies 10-12..10-21 had failed=0 -- SIGSEGV on Linux Qt5, 0xC0000005
+# on Windows, -13 or a 30 s exit hang on macOS 26).
+E2E_TEARDOWN_FAILED = 3
+
+
 def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
                anki_bin_override: str = "",
                anki_actual: str = "",
@@ -1010,9 +1019,10 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
         return _fail("e2e ended with no final assertions")
     try:
         child.wait(timeout=30)
+        hung = False
     except subprocess.TimeoutExpired:
         _kill_owned_child(child, base)
-        return _fail("e2e wrote assertions but Anki did not exit")
+        hung = True
     _reap_mpv(base)
     steps = last_result.get("steps", [])
     failed = [s for s in steps if not s.get("ok")]
@@ -1020,17 +1030,40 @@ def _e2e_suite(anki: str, qt: str, journey: str = "fresh",
           f"failed={len(failed)} screenshots={len(last_result.get('screenshots', []))}")
     for step in failed:
         print(f"dev: (e2e) FAILED step: {step}", file=sys.stderr)
-    if child.returncode != 0:
+    if hung:
+        print("dev: ERROR: e2e wrote assertions but Anki did not exit",
+              file=sys.stderr)
+    elif child.returncode != 0:
         print(f"dev: (e2e) Anki exit code {child.returncode}", file=sys.stderr)
         _collect_crash_reports(base)
-    perf_journey = journey in ("native-performance",
-                               "native-performance-control")
-    if (failed or child.returncode != 0
-            or (not perf_journey and not last_result.get("screenshots"))
-            or last_result.get("journey") != journey):
-        return 1
+    verdict = _e2e_exit_verdict(journey, last_result, hung=hung,
+                                returncode=child.returncode)
+    if verdict == E2E_TEARDOWN_FAILED:
+        print(f"dev: (e2e) {journey}: every step passed, then Anki "
+              f"{'hung' if hung else f'exited {child.returncode}'} on quit "
+              f"(teardown failure)", file=sys.stderr)
+    if verdict != 0:
+        return verdict
     print(f"dev: (e2e) {journey} journey PASS on Anki {installed} "
           f"(artifact {artifact_sha[:16]}...)")
+    return 0
+
+
+def _e2e_exit_verdict(journey: str, result: dict, *, hung: bool,
+                      returncode) -> int:
+    """0 when the journey passed and Anki quit cleanly; E2E_TEARDOWN_FAILED
+    when every step passed (this journey's result, with screenshots unless a
+    perf journey) but Anki crashed or hung on quit; otherwise 1."""
+    steps = result.get("steps", [])
+    perf_journey = journey in ("native-performance",
+                               "native-performance-control")
+    journey_ok = (all(s.get("ok") for s in steps)
+                  and (perf_journey or bool(result.get("screenshots")))
+                  and result.get("journey") == journey)
+    if not journey_ok:
+        return 1
+    if hung or returncode != 0:
+        return E2E_TEARDOWN_FAILED
     return 0
 
 

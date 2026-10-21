@@ -318,17 +318,36 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
             if not (control_p95 is not None and delta_limit is not None
                     and p95 - _num(control_p95) <= _num(delta_limit)):
                 _fail("event_loop_lag", f"p95:{lag.get('p95_ms')}")
-        if _num(lag.get("max_ms"), 0.0) > _num(cfg["event_loop_lag"]["max_limit_ms"]):
+        # Lag-max amendment (Wilson 2026-10-21): judge the median of each
+        # rep's worst sample, not the single worst sample of all reps -- one
+        # slow runner tick failed a lane on 5 of 8 red nightlies 10-12..10-21
+        # while every other rep was in budget. A payload without per-rep
+        # maxima falls back to the pooled rule; the backstop below still
+        # fails any single sample over max_backstop_ms.
+        lag_cfg = cfg["event_loop_lag"]
+        if (lag_cfg.get("max_verdict") == "median_rep_max"
+                and lag.get("rep_max_median_ms") is not None):
+            observed_max = lag.get("rep_max_median_ms")
+            control_max = lag.get("control_rep_max_median_ms")
+            label = f"max:median_rep:{observed_max}"
+        else:
+            observed_max = lag.get("max_ms")
+            control_max = lag.get("control_max_ms")
+            label = f"max:{observed_max}"
+        if _num(observed_max, 0.0) > _num(lag_cfg["max_limit_ms"]):
             # Decision A (Wilson 2026-09-21): same paired-control rule as p95.
             # A runner baseline that already eats the ceiling must not fail
             # the product for its own noise; only an addon-attributable delta
             # beyond the bound fails. Missing control fails closed absolute.
-            control_max = lag.get("control_max_ms")
-            delta_limit = cfg["event_loop_lag"].get("max_control_delta_ms")
+            delta_limit = lag_cfg.get("max_control_delta_ms")
             if not (control_max is not None and delta_limit is not None
-                    and _num(lag.get("max_ms")) - _num(control_max)
+                    and _num(observed_max) - _num(control_max)
                     <= _num(delta_limit)):
-                _fail("event_loop_lag", f"max:{lag.get('max_ms')}")
+                _fail("event_loop_lag", label)
+        backstop = lag_cfg.get("max_backstop_ms")
+        if (backstop is not None and lag.get("max_ms") is not None
+                and _num(lag.get("max_ms")) > _num(backstop)):
+            _fail("event_loop_lag", f"max:backstop:{lag.get('max_ms')}")
         rebuild = lag.get("rebuild_window")
         rebuild_limit = (cfg["event_loop_lag"].get("rebuild_window")
                          or {}).get("max_limit_ms")
@@ -853,6 +872,13 @@ def validate_evidence(matrix_path: str, evidence_dir: str, *,
         for item in scenarios:
             if isinstance(item, dict):
                 seen[str(item.get("id"))] = item
+        # A journey relaunched after Anki crashed or hung on quit does not fail
+        # the lane, but every such relaunch is listed so the rate stays visible.
+        for item in seen.values():
+            for journey, count in sorted(_teardown_retries(item).items()):
+                summary.setdefault("warnings", []).append(
+                    f"teardown_retried:{item.get('id')}:{journey}"
+                    f":x{count}:{rel}")
 
         for scenario in _scenarios_for_role(matrix, role, stage):
             sid = str(scenario.get("id"))
@@ -1401,6 +1427,26 @@ def _load_dev_module():
 
 # One more launch when Anki never produced a result (see _e2e_journey_result).
 LAUNCH_RETRY_LIMIT = 1
+# One more launch when the journey passed but Anki crashed or hung on quit.
+TEARDOWN_RETRY_LIMIT = 1
+
+
+def _teardown_retries(scenario: Dict[str, Any]) -> Dict[str, int]:
+    """Journey -> relaunch count for one scenario record: a `teardown_retries`
+    map (native-matrix, native-performance) or per-journey entries
+    (native-journeys, native-smoke, sync-local)."""
+    found: Dict[str, int] = {}
+    direct = scenario.get("teardown_retries")
+    if isinstance(direct, dict):
+        for name, count in direct.items():
+            if _finite_number(count) and int(count) > 0:
+                found[str(name)] = int(count)
+    for journey in scenario.get("journeys") or []:
+        if isinstance(journey, dict) and _finite_number(
+                journey.get("teardown_retries")) \
+                and int(journey["teardown_retries"]) > 0:
+            found[str(journey.get("journey"))] = int(journey["teardown_retries"])
+    return found
 
 
 def _wait_for_anki_exit(timeout_s: int = 120) -> None:
@@ -1499,14 +1545,28 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
     # and launch once more, as the matrix path already does. A run that wrote
     # assertions is never retried, so a failed step cannot be retried away, and
     # the first attempt's evidence is kept under `-attempt1`.
+    # A run whose every step passed but whose Anki then crashed or hung on
+    # quit (dev.E2E_TEARDOWN_FAILED) is also launched once more; a second
+    # teardown failure is reported, since players quit Anki too.
+    teardown_rc = getattr(module, "E2E_TEARDOWN_FAILED", 3)
     retries = 0
+    teardown_retries = 0
     retry_names: List[str] = []
-    while rc != 0 and not assertions and retries < LAUNCH_RETRY_LIMIT:
-        retries += 1
-        print(f"[reliability] journey {journey}: Anki exited {rc} without "
-              f"assertions; relaunching (attempt {retries + 1})")
+    while True:
+        if rc != 0 and not assertions and retries < LAUNCH_RETRY_LIMIT:
+            retries += 1
+            print(f"[reliability] journey {journey}: Anki exited {rc} without "
+                  f"assertions; relaunching "
+                  f"(attempt {retries + teardown_retries + 1})")
+        elif rc == teardown_rc and teardown_retries < TEARDOWN_RETRY_LIMIT:
+            teardown_retries += 1
+            print(f"[reliability] journey {journey}: every step passed but "
+                  f"Anki crashed or hung on quit; relaunching "
+                  f"(attempt {retries + teardown_retries + 1})")
+        else:
+            break
         retry_names.extend(_copy_journey_diagnostics(
-            base, out_dir, f"{prefix}-attempt{retries}"))
+            base, out_dir, f"{prefix}-attempt{retries + teardown_retries}"))
         _settle_before_launch_retry()
         rc, assertions, base = _journey_attempt(module, ctx, journey)
     steps = assertions.get("steps", [])
@@ -1553,7 +1613,8 @@ def _e2e_journey_result(ctx: Dict[str, Any], journey: str, out_dir: str,
              "screenshots": [os.path.join(out_dir, n) for n in shot_names],
              "files": _scenario_files(out_dir, shot_names + extra_names),
              "runtime": runtime,
-             "launch_retries": retries}
+             "launch_retries": retries,
+             "teardown_retries": teardown_retries}
     if relaunch.get("ok") is False:
         entry["relaunch_failed"] = [
             {"name": str(s.get("name")), "detail": str(s.get("detail", ""))[:200]}
@@ -1587,6 +1648,7 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
     observed = os.path.join(ROOT, "artifacts", "ui-ux",
                             f"observed-runtime-{ctx.get('anki')}-qt{ctx.get('qt')}.json")
     files = [log_name]
+    teardown_retries: Dict[str, int] = {}
     if os.path.isfile(report):
         shutil.copyfile(report, os.path.join(out_dir, "native-matrix-report.md"))
         files.append("native-matrix-report.md")
@@ -1598,6 +1660,9 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
             runtime = (payload or {}).get("observed") or {}
             if runtime and not ctx.get("observed_runtime"):
                 ctx["observed_runtime"] = runtime
+            teardown_retries = {
+                str(k): int(v) for k, v in
+                ((payload or {}).get("teardown_retries") or {}).items() if v}
         except (OSError, ValueError):
             pass
     assertions = [{"name": "ui_ux_report", "ok": rc == 0,
@@ -1630,11 +1695,14 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
         if os.path.isfile(log_src) and _copy_log_tail(
                 log_src, os.path.join(out_dir, tail_name)):
             files.append(tail_name)
-    return {"id": "native-matrix", "status": "pass" if rc == 0 else "fail",
-            "command": " ".join(command), "exit_status": rc,
-            "detail": f"exit {rc}",
-            "assertions": assertions, "counts": {},
-            "files": _scenario_files(out_dir, files)}
+    result = {"id": "native-matrix", "status": "pass" if rc == 0 else "fail",
+              "command": " ".join(command), "exit_status": rc,
+              "detail": f"exit {rc}",
+              "assertions": assertions, "counts": {},
+              "files": _scenario_files(out_dir, files)}
+    if teardown_retries:
+        result["teardown_retries"] = teardown_retries
+    return result
 
 
 def _run_native_journeys(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
@@ -1656,6 +1724,8 @@ def _run_native_journeys(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
                 f"{r['journey']}:{r['exit_status']}"
                 + (f" (relaunched x{r['launch_retries']})"
                    if r.get("launch_retries") else "")
+                + (f" (teardown relaunched x{r['teardown_retries']})"
+                   if r.get("teardown_retries") else "")
                 for r in results),
             "assertions": [{"name": r["journey"], "ok": r["exit_status"] == 0
                             and not r["failed"], "detail": ",".join(r["failed"])}
@@ -1718,6 +1788,14 @@ def _run_native_performance(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]
             runtime = payload.get("observed") or {}
             if runtime and not ctx.get("observed_runtime"):
                 ctx["observed_runtime"] = runtime
+            retried: Dict[str, int] = {}
+            for run in payload.get("runs") or []:
+                if isinstance(run, dict) and run.get("teardown_retries"):
+                    name = str(run.get("journey"))
+                    retried[name] = retried.get(name, 0) + int(
+                        run["teardown_retries"])
+            if retried:
+                entry["teardown_retries"] = retried
         except (OSError, ValueError):
             entry["status"] = "fail"
             entry["detail"] = "metrics unreadable"

@@ -218,6 +218,59 @@ def _collect_screenshots(base: str, out_dir: str) -> list:
     return copied
 
 
+def _settle_before_retry() -> None:
+    _wait_for_anki_exit(120)
+    time.sleep(10)
+
+
+def _run_journey_with_retries(dev, args, journey, out_dir):
+    """_run_journey plus its two single retries; returns
+    (rc, result-or-None, expected run id, teardown retries)."""
+    rc, assertions, expected_run = _run_journey(dev, args, journey)
+    if rc != 0 and assertions is None:
+        # Launch races (a lingering process or base handle right after a
+        # previous scenario) must not masquerade as a result. Settle and
+        # retry once; assertion failures are never retried.
+        print(f"ui_ux_verify: {journey}: launch failed early; retrying once")
+        _settle_before_retry()
+        rc, assertions, expected_run = _run_journey(dev, args, journey)
+    teardown_retries = 0
+    if rc == getattr(dev, "E2E_TEARDOWN_FAILED", 3):
+        # Every step passed, then Anki crashed or hung on quit. Keep the
+        # first attempt's logs and launch once more; a second teardown
+        # failure is reported.
+        print(f"ui_ux_verify: {journey}: every step passed but Anki "
+              f"crashed or hung on quit; retrying once")
+        _keep_attempt_logs(os.path.join(dev.DEV_DIR, "e2e", journey),
+                           os.path.join(out_dir, f"{journey}-attempt1"))
+        teardown_retries = 1
+        _settle_before_retry()
+        rc, assertions, expected_run = _run_journey(dev, args, journey)
+    return rc, assertions, expected_run, teardown_retries
+
+
+def _keep_attempt_logs(base: str, out_dir: str) -> list:
+    """Copy a retried attempt's Anki logs and crash reports aside before the
+    relaunch wipes its base."""
+    kept = []
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return kept
+    for name in names:
+        if not (name in ("anki-stdout.log", "e2e-faulthandler.log",
+                         "e2e-heartbeat.json", "e2e-assertions.json")
+                or name.endswith((".ips", ".crash"))):
+            continue
+        try:
+            shutil.copyfile(os.path.join(base, name), os.path.join(out_dir, name))
+            kept.append(name)
+        except OSError:
+            continue
+    return kept
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="ui_ux_verify.py")
     parser.add_argument("--anki", required=True,
@@ -268,15 +321,8 @@ def main(argv=None) -> int:
     for journey in scenarios:
         print(f"ui_ux_verify: === {journey} (Anki {installed}, Qt {args.qt}) ===")
         _wait_for_anki_exit()
-        rc, assertions, expected_run = _run_journey(dev, args, journey)
-        if rc != 0 and assertions is None:
-            # Launch races (a lingering process or base handle right after a
-            # previous scenario) must not masquerade as a result. Settle and
-            # retry once; assertion failures are never retried.
-            print(f"ui_ux_verify: {journey}: launch failed early; retrying once")
-            _wait_for_anki_exit(120)
-            time.sleep(10)
-            rc, assertions, expected_run = _run_journey(dev, args, journey)
+        rc, assertions, expected_run, teardown_retries = \
+            _run_journey_with_retries(dev, args, journey, out_dir)
         # Compare against the artifact the run itself built (the suite
         # rebuilds dist/ before launching Anki).
         built_hash = _dist_hash()
@@ -284,7 +330,7 @@ def main(argv=None) -> int:
         entry = {"journey": journey, "returncode": int(rc),
                  "screenshots": [], "qt_version": "",
                  "artifact_sha256": built_hash, "steps": 0, "failed": [],
-                 "failed_checks": []}
+                 "failed_checks": [], "teardown_retries": teardown_retries}
         # Every journey-level failure is recorded on the entry as well as in
         # the summary, so the report row cannot disagree with the verdict.
         journey_failures = entry["failed_checks"]
@@ -353,7 +399,10 @@ def main(argv=None) -> int:
     with open(observed_path, "w", encoding="utf-8") as fh:
         json.dump({"requested": {"anki": args.anki, "qt": args.qt},
                    "observed": observed_runtime or {},
-                   "scenarios": len(results)}, fh, indent=2)
+                   "scenarios": len(results),
+                   "teardown_retries": {
+                       e["journey"]: e["teardown_retries"] for e in results
+                       if e.get("teardown_retries")}}, fh, indent=2)
     lines = [
         "# AnkiScape 3.0 UI/UX verification report",
         "",
@@ -374,6 +423,7 @@ def main(argv=None) -> int:
         ok = bool(entry.get("ok"))
         lines.append(
             f"| {entry['journey']} | {'PASS' if ok else 'FAIL'} "
+            f"{' (teardown retried)' if entry.get('teardown_retries') else ''} "
             f"| {entry['steps']} | {', '.join(entry['failed']) or '-'} "
             f"| {len(entry['screenshots'])} | {entry['qt_version'] or '?'} |")
     lines += ["", "Screenshot directories:"]
