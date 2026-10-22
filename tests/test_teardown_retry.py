@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -82,20 +83,29 @@ class FakeDev:
         self.calls = 0
 
     def _e2e_suite(self, *args, **kwargs):
+        """Each code is an exit status (the driver wrote its result), or
+        ("dead", rc): Anki died after launch with no result, or
+        ("bail", rc): the suite returned before wiping or launching."""
         code = self.codes[self.calls]
         self.calls += 1
+        kind, code = code if isinstance(code, tuple) else ("ok", code)
         journey = args[2]
         base = os.path.join(self.DEV_DIR, "e2e", journey)
+        if kind == "bail":
+            return code
+        shutil.rmtree(base, ignore_errors=True)  # the real suite wipes it
         os.makedirs(base, exist_ok=True)
         with open(os.path.join(base, "anki-stdout.log"), "w",
                   encoding="utf-8") as fh:
             fh.write(f"launch {self.calls}\n")
+        with open(os.path.join(base, "run-id.txt"), "w", encoding="utf-8") as fh:
+            fh.write(f"run-{self.calls}")
+        if kind == "dead":
+            return code
         with open(os.path.join(base, "e2e-assertions.json"), "w",
                   encoding="utf-8") as fh:
             json.dump(dict(PASSING, journey=journey,
                            run_id=f"run-{self.calls}"), fh)
-        with open(os.path.join(base, "run-id.txt"), "w", encoding="utf-8") as fh:
-            fh.write(f"run-{self.calls}")
         with open(os.path.join(base, "e2e-perf-native.json"), "w",
                   encoding="utf-8") as fh:
             json.dump({"run_mode": "addon", "lag_ms": [1.0]}, fh)
@@ -158,6 +168,70 @@ class PerformanceRepRetryTests(_TmpCase):
         self.assertEqual(fake.calls, 1)
         self.assertEqual(run["rc"], 1)
         self.assertEqual(run["teardown_retries"], 0)
+        self.assertEqual(run["launch_retries"], 0)
+
+    # Anki that dies before writing any result (macos-26.8.1 exit -13 at the
+    # `bulk` stage) measured nothing, so the rep is launched once more.
+
+    def test_death_without_a_result_reruns_the_rep(self):
+        fake, run, evidence = self.run_rep([("dead", -13), 0])
+        self.assertEqual(fake.calls, 2)
+        self.assertEqual(run["rc"], 0)
+        self.assertEqual(run["launch_retries"], 1)
+        self.assertEqual(run["teardown_retries"], 0)
+        self.assertEqual(run["metrics_state"], "ok")
+        with open(os.path.join(evidence + "-attempt1", "anki-stdout-tail.log"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "launch 1\n")
+
+    def test_second_death_without_a_result_fails_the_rep(self):
+        fake, run, _ = self.run_rep([("dead", -13), ("dead", -13), 0])
+        self.assertEqual(fake.calls, 2)
+        self.assertEqual(run["rc"], -13)
+        self.assertEqual(run["metrics_state"], "missing")
+
+    def test_previous_reps_result_does_not_count_as_this_reps(self):
+        base = os.path.join(self.dev_dir, "e2e", "native-performance")
+        os.makedirs(base)
+        with open(os.path.join(base, "run-id.txt"), "w", encoding="utf-8") as fh:
+            fh.write("old")
+        with open(os.path.join(base, "e2e-assertions.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"run_id": "old", "steps": []}, fh)
+        with open(os.path.join(base, "e2e-perf-native.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"run_mode": "addon", "lag_ms": [999.0]}, fh)
+        # The suite bails before wiping the base: the old files must not pass
+        # for this rep's result, so it is relaunched once.
+        fake, run, _ = self.run_rep([("bail", 1), ("bail", 1)])
+        self.assertEqual(fake.calls, 2)
+        self.assertEqual(run["launch_retries"], 1)
+        self.assertEqual(run["metrics_state"], "missing")
+        self.assertEqual(run["raw"], {})
+
+    def test_launch_death_then_teardown_failure_each_rerun_once(self):
+        fake, run, evidence = self.run_rep([("dead", -13), TEARDOWN, 0])
+        self.assertEqual(fake.calls, 3)
+        self.assertEqual(run["rc"], 0)
+        self.assertEqual((run["launch_retries"], run["teardown_retries"]),
+                         (1, 1))
+        self.assertTrue(os.path.isdir(evidence + "-attempt1"))
+        self.assertTrue(os.path.isdir(evidence + "-attempt2"))
+
+    def test_wrote_result_needs_this_runs_id(self):
+        base = os.path.join(self.dev_dir, "b")
+        os.makedirs(base)
+        self.assertFalse(NP._wrote_result(base))
+        with open(os.path.join(base, "run-id.txt"), "w", encoding="utf-8") as fh:
+            fh.write("run-2\n")
+        with open(os.path.join(base, "e2e-assertions.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"run_id": "run-1"}, fh)
+        self.assertFalse(NP._wrote_result(base))
+        with open(os.path.join(base, "e2e-assertions.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"run_id": "run-2"}, fh)
+        self.assertTrue(NP._wrote_result(base))
 
 
 class MatrixRetryTests(_TmpCase):

@@ -6054,6 +6054,48 @@ def _lag_probe_start(state):
     QTimer.singleShot(100, tick)
 
 
+def _stall_capture_start(state):
+    """Watch the lag probe for >150 ms stalls and time gc runs and checkpoint
+    work on the probe's clock (stall_capture.py has the why). Runs in control
+    and add-on modes alike so both pay the same overhead; the add-on hooks are
+    simply absent in control. Never fails the journey."""
+    try:
+        from .stall_capture import StallWatchdog, TimingHooks
+        label = lambda: _lag_probe_label(state)  # noqa: E731
+        hooks = TimingHooks(state, label=label)
+        hooks.install_gc()
+        try:
+            from ankiscape.evolved.journal import Journal
+            from ankiscape.evolved.projection_worker import ProjectionWorker
+            hooks.wrap(Journal, "save_checkpoint", "checkpoint_save")
+            hooks.wrap(ProjectionWorker, "_build", "projection_build")
+        except Exception:
+            pass  # control mode: the add-on is not installed
+        state["stall_hooks"] = hooks
+        state["stall_watchdog"] = StallWatchdog(state, label=label).start()
+    except Exception as exc:  # noqa: BLE001
+        state["stall_capture_error"] = repr(exc)[:200]
+
+
+def _stall_capture_stop(state):
+    """Stop before the idle window so idle CPU is measured without it."""
+    report = {}
+    watchdog = state.pop("stall_watchdog", None)
+    hooks = state.pop("stall_hooks", None)
+    try:
+        if watchdog is not None:
+            watchdog.stop()
+            report.update(watchdog.report())
+        if hooks is not None:
+            hooks.restore()
+            report.update(hooks.report())
+    except Exception as exc:  # noqa: BLE001
+        report["error"] = repr(exc)[:200]
+    if state.get("stall_capture_error"):
+        report["error"] = state["stall_capture_error"]
+    state["stall_capture"] = report
+
+
 def _perf_journal_revision():
     try:
         import ankiscape
@@ -6477,6 +6519,7 @@ def _poll_native_performance(state):
         if state["warmup_ticks"] < 3:
             return
         _lag_probe_start(state)
+        _stall_capture_start(state)
         state["stage"] = "answers"
         state["answers_done"] = 0
         state["accept_ms"] = []
@@ -6620,6 +6663,7 @@ def _poll_native_performance(state):
                     pass
                 return
             state["lag_probe_off"] = True
+            _stall_capture_stop(state)
             state["idle_cpu_start"] = _process_cpu_seconds()
             state["idle_wall_start"] = _time.time()
             state["stage_until"] = _time.time() + float(
@@ -6670,7 +6714,11 @@ def _poll_native_performance(state):
                    "eligible_for_release":
                        bool(cfg.get("eligible_for_release", False)),
                    "object_final": len(_gc.get_objects()),
-                   "thread_final": threading.active_count()}
+                   "thread_final": threading.active_count(),
+                   # >150 ms main-thread stalls with every thread's stack,
+                   # watchdog wake-up gaps (GIL held), gc runs and checkpoint
+                   # timings, all on the `lag_at` clock.
+                   "stall_capture": state.get("stall_capture")}
         _perf_write(payload)
         _step("native_performance_completed", True,
               f"answers={payload['answers']} lag={len(payload['lag_ms'])}")
