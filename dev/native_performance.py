@@ -268,8 +268,9 @@ def _busy_threads(threads, limit=3):
 def _stall_notes(runs):
     """One line per lag sample over STALL_NOTE_MS: when, how long, what the
     main thread was doing (from the driver's stall capture), whether the
-    watchdog itself was starved (GIL held), and which gc runs or checkpoint
-    calls overlapped it. Diagnosis only; never a verdict."""
+    watchdog itself was starved (GIL held or the process paused), and which
+    gc runs or checkpoint calls overlapped it. Diagnosis only; never a
+    verdict."""
     notes = []
     for run in runs:
         raw = run.get("raw") or {}
@@ -300,14 +301,15 @@ def _stall_notes(runs):
                     parts.append("main: " + (main[-1] if main else "?"))
                     gap = cap.get("watchdog_gap_ms")
                     if gap is not None and gap >= STALL_NOTE_MS / 2:
-                        parts.append(f"watchdog starved {gap:.0f} ms (GIL held)")
+                        parts.append(f"watchdog starved {gap:.0f} ms "
+                                     f"(GIL held or process paused)")
                     break
             else:
                 gaps = [g for g in capture.get("watchdog_gaps") or []
                         if start - 0.05 <= float(g.get("at", -1)) <= end + 0.2]
                 if gaps:
                     parts.append(f"watchdog starved {gaps[0]['gap_ms']:.0f} ms "
-                                 f"(GIL held)")
+                                 f"(GIL held or process paused)")
                     busy = _busy_threads(gaps[0].get("threads"))
                     if busy:
                         parts.append("just after: " + "; ".join(busy))

@@ -111,24 +111,6 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(len(wd.gaps), 1)
         self.assertIn("threads", wd.gaps[0])
 
-    def test_a_real_gil_holding_call_shows_up_as_a_gap(self):
-        import json
-        big = {"k%d" % i: [i, "x" * 20, {"a": i}] for i in range(300_000)}
-        state = {"lag_t0": time.perf_counter()}
-        wd = SC.StallWatchdog(state, threshold_s=0.05, poll_s=0.005).start()
-        try:
-            time.sleep(0.05)
-            started = time.perf_counter()
-            json.dumps(big)             # C encoder: holds the GIL throughout
-            held_ms = (time.perf_counter() - started) * 1000.0
-            time.sleep(0.05)
-        finally:
-            wd.stop()
-        if held_ms < 80:
-            self.skipTest(f"json.dumps took only {held_ms:.0f} ms here")
-        self.assertTrue(wd.gaps, f"no gap for a {held_ms:.0f} ms GIL hold")
-        self.assertGreaterEqual(max(g["gap_ms"] for g in wd.gaps), held_ms * 0.7)
-
     def test_no_deadline_no_capture(self):
         wd = self.make()
         self.state["lag_expected"] = None
@@ -302,7 +284,7 @@ class StallNoteTests(unittest.TestCase):
                    "calls": {"checkpoint_save": [{"at": 29.5, "ms": 380.0,
                                                   "thread": "projection"}]}}
         notes = NP._stall_notes([self.run_with([385.8], [29.876], capture)])
-        self.assertIn("watchdog starved 390 ms (GIL held)", notes[0])
+        self.assertIn("watchdog starved 390 ms (GIL held or process paused)", notes[0])
         self.assertIn("just after: projection: encoder.py:257 iterencode",
                       notes[0])
         self.assertNotIn("Dummy-3", notes[0])

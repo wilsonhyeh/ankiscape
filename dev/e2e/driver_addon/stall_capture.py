@@ -8,9 +8,13 @@ heartbeat stall. This module records, on the lag probe's own clock (`lag_t0`):
 - StallWatchdog: a daemon thread that watches the probe's next deadline
   (`state["lag_expected"]`). When the main-thread tick is more than
   `threshold_s` late it captures every thread's Python stack. A call that holds
-  the GIL (a C call such as json.dumps) also stops this thread, so its own
-  wake-up gap is recorded too: a capture or gap whose `watchdog_gap_ms` is near
-  the stall means the GIL was held, and the holder ran just before the capture.
+  the GIL also stops this thread, and so does the whole process being paused
+  (macOS runners pause the control run ~150 ms at a time), so its own wake-up
+  gaps are recorded too, with a stack snapshot. A gap means "GIL held or
+  process paused"; no gap proves nothing, because whether a C call such as
+  json.dumps lets other threads run differs by Python build (measured: it
+  starved this thread for its full 2.4 s on macOS Python 3.9.6, but for only
+  66 ms of 320 ms on the CI runner's Python 3.11).
 - TimingHooks: gc runs (every gen-2 run, and gen-0/1 runs at or above
   `min_gc_ms`) via gc.callbacks, and wrapped method timings such as
   Journal.save_checkpoint.
@@ -90,8 +94,8 @@ class StallWatchdog:
             # usually re-arms its deadline before this thread runs again, so
             # no late-tick capture follows; snapshot the stacks here instead.
             # Taken just after the release, the holder is typically still in
-            # its caller (measured: a 2.4 s json.dumps in a worker thread
-            # showed up only as this gap).
+            # its caller (measured on Python 3.9.6, Anki's 3.9 line: a 2.4 s
+            # json.dumps in a worker thread showed up only as this gap).
             if len(self.gaps) < MAX_GAPS:
                 entry = {"at": round(now - t0, 3),
                          "gap_ms": round(gap * 1000.0, 1),
