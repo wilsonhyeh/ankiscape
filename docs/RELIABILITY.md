@@ -85,6 +85,14 @@ same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
   teardown failure fails the journey (players quit Anki too). The first
   attempt's logs are kept (`-attempt1`), and each relaunch is listed as a
   `teardown_retried:<scenario>:<journey>:x<n>:<record>` evidence warning.
+- Performance reps also relaunch once when Anki dies before this launch wrote
+  any result (`e2e-assertions.json` whose `run_id` matches `run-id.txt`;
+  the previous rep's result files are removed before each launch), as the
+  journey and matrix runners already did. This is the macOS-26 exit -13 at
+  the `bulk` stage. A rep that wrote a result and failed is never relaunched.
+  Each relaunch shows in the metrics file as `launch_retries` on the run and
+  a `launch_retried:<journey>:rep<n>` warning, with the earlier attempt's
+  evidence under `rep<n>-<mode>-attempt<k>`.
 - Event-loop stall (since 2026-10-21): every perf rep's `perf-native.json`
   carries `stall_capture` (driver `stall_capture.py`). It holds all thread
   stacks whenever the 100 ms lag tick ran >150 ms late; `watchdog_gaps`, the

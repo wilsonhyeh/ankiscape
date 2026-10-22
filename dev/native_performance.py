@@ -151,6 +151,37 @@ def _archive_run_evidence(base: str, dest_dir: str) -> list:
     return copied
 
 
+LAUNCH_RETRY_LIMIT = 1
+TEARDOWN_RETRY_LIMIT = 1
+_RUN_OUTPUTS = ("e2e-assertions.json", "e2e-perf-native.json", "run-id.txt")
+
+
+def _retire_run_outputs(base: str) -> None:
+    """Remove the previous rep's result files before a launch. dev._e2e_suite
+    wipes the base itself, but it can bail before that (a leftover Anki), and
+    a stale result must never read as this rep's."""
+    for name in _RUN_OUTPUTS:
+        try:
+            os.unlink(os.path.join(base, name))
+        except OSError:
+            pass
+
+
+def _wrote_result(base: str) -> bool:
+    """True when this launch's driver wrote its result: e2e-assertions.json
+    whose run_id matches the run-id.txt dev._e2e_suite wrote for it."""
+    try:
+        with open(os.path.join(base, "run-id.txt"), encoding="utf-8") as fh:
+            run_id = fh.read().strip()
+        with open(os.path.join(base, "e2e-assertions.json"),
+                  encoding="utf-8") as fh:
+            result = json.load(fh) or {}
+    except (OSError, ValueError):
+        return False
+    return bool(run_id) and isinstance(result, dict) \
+        and result.get("run_id") == run_id
+
+
 def _run_journey(journey: str, *, install_addon: bool, config: dict,
                  anki: str, qt: str, anki_bin: str,
                  evidence_dir: str = "") -> dict:
@@ -158,29 +189,44 @@ def _run_journey(journey: str, *, install_addon: bool, config: dict,
     config = dict(config)
     config.setdefault("max_ticks", _max_ticks(config))
     phase_timeout = max(900, config["max_ticks"] // 10 + 300)
-    rc = dev._e2e_suite(anki, str(qt), journey, anki_bin, "",
-                        install_addon=install_addon, extra_config=config,
-                        phase_timeout_s=phase_timeout)
     base = os.path.join(dev.DEV_DIR, "e2e", journey)
+    teardown_rc = getattr(dev, "E2E_TEARDOWN_FAILED", 3)
+    # Two single relaunches, as in the journeys and matrix runners:
+    # - Anki died before this run wrote any result (macos-26.8.1 lost add-on
+    #   reps at the `bulk` stage to exit -13 on nightlies 38883107955,
+    #   39239886888 and 39675548974): nothing was measured, so the rep says
+    #   nothing about the product.
+    # - The rep measured cleanly, then Anki crashed or hung on quit (run
+    #   38716440823 linux-qt5 lost a rep to SIGSEGV this way).
+    # A rep that wrote a result and failed is never relaunched, and a second
+    # failure of either kind fails the rep. Each relaunch keeps the earlier
+    # attempt's evidence under `-attempt<n>`.
+    launch_retries = 0
     teardown_retries = 0
-    if rc == getattr(dev, "E2E_TEARDOWN_FAILED", 3):
-        # The rep measured cleanly, then Anki crashed or hung on quit
-        # (run 38716440823 linux-qt5 lost a rep to SIGSEGV this way). Keep the
-        # first attempt's evidence and measure the rep once more; a second
-        # teardown failure fails the rep as before.
-        print(f"native_performance: {journey}: every step passed but Anki "
-              f"crashed or hung on quit; re-running the rep once",
-              file=sys.stderr)
-        if evidence_dir:
-            try:
-                _archive_run_evidence(base, evidence_dir + "-attempt1")
-            except OSError:
-                pass
-        teardown_retries = 1
-        _rel()._settle_before_launch_retry()
+    while True:
+        _retire_run_outputs(base)
         rc = dev._e2e_suite(anki, str(qt), journey, anki_bin, "",
                             install_addon=install_addon, extra_config=config,
                             phase_timeout_s=phase_timeout)
+        if rc != 0 and not _wrote_result(base) \
+                and launch_retries < LAUNCH_RETRY_LIMIT:
+            launch_retries += 1
+            reason = f"Anki exited {rc} before writing any result"
+        elif rc == teardown_rc and teardown_retries < TEARDOWN_RETRY_LIMIT:
+            teardown_retries += 1
+            reason = "every step passed but Anki crashed or hung on quit"
+        else:
+            break
+        print(f"native_performance: {journey}: {reason}; re-running the rep "
+              f"once", file=sys.stderr)
+        if evidence_dir:
+            try:
+                _archive_run_evidence(
+                    base, f"{evidence_dir}-attempt"
+                          f"{launch_retries + teardown_retries}")
+            except OSError:
+                pass
+        _rel()._settle_before_launch_retry()
     # Metrics truth: an absent, unreadable or empty payload used to collapse
     # into `raw = {}`, which then surfaced as a generic `native_performance =>
     # None` with no way to tell a crashed journey from a real measurement. The
@@ -215,7 +261,8 @@ def _run_journey(journey: str, *, install_addon: bool, config: dict,
     return {"journey": journey, "install_addon": install_addon,
             "rc": int(rc), "raw": raw, "runtime": runtime,
             "metrics_state": metrics_state, "metrics_path": metrics_path,
-            "evidence": evidence, "teardown_retries": teardown_retries}
+            "evidence": evidence, "launch_retries": launch_retries,
+            "teardown_retries": teardown_retries}
 
 
 def _collect_perf(runs, mode):
@@ -710,10 +757,11 @@ def main(argv=None) -> int:
     failures, warnings = rel.scope_macos_reward_p95(
         failures, warnings, platform=sys.platform, profile=args.profile,
         limit_ms=reward_limit)
-    # A rep re-run after a teardown crash/hang is recorded, never silent.
+    # A re-run rep is recorded, never silent.
     warnings = list(warnings) + [
-        f"teardown_retried:{r['journey']}:rep{r.get('repetition', '?')}"
-        for r in runs if r.get("teardown_retries")]
+        f"{kind}_retried:{r['journey']}:rep{r.get('repetition', '?')}"
+        for r in runs for kind in ("launch", "teardown")
+        if r.get(f"{kind}_retries")]
     stall_notes = _stall_notes(runs)
     for note in stall_notes:
         print(f"native_performance: stall: {note}", file=sys.stderr)
@@ -730,6 +778,7 @@ def main(argv=None) -> int:
                   "raw_len": len(json.dumps(r["raw"])),
                   "metrics_state": r.get("metrics_state"),
                   "evidence": len(r.get("evidence") or []),
+                  "launch_retries": r.get("launch_retries", 0),
                   "teardown_retries": r.get("teardown_retries", 0)}
                  for r in runs],
         "failures": failures, "warnings": warnings,
