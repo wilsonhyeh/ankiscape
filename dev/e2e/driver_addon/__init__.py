@@ -15,9 +15,32 @@ import threading
 import time
 import traceback
 
+
+
+def _sigpipe_disposition() -> str:
+    """This process's SIGPIPE disposition as a string, read once at driver
+    start and never changed. macOS-26 lanes die with exit -13 (SIGPIPE) and no
+    traceback; CPython normally sets SIG_IGN, so SIG_DFL inside Anki says the
+    host app reset it. No SIGPIPE on Windows."""
+    try:
+        import signal
+        if not hasattr(signal, "SIGPIPE"):
+            return "unavailable"
+        handler = signal.getsignal(signal.SIGPIPE)
+        if handler == signal.SIG_IGN:
+            return "SIG_IGN"
+        if handler == signal.SIG_DFL:
+            return "SIG_DFL"
+        return repr(handler)
+    except Exception as exc:
+        return f"error:{exc!r}"[:120]
+
+
+SIGPIPE = _sigpipe_disposition()
+
 RESULT = {"journey": "fresh", "phase": 1, "run_id": None, "steps": [],
           "assertions": {}, "screenshots": [], "errors": [],
-          "started": time.time()}
+          "started": time.time(), "sigpipe": SIGPIPE}
 
 RUN_ID = None
 JOURNEY = "fresh"
@@ -532,7 +555,7 @@ def run():
                 extra["beat_error"] = repr(exc)[:200]
             with open(_out_path("heartbeat.json"), "w", encoding="utf-8") as fh:
                 json.dump({"run_id": RUN_ID, "journey": JOURNEY, "phase": PHASE,
-                           "pid": os.getpid(),
+                           "pid": os.getpid(), "sigpipe": SIGPIPE,
                            "ticks": state["ticks"], "answered": state["answered"],
                            "state_id": id(state),
                            "calls": state.get("calls", 0),

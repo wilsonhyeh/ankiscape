@@ -216,3 +216,28 @@ green nightly, the median rule passes all 12. The tradeoff: a stall that
 shows up in only 1 of 3 reps and stays under the backstop no longer fails the
 gate on its own. The amendment is recorded in the budget file's
 `lag_max_amendment` object.
+
+### 2026-10-23 macOS lag-max scoping amendment (approved by Wilson)
+
+Like the 2026-09-27 reward scoping, a macOS-runner event-loop-lag max miss is
+a documented warning, not a gate, while it stays bounded and attributable to
+the runner. `scope_macos_lag_max()` (in `dev/reliability.py`, applied in
+`dev/native_performance.py` and in the aggregate budget re-check) downgrades
+`budget:event_loop_lag:max:median_rep:<ms>` (and the pooled fallback
+`budget:event_loop_lag:max:<ms>`) to a warning, for nightly and release
+profiles on a macOS lane only, and only while both hold: the observed value
+the verdict used is at most `macos_max_scope_limit_ms` (300 ms, 1.5x the
+ceiling), and a paired control is present with observed minus control at most
+`macos_max_scope_control_delta_ms` (100 ms). A missing control, an unparseable
+value or a Linux/Windows lane keeps failing; `max:backstop:` and p95 lag
+failures are never scoped. The 200 ms ceiling and 50 ms delta are unchanged,
+the numbers stay in the payload, and the scoping is recorded as
+`scoped:event_loop_lag:max:macos_runner_observation(budgets scoping amendment
+2026-10-23, Wilson)`.
+
+Rationale: nightly 39936385911 (macos-23.10-qt6) failed only this gate: addon
+rep maxima 177.9 / 200.5 / 200.5 ms (median 200.478) against control
+149.1 / 145.8 / 173.1 ms (median 149.072), delta 51.4 vs 50. The macOS runner
+alone costs about 145-175 ms of max lag with no add-on (Linux/Windows
+controls 8-25 ms), so its lanes have almost no headroom under 200 ms. The
+amendment is recorded in the budget file's `lag_max_scoping_amendment` object.

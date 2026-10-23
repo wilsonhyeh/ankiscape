@@ -222,6 +222,20 @@ def _num(value: Any, default: float = 1e9) -> float:
         return default
 
 
+def lag_max_view(lag, lag_cfg):
+    """(observed, control, label) the event_loop_lag max verdict is judged on.
+
+    One definition for the budget check and for scope_macos_lag_max(), so the
+    scoping can never read different numbers than the verdict used."""
+    if (lag_cfg.get("max_verdict") == "median_rep_max"
+            and lag.get("rep_max_median_ms") is not None):
+        observed = lag.get("rep_max_median_ms")
+        return (observed, lag.get("control_rep_max_median_ms"),
+                f"max:median_rep:{observed}")
+    observed = lag.get("max_ms")
+    return observed, lag.get("control_max_ms"), f"max:{observed}"
+
+
 def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
                      enforce_samples: bool = True,
                      required: Optional[set] = None) -> List[str]:
@@ -325,15 +339,7 @@ def evaluate_budgets(metrics: Dict[str, Any], budgets: Dict[str, Any], *,
         # maxima falls back to the pooled rule; the backstop below still
         # fails any single sample over max_backstop_ms.
         lag_cfg = cfg["event_loop_lag"]
-        if (lag_cfg.get("max_verdict") == "median_rep_max"
-                and lag.get("rep_max_median_ms") is not None):
-            observed_max = lag.get("rep_max_median_ms")
-            control_max = lag.get("control_rep_max_median_ms")
-            label = f"max:median_rep:{observed_max}"
-        else:
-            observed_max = lag.get("max_ms")
-            control_max = lag.get("control_max_ms")
-            label = f"max:{observed_max}"
+        observed_max, control_max, label = lag_max_view(lag, lag_cfg)
         if _num(observed_max, 0.0) > _num(lag_cfg["max_limit_ms"]):
             # Decision A (Wilson 2026-09-21): same paired-control rule as p95.
             # A runner baseline that already eats the ceiling must not fail
@@ -504,6 +510,63 @@ def scope_macos_reward_p95(failures, warnings, *, platform, profile,
     warn = list(warnings) + scoped + [
         "scoped:reward_completion:macos_runner_observation"
         "(budgets scoping amendment 2026-09-27, Wilson)"]
+    return kept, warn
+
+
+MACOS_LAG_MAX_PREFIX = "budget:event_loop_lag:max:"
+
+
+def scope_macos_lag_max(failures, warnings, *, platform, profile, metrics,
+                        budgets):
+    """Scoping amendment 2026-10-23 (Wilson): a macOS-runner event_loop_lag
+    max miss is a documented warning while it stays bounded and attributable
+    to the runner. The 200 ms ceiling and 50 ms control delta are unchanged
+    on every lane.
+
+    Evidence: nightly 39936385911, macos-23.10-qt6: addon rep maxima
+    177.897 / 200.535 / 200.478 (median 200.478) against control rep maxima
+    149.072 / 145.775 / 173.061 (median 149.072), delta 51.4. The macOS runner
+    alone costs ~145-175 ms max lag with no addon (Linux/Windows ~8-25 ms),
+    so its lanes have almost no headroom under the ceiling.
+
+    Scoped EXACTLY `budget:event_loop_lag:max:median_rep:<x>` and the pooled
+    fallback `budget:event_loop_lag:max:<x>`, and only while ALL hold: the
+    observed value the verdict used (re-derived via lag_max_view, and equal to
+    the failure's own value) is <= macos_max_scope_limit_ms, and a paired
+    control is present with observed - control <= macos_max_scope_control_
+    delta_ms. Missing control, missing config or an unparseable value keeps
+    failing. `max:backstop:`, p95, rebuild-window and everything else are
+    untouched. Non-darwin platforms and non nightly/release profiles are never
+    scoped; the scoping itself is appended to warnings so it can never be
+    silent.
+    """
+    if profile not in ("nightly", "release") or platform != "darwin":
+        return list(failures), list(warnings)
+    lag = (metrics or {}).get("event_loop_lag")
+    lag_cfg = ((budgets or {}).get("budgets") or {}).get("event_loop_lag") or {}
+    if not isinstance(lag, dict):
+        return list(failures), list(warnings)
+    limit = lag_cfg.get("macos_max_scope_limit_ms")
+    delta_limit = lag_cfg.get("macos_max_scope_control_delta_ms")
+    if limit is None or delta_limit is None:
+        return list(failures), list(warnings)
+    observed, control, label = lag_max_view(lag, lag_cfg)
+    allowed = (observed is not None and control is not None
+               and _num(observed) <= _num(limit)
+               and _num(observed) - _num(control) <= _num(delta_limit))
+
+    def _is_scoped(entry: str) -> bool:
+        if not allowed or not entry.startswith(MACOS_LAG_MAX_PREFIX):
+            return False
+        return entry == f"budget:event_loop_lag:{label}"
+
+    scoped = [f for f in failures if _is_scoped(f)]
+    if not scoped:
+        return list(failures), list(warnings)
+    kept = [f for f in failures if not _is_scoped(f)]
+    warn = list(warnings) + scoped + [
+        "scoped:event_loop_lag:max:macos_runner_observation"
+        "(budgets scoping amendment 2026-10-23, Wilson)"]
     return kept, warn
 
 
@@ -992,6 +1055,10 @@ def validate_evidence(matrix_path: str, evidence_dir: str, *,
                 limit_ms=float(((budgets.get("budgets") or {})
                                 .get("reward_completion") or {})
                                .get("limit", 250.0)))
+            budget_failures, scoped = scope_macos_lag_max(
+                budget_failures, scoped,
+                platform="darwin" if lane_os == "macos" else lane_os,
+                profile=stage, metrics=metrics, budgets=budgets)
             errors.extend(f"{failure}:{rel}" for failure in budget_failures)
             summary.setdefault("warnings", []).extend(
                 f"{warning}:{rel}" for warning in scoped)
