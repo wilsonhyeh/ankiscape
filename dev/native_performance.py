@@ -752,11 +752,16 @@ def main(argv=None) -> int:
     # Scoping amendment 2026-09-27 (Wilson): macOS-runner reward p95 misses
     # are warnings within a 2x backstop; the 250 ms budget is unchanged.
     with open(BUDGETS_PATH, encoding="utf-8") as fh:
-        reward_limit = float(json.load(fh)["budgets"]["reward_completion"]
-                             ["limit"])
+        budgets = json.load(fh)
+    reward_limit = float(budgets["budgets"]["reward_completion"]["limit"])
     failures, warnings = rel.scope_macos_reward_p95(
         failures, warnings, platform=sys.platform, profile=args.profile,
         limit_ms=reward_limit)
+    # Scoping amendment 2026-10-23 (Wilson): macOS-runner event_loop_lag max
+    # misses are warnings within 1.5x the ceiling and a 100 ms control delta.
+    failures, warnings = rel.scope_macos_lag_max(
+        failures, warnings, platform=sys.platform, profile=args.profile,
+        metrics=metrics, budgets=budgets)
     # A re-run rep is recorded, never silent.
     warnings = list(warnings) + [
         f"{kind}_retried:{r['journey']}:rep{r.get('repetition', '?')}"

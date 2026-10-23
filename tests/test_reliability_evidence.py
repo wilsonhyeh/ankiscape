@@ -1432,5 +1432,238 @@ class MacosRewardScopingAmendmentTests(unittest.TestCase):
         self.assertIn("macOS", scope.get("decision", ""))
 
 
+class MacosLagMaxScopingAmendmentTests(unittest.TestCase):
+    """Scoping amendment 2026-10-23 (Wilson): a macOS-runner event_loop_lag
+    max miss is a warning while observed <= 300 ms and observed - control <=
+    100 ms. The scope reads the same values the verdict used, fails closed on
+    a missing control, and never touches the backstop or p95."""
+
+    LAG_CFG = {"limit": 50.0, "p95_control_delta_ms": 50.0,
+               "max_limit_ms": 200.0, "max_control_delta_ms": 50.0,
+               "max_verdict": "median_rep_max", "max_backstop_ms": 1000.0,
+               "macos_max_scope_limit_ms": 300.0,
+               "macos_max_scope_control_delta_ms": 100.0}
+    BUDGETS = {"budgets": {"event_loop_lag": LAG_CFG}}
+
+    @staticmethod
+    def _lag(addon=200.478, control=149.072, **extra):
+        # Nightly 39936385911 macos-23.10-qt6 by default.
+        lag = {"p95_ms": 147.346, "control_p95_ms": 129.072,
+               "max_ms": 200.535, "control_max_ms": 173.061,
+               "rep_max_ms": [177.897, 200.535, 200.478],
+               "rep_max_median_ms": addon,
+               "control_rep_max_ms": [149.072, 145.775, 173.061],
+               "control_rep_max_median_ms": control}
+        lag.update(extra)
+        return {"event_loop_lag": lag}
+
+    def _run(self, metrics, platform="darwin", profile="nightly"):
+        """The verdict, then the scoping, as native_performance does it."""
+        failures = REL.evaluate_budgets(
+            metrics, self.BUDGETS, enforce_samples=False,
+            required={"event_loop_lag"})
+        return REL.scope_macos_lag_max(
+            failures, [], platform=platform, profile=profile,
+            metrics=metrics, budgets=self.BUDGETS)
+
+    def test_tonights_numbers_pass_with_scoped_warning_on_macos(self):
+        metrics = self._lag()
+        self.assertEqual(REL.evaluate_budgets(
+            metrics, self.BUDGETS, enforce_samples=False,
+            required={"event_loop_lag"}),
+            ["budget:event_loop_lag:max:median_rep:200.478"])
+        for profile in ("nightly", "release"):
+            failures, warnings = self._run(metrics, profile=profile)
+            self.assertEqual(failures, [], profile)
+            self.assertEqual(warnings, [
+                "budget:event_loop_lag:max:median_rep:200.478",
+                "scoped:event_loop_lag:max:macos_runner_observation"
+                "(budgets scoping amendment 2026-10-23, Wilson)"], profile)
+
+    def test_pooled_fallback_form_is_scoped_too(self):
+        metrics = {"event_loop_lag": {
+            "p95_ms": 40.0, "max_ms": 230.0, "control_max_ms": 160.0}}
+        failures, warnings = self._run(metrics)
+        self.assertEqual(failures, [])
+        self.assertIn("budget:event_loop_lag:max:230.0", warnings)
+
+    def test_linux_and_windows_keep_failing(self):
+        for platform in ("linux", "win32", "", "plan9"):
+            failures, warnings = self._run(self._lag(), platform=platform)
+            self.assertEqual(
+                failures, ["budget:event_loop_lag:max:median_rep:200.478"],
+                platform)
+            self.assertEqual(warnings, [], platform)
+
+    def test_non_nightly_release_profiles_keep_failing(self):
+        for profile in ("smoke", "pr", "", "weekly"):
+            failures, warnings = self._run(self._lag(), profile=profile)
+            self.assertEqual(
+                failures, ["budget:event_loop_lag:max:median_rep:200.478"],
+                profile)
+            self.assertEqual(warnings, [], profile)
+
+    def test_observed_over_scope_limit_keeps_failing(self):
+        # delta 81 is inside the 100 ms bound: only the 300 ms limit refuses.
+        failures, warnings = self._run(self._lag(addon=301.0, control=220.0))
+        self.assertEqual(failures, ["budget:event_loop_lag:max:median_rep:301.0"])
+        self.assertEqual(warnings, [])
+        failures, _ = self._run(self._lag(addon=300.001, control=220.0))
+        self.assertEqual(
+            failures, ["budget:event_loop_lag:max:median_rep:300.001"])
+        failures, _ = self._run(self._lag(addon=300.0, control=220.0))
+        self.assertEqual(failures, [])
+
+    def test_control_delta_over_bound_keeps_failing(self):
+        failures, warnings = self._run(self._lag(addon=251.0, control=150.0))
+        self.assertEqual(
+            failures, ["budget:event_loop_lag:max:median_rep:251.0"])
+        self.assertEqual(warnings, [])
+        failures, _ = self._run(self._lag(addon=250.0, control=150.0))
+        self.assertEqual(failures, [])
+
+    def test_missing_control_fails_closed(self):
+        metrics = self._lag(control=None)
+        failures, warnings = self._run(metrics)
+        self.assertEqual(
+            failures, ["budget:event_loop_lag:max:median_rep:200.478"])
+        self.assertEqual(warnings, [])
+        metrics = {"event_loop_lag": {"max_ms": 230.0, "p95_ms": 40.0}}
+        failures, _ = self._run(metrics)
+        self.assertEqual(failures, ["budget:event_loop_lag:max:230.0"])
+
+    def test_backstop_failure_is_never_scoped(self):
+        metrics = self._lag(max_ms=1200.0)
+        failures, warnings = self._run(metrics)
+        self.assertEqual(failures, ["budget:event_loop_lag:max:backstop:1200.0"])
+        self.assertIn("budget:event_loop_lag:max:median_rep:200.478", warnings)
+        # A hand-fed backstop string with scope-eligible lag stays a failure.
+        failures, warnings = REL.scope_macos_lag_max(
+            ["budget:event_loop_lag:max:backstop:1200.0"], [],
+            platform="darwin", profile="nightly", metrics=self._lag(),
+            budgets=self.BUDGETS)
+        self.assertEqual(failures, ["budget:event_loop_lag:max:backstop:1200.0"])
+        self.assertEqual(warnings, [])
+
+    def test_p95_and_other_lag_failures_are_untouched(self):
+        others = ["budget:event_loop_lag:p95:420.0",
+                  "budget:event_loop_lag:rebuild_window:max:6000.0",
+                  "budget:event_loop_lag:not_measured",
+                  "lag_samples:unreconciled"]
+        failures, warnings = REL.scope_macos_lag_max(
+            list(others), [], platform="darwin", profile="nightly",
+            metrics=self._lag(), budgets=self.BUDGETS)
+        self.assertEqual(failures, others)
+        self.assertEqual(warnings, [])
+
+    def test_failure_that_disagrees_with_the_metrics_is_not_scoped(self):
+        # The scope must act on the value the verdict used, not a lookalike.
+        failures, warnings = REL.scope_macos_lag_max(
+            ["budget:event_loop_lag:max:median_rep:200.0"], [],
+            platform="darwin", profile="nightly", metrics=self._lag(),
+            budgets=self.BUDGETS)
+        self.assertEqual(failures,
+                         ["budget:event_loop_lag:max:median_rep:200.0"])
+        self.assertEqual(warnings, [])
+
+    def test_missing_config_or_metrics_fails_closed(self):
+        label = "budget:event_loop_lag:max:median_rep:200.478"
+        bare = {"budgets": {"event_loop_lag": {
+            k: v for k, v in self.LAG_CFG.items()
+            if not k.startswith("macos_")}}}
+        for metrics, budgets in ((self._lag(), bare), ({}, self.BUDGETS),
+                                 (self._lag(), {})):
+            failures, warnings = REL.scope_macos_lag_max(
+                [label], [], platform="darwin", profile="nightly",
+                metrics=metrics, budgets=budgets)
+            self.assertEqual(failures, [label])
+            self.assertEqual(warnings, [])
+
+    def test_existing_warnings_are_preserved_and_inputs_not_mutated(self):
+        failures = ["budget:event_loop_lag:max:median_rep:200.478", "other"]
+        warnings = ["earlier"]
+        kept, warn = REL.scope_macos_lag_max(
+            failures, warnings, platform="darwin", profile="nightly",
+            metrics=self._lag(), budgets=self.BUDGETS)
+        self.assertEqual(kept, ["other"])
+        self.assertEqual(warn[0], "earlier")
+        self.assertEqual(failures, ["budget:event_loop_lag:max:median_rep:200.478",
+                                    "other"])
+        self.assertEqual(warnings, ["earlier"])
+
+    def test_shipped_budget_file_carries_amendment_and_config(self):
+        budgets = json.load(open(os.path.join(ROOT, "dev",
+                                              "reliability-budgets.json")))
+        lag = budgets["budgets"]["event_loop_lag"]
+        self.assertEqual(lag["max_limit_ms"], 200.0)
+        self.assertEqual(lag["max_control_delta_ms"], 50.0)
+        self.assertEqual(lag["macos_max_scope_limit_ms"], 300.0)
+        self.assertEqual(lag["macos_max_scope_control_delta_ms"], 100.0)
+        scope = budgets.get("lag_max_scoping_amendment") or {}
+        self.assertEqual(scope.get("approved_by"), "Wilson")
+        self.assertEqual(scope.get("date"), "2026-10-23")
+        self.assertIn("macOS", scope.get("decision", ""))
+        self.assertIn("39936385911", scope.get("evidence", ""))
+
+    def test_shipped_budgets_scope_tonights_numbers(self):
+        shipped = json.load(open(os.path.join(ROOT, "dev",
+                                              "reliability-budgets.json")))
+        metrics = self._lag()
+        failures = REL.evaluate_budgets(metrics, shipped,
+                                        enforce_samples=False,
+                                        required={"event_loop_lag"})
+        kept, warn = REL.scope_macos_lag_max(
+            failures, [], platform="darwin", profile="nightly",
+            metrics=metrics, budgets=shipped)
+        self.assertEqual(kept, [])
+        self.assertTrue(any(w.startswith("scoped:event_loop_lag:max:")
+                            for w in warn))
+
+
+class AggregateLagMaxScopingTests(unittest.TestCase):
+    """The aggregate re-check reads each lane's raw metrics, so the lag-max
+    scoping must bind there as well (same trap as the reward scoping)."""
+
+    LAG = {"event_loop_lag": {
+        "samples": 1086, "p95_ms": 40.0, "max_ms": 200.535,
+        "control_max_ms": 173.061, "rep_max_median_ms": 200.478,
+        "control_rep_max_median_ms": 149.072}}
+    LAG_BUDGETS = {"budgets": dict(BUDGETS["budgets"], event_loop_lag={
+        "limit": 50.0, "max_limit_ms": 200.0, "max_control_delta_ms": 50.0,
+        "max_verdict": "median_rep_max", "max_backstop_ms": 1000.0,
+        "macos_max_scope_limit_ms": 300.0,
+        "macos_max_scope_control_delta_ms": 100.0})}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ankiscape-aggregate-lag-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.fx = EvidenceFixture(self.tmp)
+
+    def _set(self, os_name):
+        self.fx.add_record(role="shared")
+        self.fx.add_record(role="native", os_name=os_name, anki="26.08.1",
+                           metrics=json.loads(json.dumps(self.LAG)))
+        self.fx.add_record(role="native", os_name="linux", anki="23.10",
+                           anki_actual="23.10.4", lane="native-linux-23.10")
+        self.fx.add_record(role="hosted", trusted=True, job="hosted")
+
+    def test_macos_lag_max_miss_is_an_aggregate_warning(self):
+        self._set("macos")
+        ok, errors, summary = self.fx.validate(budgets=self.LAG_BUDGETS)
+        self.assertFalse(any("event_loop_lag" in e for e in errors), errors)
+        self.assertTrue(any(w.startswith("budget:event_loop_lag:max:median_rep:")
+                            for w in summary.get("warnings", [])))
+        self.assertTrue(any(w.startswith("scoped:event_loop_lag:max:")
+                            for w in summary.get("warnings", [])))
+
+    def test_linux_lag_max_miss_still_fails_the_aggregate(self):
+        self._set("linux")
+        ok, errors, _ = self.fx.validate(budgets=self.LAG_BUDGETS)
+        self.assertFalse(ok)
+        self.assertTrue(any(e.startswith(
+            "budget:event_loop_lag:max:median_rep:200.478") for e in errors),
+            errors)
+
+
 if __name__ == "__main__":
     unittest.main()
