@@ -223,9 +223,15 @@ def _settle_before_retry() -> None:
     time.sleep(10)
 
 
+def _failed_step_names(assertions) -> set:
+    """Names of the failed steps in one driver result."""
+    return {str(step.get("name")) for step in assertions.get("steps", [])
+            if not step.get("ok")}
+
+
 def _run_journey_with_retries(dev, args, journey, out_dir):
-    """_run_journey plus its two single retries; returns
-    (rc, result-or-None, expected run id, teardown retries)."""
+    """_run_journey plus its single retries; returns
+    (rc, result-or-None, expected run id, teardown retries, fatal retries)."""
     rc, assertions, expected_run = _run_journey(dev, args, journey)
     if rc != 0 and assertions is None:
         # Launch races (a lingering process or base handle right after a
@@ -235,18 +241,35 @@ def _run_journey_with_retries(dev, args, journey, out_dir):
         _settle_before_retry()
         rc, assertions, expected_run = _run_journey(dev, args, journey)
     teardown_retries = 0
+    fatal_retries = 0
+    relaunch = False
     if rc == getattr(dev, "E2E_TEARDOWN_FAILED", 3):
         # Every step passed, then Anki crashed or hung on quit. Keep the
         # first attempt's logs and launch once more; a second teardown
         # failure is reported.
         print(f"ui_ux_verify: {journey}: every step passed but Anki "
               f"crashed or hung on quit; retrying once")
+        teardown_retries = 1
+        relaunch = True
+    elif rc != 0 and assertions is not None \
+            and _failed_step_names(assertions) == {"fatal"}:
+        # `fatal` is the driver's own verdict (`_fail()` in
+        # dev/e2e/driver_addon): the watchdog timed out, a driver call
+        # raised, a phase was unknown, or an environment modal dialog
+        # blocked the main thread. It asserts nothing about the product, so
+        # the journey is relaunched once. Any other failed step, or `fatal`
+        # beside one, is a real failure and final.
+        print(f"ui_ux_verify: {journey}: the only failed step is the "
+              f"harness's own `fatal`; retrying once")
+        fatal_retries = 1
+        relaunch = True
+    if relaunch:
+        # Keep the first attempt's logs before the relaunch wipes its base.
         _keep_attempt_logs(os.path.join(dev.DEV_DIR, "e2e", journey),
                            os.path.join(out_dir, f"{journey}-attempt1"))
-        teardown_retries = 1
         _settle_before_retry()
         rc, assertions, expected_run = _run_journey(dev, args, journey)
-    return rc, assertions, expected_run, teardown_retries
+    return rc, assertions, expected_run, teardown_retries, fatal_retries
 
 
 def _keep_attempt_logs(base: str, out_dir: str) -> list:
@@ -269,6 +292,21 @@ def _keep_attempt_logs(base: str, out_dir: str) -> list:
         except OSError:
             continue
     return kept
+
+
+def _retry_counts(results: list, key: str) -> dict:
+    """Journey -> relaunch count for the observed-runtime record."""
+    return {e["journey"]: e[key] for e in results if e.get(key)}
+
+
+def _observed_runtime(args, results: list, observed_runtime) -> dict:
+    """The results JSON: what this run observed and which journeys it
+    relaunched (never silent, the evidence readers warn on both maps)."""
+    return {"requested": {"anki": args.anki, "qt": args.qt},
+            "observed": observed_runtime or {},
+            "scenarios": len(results),
+            "teardown_retries": _retry_counts(results, "teardown_retries"),
+            "fatal_retries": _retry_counts(results, "fatal_retries")}
 
 
 def main(argv=None) -> int:
@@ -321,7 +359,7 @@ def main(argv=None) -> int:
     for journey in scenarios:
         print(f"ui_ux_verify: === {journey} (Anki {installed}, Qt {args.qt}) ===")
         _wait_for_anki_exit()
-        rc, assertions, expected_run, teardown_retries = \
+        rc, assertions, expected_run, teardown_retries, fatal_retries = \
             _run_journey_with_retries(dev, args, journey, out_dir)
         # Compare against the artifact the run itself built (the suite
         # rebuilds dist/ before launching Anki).
@@ -330,7 +368,8 @@ def main(argv=None) -> int:
         entry = {"journey": journey, "returncode": int(rc),
                  "screenshots": [], "qt_version": "",
                  "artifact_sha256": built_hash, "steps": 0, "failed": [],
-                 "failed_checks": [], "teardown_retries": teardown_retries}
+                 "failed_checks": [], "teardown_retries": teardown_retries,
+                 "fatal_retries": fatal_retries}
         # Every journey-level failure is recorded on the entry as well as in
         # the summary, so the report row cannot disagree with the verdict.
         journey_failures = entry["failed_checks"]
@@ -397,12 +436,8 @@ def main(argv=None) -> int:
     observed_path = os.path.join(
         ARTIFACTS, f"observed-runtime-{args.anki}-qt{args.qt}.json")
     with open(observed_path, "w", encoding="utf-8") as fh:
-        json.dump({"requested": {"anki": args.anki, "qt": args.qt},
-                   "observed": observed_runtime or {},
-                   "scenarios": len(results),
-                   "teardown_retries": {
-                       e["journey"]: e["teardown_retries"] for e in results
-                       if e.get("teardown_retries")}}, fh, indent=2)
+        json.dump(_observed_runtime(args, results, observed_runtime),
+                  fh, indent=2)
     lines = [
         "# AnkiScape 3.0 UI/UX verification report",
         "",
@@ -421,9 +456,12 @@ def main(argv=None) -> int:
         # native-matrix-report.md), so it must reflect every check that
         # failed, not just the step list.
         ok = bool(entry.get("ok"))
+        retried = (" (teardown retried)"
+                   if entry.get("teardown_retries") else "")
+        if entry.get("fatal_retries"):
+            retried += " (fatal retried)"
         lines.append(
-            f"| {entry['journey']} | {'PASS' if ok else 'FAIL'} "
-            f"{' (teardown retried)' if entry.get('teardown_retries') else ''} "
+            f"| {entry['journey']} | {'PASS' if ok else 'FAIL'}{retried} "
             f"| {entry['steps']} | {', '.join(entry['failed']) or '-'} "
             f"| {len(entry['screenshots'])} | {entry['qt_version'] or '?'} |")
     lines += ["", "Screenshot directories:"]

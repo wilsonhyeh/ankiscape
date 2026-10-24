@@ -935,13 +935,12 @@ def validate_evidence(matrix_path: str, evidence_dir: str, *,
         for item in scenarios:
             if isinstance(item, dict):
                 seen[str(item.get("id"))] = item
-        # A journey relaunched after Anki crashed or hung on quit does not fail
-        # the lane, but every such relaunch is listed so the rate stays visible.
+        # A journey relaunched after Anki crashed or hung on quit, or after the
+        # harness's own `fatal` verdict, does not fail the lane, but every such
+        # relaunch is listed so the rate stays visible.
         for item in seen.values():
-            for journey, count in sorted(_teardown_retries(item).items()):
-                summary.setdefault("warnings", []).append(
-                    f"teardown_retried:{item.get('id')}:{journey}"
-                    f":x{count}:{rel}")
+            summary.setdefault("warnings", []).extend(
+                _retry_warnings(item, rel))
 
         for scenario in _scenarios_for_role(matrix, role, stage):
             sid = str(scenario.get("id"))
@@ -1498,22 +1497,44 @@ LAUNCH_RETRY_LIMIT = 1
 TEARDOWN_RETRY_LIMIT = 1
 
 
-def _teardown_retries(scenario: Dict[str, Any]) -> Dict[str, int]:
-    """Journey -> relaunch count for one scenario record: a `teardown_retries`
-    map (native-matrix, native-performance) or per-journey entries
+def _retry_counts(scenario: Dict[str, Any], key: str) -> Dict[str, int]:
+    """Journey -> relaunch count for one scenario record: a `key` map
+    (native-matrix, native-performance) or per-journey entries
     (native-journeys, native-smoke, sync-local)."""
     found: Dict[str, int] = {}
-    direct = scenario.get("teardown_retries")
+    direct = scenario.get(key)
     if isinstance(direct, dict):
         for name, count in direct.items():
             if _finite_number(count) and int(count) > 0:
                 found[str(name)] = int(count)
     for journey in scenario.get("journeys") or []:
-        if isinstance(journey, dict) and _finite_number(
-                journey.get("teardown_retries")) \
-                and int(journey["teardown_retries"]) > 0:
-            found[str(journey.get("journey"))] = int(journey["teardown_retries"])
+        if isinstance(journey, dict) and _finite_number(journey.get(key)) \
+                and int(journey[key]) > 0:
+            found[str(journey.get("journey"))] = int(journey[key])
     return found
+
+
+def _teardown_retries(scenario: Dict[str, Any]) -> Dict[str, int]:
+    """Journey -> relaunch count after every step passed but Anki crashed or
+    hung on quit."""
+    return _retry_counts(scenario, "teardown_retries")
+
+
+def _fatal_retries(scenario: Dict[str, Any]) -> Dict[str, int]:
+    """Journey -> relaunch count after the only failed step was the harness's
+    own `fatal` verdict, which asserts nothing about the product."""
+    return _retry_counts(scenario, "fatal_retries")
+
+
+def _retry_warnings(scenario: Dict[str, Any], rel: str) -> List[str]:
+    """Evidence warnings for every relaunch of a scenario's journeys."""
+    warnings: List[str] = []
+    for key, label in (("teardown_retries", "teardown_retried"),
+                       ("fatal_retries", "fatal_retried")):
+        for journey, count in sorted(_retry_counts(scenario, key).items()):
+            warnings.append(f"{label}:{scenario.get('id')}:{journey}"
+                            f":x{count}:{rel}")
+    return warnings
 
 
 def _wait_for_anki_exit(timeout_s: int = 120) -> None:
@@ -1716,6 +1737,7 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
                             f"observed-runtime-{ctx.get('anki')}-qt{ctx.get('qt')}.json")
     files = [log_name]
     teardown_retries: Dict[str, int] = {}
+    fatal_retries: Dict[str, int] = {}
     if os.path.isfile(report):
         shutil.copyfile(report, os.path.join(out_dir, "native-matrix-report.md"))
         files.append("native-matrix-report.md")
@@ -1730,6 +1752,9 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
             teardown_retries = {
                 str(k): int(v) for k, v in
                 ((payload or {}).get("teardown_retries") or {}).items() if v}
+            fatal_retries = {
+                str(k): int(v) for k, v in
+                ((payload or {}).get("fatal_retries") or {}).items() if v}
         except (OSError, ValueError):
             pass
     assertions = [{"name": "ui_ux_report", "ok": rc == 0,
@@ -1769,6 +1794,8 @@ def _run_native_matrix(ctx: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
               "files": _scenario_files(out_dir, files)}
     if teardown_retries:
         result["teardown_retries"] = teardown_retries
+    if fatal_retries:
+        result["fatal_retries"] = fatal_retries
     return result
 
 
