@@ -85,6 +85,18 @@ same file. Native journeys: `fresh`, `upgrade`, `undo`, `catchup`, `sync`,
   teardown failure fails the journey (players quit Anki too). The first
   attempt's logs are kept (`-attempt1`), and each relaunch is listed as a
   `teardown_retried:<scenario>:<journey>:x<n>:<record>` evidence warning.
+- `fatal` relaunch (since 2026-10-23): when a matrix journey's only failed
+  step is the harness's own `fatal` verdict, `dev/ui_ux_verify.py` relaunches
+  it once, keeps the first attempt's logs under `-attempt1`, and lists a
+  `fatal_retried:<scenario>:<journey>:x<n>:<record>` evidence warning.
+  `fatal` is written only by `_fail()` in `dev/e2e/driver_addon/__init__.py`:
+  the watchdog timed out, a driver call raised, a journey phase was unknown,
+  or a modal dialog blocked the main thread (nightly 39984018007,
+  macos-26.8.1-qt6 `ui-onboarding`: a `TypeError: Failed to fetch` alert
+  became a Qt `QMessageBox` and held the main thread). It is an environment
+  verdict, not a product result. Failed product steps are still never
+  relaunched, `fatal` beside any other failed step is a real failure, and a
+  second `fatal` fails the journey.
 - Performance reps also relaunch once when Anki dies before this launch wrote
   any result (`e2e-assertions.json` whose `run_id` matches `run-id.txt`;
   the previous rep's result files are removed before each launch), as the

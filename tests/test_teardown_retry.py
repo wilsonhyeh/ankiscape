@@ -253,13 +253,13 @@ class MatrixRetryTests(_TmpCase):
         return fake, result
 
     def test_clean_journey_runs_once(self):
-        fake, (rc, _a, _r, retries) = self.run_journey([0])
-        self.assertEqual((fake.calls, rc, retries), (1, 0, 0))
+        fake, (rc, _a, _r, retries, fatal) = self.run_journey([0])
+        self.assertEqual((fake.calls, rc, retries, fatal), (1, 0, 0, 0))
 
     def test_teardown_failure_is_retried_once_and_logs_are_kept(self):
-        fake, (rc, assertions, expected, retries) = self.run_journey(
+        fake, (rc, assertions, expected, retries, fatal) = self.run_journey(
             [TEARDOWN, 0])
-        self.assertEqual((fake.calls, rc, retries), (2, 0, 1))
+        self.assertEqual((fake.calls, rc, retries, fatal), (2, 0, 1, 0))
         self.assertEqual(assertions["run_id"], expected)
         kept = os.path.join(self.out_dir, "ui-sync-stall-attempt1",
                             "anki-stdout.log")
@@ -267,12 +267,13 @@ class MatrixRetryTests(_TmpCase):
             self.assertEqual(fh.read(), "launch 1\n")
 
     def test_second_teardown_failure_is_reported(self):
-        fake, (rc, _a, _r, retries) = self.run_journey([TEARDOWN, TEARDOWN, 0])
-        self.assertEqual((fake.calls, rc, retries), (2, TEARDOWN, 1))
+        fake, (rc, _a, _r, retries, fatal) = self.run_journey(
+            [TEARDOWN, TEARDOWN, 0])
+        self.assertEqual((fake.calls, rc, retries, fatal), (2, TEARDOWN, 1, 0))
 
     def test_a_failed_journey_is_not_retried(self):
-        fake, (rc, _a, _r, retries) = self.run_journey([1, 0])
-        self.assertEqual((fake.calls, rc, retries), (1, 1, 0))
+        fake, (rc, _a, _r, retries, fatal) = self.run_journey([1, 0])
+        self.assertEqual((fake.calls, rc, retries, fatal), (1, 1, 0, 0))
 
 
 class TeardownWarningTests(unittest.TestCase):
