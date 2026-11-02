@@ -156,18 +156,21 @@ Pro/Team/Enterprise only — so until 2026-09-28 the hosted database was the onl
 copy of every account and all online progress. Two independent legs now cover
 it:
 
-- **Local** - `~/Documents/ankiscape-production-backups/` on Wilson's Mac,
-  launchd job `com.wilsonyeh.ankiscape-backup`, daily 12:00 local, 30-day
-  retention. Runs only when that machine is awake.
+- **Local** - `~/backups/ankiscape/` on the Yoga, Wilson's always-on home
+  server, systemd user timer `ankiscape-backup.timer`, daily 12:00 Pacific,
+  30-day retention (since 2026-11-02; before that a launchd job on Wilson's
+  Mac, which failed whenever the lid was closed). A run missed while the Yoga
+  is off happens at the next boot.
 - **Off-site** - private repo `wilsonhyeh/ankiscape-backups`, GitHub Actions
-  `database-backup.yml`, daily 08:17 UTC, 30-day retention.
+  `database-backup.yml`, every 6 hours (:17 past 02/08/14/20 UTC), 30-day
+  retention.
 
 Each run writes schema + data + roles as gzipped SQL with a sha256 manifest and
 a row-count manifest, and **fails on a silently empty dump** rather than passing
 green.
 
 **Read the restore procedure before restoring.** Canonical copy:
-`~/Documents/ankiscape-production-backups/RESTORE.md`. Two things in it are
+`RESTORE.md` in the private repo `wilsonhyeh/ankiscape-backups`. Two things in it are
 load-bearing and were learned by running a drill, not by reading:
 
 - A plain `psql -f data.sql` restore **produces the right row counts and the
